@@ -1,0 +1,73 @@
+tokenised-lse/
+│
+├── docs/
+│   ├── product.md
+│   ├── architecture.md
+│   ├── instructions.md
+│   ├── deployment.md
+│   ├── changelog.md
+│   ├── roadmap.md
+│   ├── glossary.md
+│   └── stages/
+│       ├── stage-plan.md
+│       ├── stage01-TGBP.md
+│       ├── stage02-Listings.md
+│       ├── stage03-PriceFeed.md
+│       ├── stage04-OrderBookDEX.md
+│       ├── stage05-Dividends.md
+│       ├── stage06-FeePool.md
+│       ├── stage07-Aggregator.md
+│       └── stage08-Frontend.md
+│
+├── contracts/
+│   ├── TGBP.sol
+│   ├── EquityToken.sol
+│   ├── EquityTokenFactory.sol
+│   ├── ListingsRegistry.sol
+│   ├── PriceFeed.sol
+│   ├── OrderBookDEX.sol
+│   ├── Dividends.sol
+│   ├── FeePool.sol
+│   └── PortfolioAggregator.sol
+│
+├── backend/
+│   ├── server.js
+│   ├── db.sqlite
+│   └── routes/
+│       ├── admin.js
+│       ├── trade.js
+│       ├── market.js
+│
+├── frontend/
+│   ├── index.html
+│   ├── dashboard.js
+│   ├── market.js
+│   ├── portfolio.js
+│   ├── admin.js
+│   └── style.css
+│
+├── test/
+│   ├── stage1_TGBP.test.js
+│   ├── stage2_Listings.test.js
+│   ├── stage3_PriceFeed.test.js
+│   ├── stage4_OrderBookDEX.test.js
+│   ├── stage5_Dividends.test.js
+│   ├── stage6_FeePool.test.js
+│   ├── stage7_Aggregator.test.js
+│   └── utils/
+│       └── helpers.js
+│
+├── scripts/
+│   ├── deploy_stage1.js
+│   ├── deploy_all.js
+│   └── verify_testnet.js
+│
+├── logs/
+│   ├── approvals.log.md
+│   ├── decisions.log.md
+│   └── issues.log.md
+│
+├── .env.example
+├── hardhat.config.js
+├── package.json
+└── README.md

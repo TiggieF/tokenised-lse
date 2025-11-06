@@ -1,0 +1,27 @@
+# Node / Hardhat
+node_modules/
+cache/
+artifacts/
+coverage/
+
+# Environment
+.env
+.env.local
+*.log
+
+# Python / Conda
+__pycache__/
+*.pyc
+*.pyo
+
+# Database
+backend/db.sqlite
+
+# Frontend builds
+frontend/dist/
+frontend/.vite/
+frontend/.next/
+
+# OS
+.DS_Store
+Thumbs.db
