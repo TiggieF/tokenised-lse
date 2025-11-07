@@ -1,13 +1,27 @@
 tokenised-lse/
 │
+├── .env.example
+├── .gitignore
+├── hardhat.config.js
+├── key.js
+├── package.json
+├── readme.md
+├── repoRoot
+│
+├── contracts/
+│   └── TGBP.sol
+│
+├── diagrams/
+│   └── readme.md
+│
 ├── docs/
-│   ├── product.md
 │   ├── architecture.md
-│   ├── instructions.md
-│   ├── deployment.md
 │   ├── changelog.md
-│   ├── roadmap.md
+│   ├── deployment.md
 │   ├── glossary.md
+│   ├── instructions.md
+│   ├── product.md
+│   ├── roadmap.md
 │   └── stages/
 │       ├── stage-plan.md
 │       ├── stage01-TGBP.md
@@ -19,55 +33,8 @@ tokenised-lse/
 │       ├── stage07-Aggregator.md
 │       └── stage08-Frontend.md
 │
-├── contracts/
-│   ├── TGBP.sol
-│   ├── EquityToken.sol
-│   ├── EquityTokenFactory.sol
-│   ├── ListingsRegistry.sol
-│   ├── PriceFeed.sol
-│   ├── OrderBookDEX.sol
-│   ├── Dividends.sol
-│   ├── FeePool.sol
-│   └── PortfolioAggregator.sol
-│
-├── backend/
-│   ├── server.js
-│   ├── db.sqlite
-│   └── routes/
-│       ├── admin.js
-│       ├── trade.js
-│       ├── market.js
-│
-├── frontend/
-│   ├── index.html
-│   ├── dashboard.js
-│   ├── market.js
-│   ├── portfolio.js
-│   ├── admin.js
-│   └── style.css
-│
-├── test/
-│   ├── stage1_TGBP.test.js
-│   ├── stage2_Listings.test.js
-│   ├── stage3_PriceFeed.test.js
-│   ├── stage4_OrderBookDEX.test.js
-│   ├── stage5_Dividends.test.js
-│   ├── stage6_FeePool.test.js
-│   ├── stage7_Aggregator.test.js
-│   └── utils/
-│       └── helpers.js
-│
 ├── scripts/
-│   ├── deploy_stage1.js
-│   ├── deploy_all.js
-│   └── verify_testnet.js
+│   └── deploy_stage1.js
 │
-├── logs/
-│   ├── approvals.log.md
-│   ├── decisions.log.md
-│   └── issues.log.md
-│
-├── .env.example
-├── hardhat.config.js
-├── package.json
-└── README.md
+└── test/
+    └── stage1_TGBP.test.js
