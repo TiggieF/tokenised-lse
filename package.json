@@ -1,0 +1,18 @@
+{
+  "name": "tokenised-lse",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tokenised LSE exchange prototype smart contracts and tooling.",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "coverage": "hardhat coverage"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.20.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.2"
+  }
+}
