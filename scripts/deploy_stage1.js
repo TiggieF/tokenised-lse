@@ -12,7 +12,8 @@ async function main() {
   const [deployer] = await ethers.getSigners();
 
   console.log("Deploying TGBP with account:", deployer.address);
-  console.log("Account balance:", (await deployer.getBalance()).toString());
+  const balance = await deployer.provider.getBalance(deployer.address);
+  console.log("Account balance:", balance.toString());
 
   const TGBP = await ethers.getContractFactory("TGBP");
   const tgbp = await TGBP.deploy();

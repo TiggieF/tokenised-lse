@@ -66,7 +66,7 @@ describe("Stage 1 — TGBP token", function () {
 
     it("enforces the global cap", async function () {
       const { token, admin } = await loadFixture(deployTGBPFixture);
-      const nearCap = MAX_SUPPLY - AIRDROP_AMOUNT;
+      const nearCap = MAX_SUPPLY - AIRDROP_AMOUNT + 1n;
 
       await token.connect(admin).mint(admin.address, nearCap);
 
