@@ -12,7 +12,8 @@ Implement a capped ERC-20 stable token “TGBP” serving as the base trading cu
   * Defines roles: DEFAULT_ADMIN_ROLE, MINTER_ROLE
   * Implements `airdropOnce()` mapping to prevent repeat claims
   * Fixed cap set in constructor
-* `scripts/deploy_stage1.js`
+* `scripts/stage1/deploy.js`
+* `scripts/stage1/instructions.md`
 * `test/stage1_TGBP.test.js`
 
 ## Tests

@@ -34,7 +34,9 @@ tokenised-lse/
 │       └── stage08-Frontend.md
 │
 ├── scripts/
-│   └── deploy_stage1.js
+│   └── stage1/
+│       ├── deploy.js
+│       └── instructions.md
 │
 └── test/
     └── stage1_TGBP.test.js
