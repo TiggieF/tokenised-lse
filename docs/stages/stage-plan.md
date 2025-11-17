@@ -13,7 +13,8 @@ Implement the base ERC-20 TGBP stable token with capped supply, role-based minti
 **Key Files:**
 
 * `contracts/TGBP.sol`
-* `scripts/deploy_stage1.js`
+* `scripts/stage1/deploy.js`
+* `scripts/stage1/instructions.md`
 * `test/stage1_TGBP.test.js`
 
 **Approval Criteria:**

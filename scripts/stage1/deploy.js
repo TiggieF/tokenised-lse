@@ -1,4 +1,4 @@
-// scripts/deploy_stage1.js
+// scripts/stage1/deploy.js
 // -----------------------------------------------------------------------------
 // This script deploys the TGBP token to the currently selected Hardhat network.
 // It provides verbose logging so that team members who are new to Hardhat can
