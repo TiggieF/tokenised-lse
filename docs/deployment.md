@@ -66,7 +66,7 @@ Copy code
 npx hardhat run scripts/deploy_all.js --network localhost
 This script deploys, in order:
 
-TGBP.sol
+TToken.sol
 
 EquityTokenFactory.sol
 
@@ -87,8 +87,8 @@ You should see console logs similar to:
 
 vbnet
 Copy code
-Deploying TGBP...
-TGBP deployed to: 0x1234...
+Deploying TToken...
+TToken deployed to: 0x1234...
 EquityTokenFactory deployed to: 0xabcd...
 Deployment complete ✅
 Copy these contract addresses — the frontend will read them from the backend or JSON output.
@@ -134,8 +134,8 @@ Chain ID: 31337
 Currency Symbol: ETH
 Connect to the site via WalletConnect or browser extension.
 
-7.2 Verify TGBP Airdrop
-On first connect, your wallet receives 1,000,000 TGBP automatically from the backend.
+7.2 Verify TToken Airdrop
+On first connect, your wallet receives 1,000,000 TToken automatically from the backend.
 
 7.3 Try a Trade
 Admin lists the top 10 companies (through admin dashboard or backend API).
@@ -156,7 +156,7 @@ Each listed stock token appears under “Market”.
 
 PriceFeed updates show “Fresh” (timestamp < 60s).
 
-FeePool rewards 3 TGBP every 3 minutes to top trader.
+FeePool rewards 3 TToken every 3 minutes to top trader.
 
 Dividend declaration and claim function as expected.
 

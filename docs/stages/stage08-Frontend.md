@@ -18,7 +18,7 @@ Implement full user interface matching Yahoo Finance style and connect it to con
 
 ## Features
 
-* Auto-airdrop 1M TGBP on first wallet connect
+* Auto-airdrop 1M TToken on first wallet connect
 * Partial order fills and live order book
 * PriceFeed-driven chart with weekday labels
 * Summary / Holders / Profile tabs

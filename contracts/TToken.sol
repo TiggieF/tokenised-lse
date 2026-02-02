@@ -5,8 +5,8 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
- * @title TGBP
- * @notice Tokenised Great British Pound (TGBP) stable token used as the base
+ * @title TToken
+ * @notice Tokenised Great British Pound (TToken) stable token used as the base
  *         settlement asset for the Tokenised LSE exchange.  The contract is a
  *         standard ERC-20 token with a hard supply cap and role-based minting
  *         controls.  In addition to regular ERC-20 functionality, it provides
@@ -20,12 +20,12 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
  *             both the DEFAULT_ADMIN_ROLE (full permissions) and a dedicated
  *             MINTER_ROLE for operational minting.
  *           - `airdropOnce()` ensures each wallet can only claim the 1,000,000
- *             TGBP signup reward a single time.
+ *             TToken signup reward a single time.
  *
  *         The contract is intentionally verbose in its inline documentation to
  *         help readers who are new to Solidity follow the control flow.
  */
-contract TGBP is ERC20, AccessControl {
+contract TToken is ERC20, AccessControl {
     /// @notice Role identifier used to control privileged minting actions.
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
@@ -51,7 +51,7 @@ contract TGBP is ERC20, AccessControl {
      *      and the initial minter.  We purposefully do not mint any supply in
      *      the constructor so that governance can decide when to issue tokens.
      */
-    constructor() ERC20("Tokenised GBP", "TGBP") {
+    constructor() ERC20("Tokenised dollar", "TToken") {
         // Grant the deployer the admin role so they can manage other roles.
         _grantRole(DEFAULT_ADMIN_ROLE, _msgSender());
         // The deployer also receives the minter role for operational minting.
@@ -59,7 +59,7 @@ contract TGBP is ERC20, AccessControl {
     }
 
     /**
-     * @notice Mints new TGBP tokens to the supplied address.  Access is limited
+     * @notice Mints new TToken tokens to the supplied address.  Access is limited
      *         to accounts that hold the {MINTER_ROLE}.
      * @param to Recipient of the newly minted tokens.
      * @param amount Number of tokens (including decimals) to create.
@@ -80,7 +80,7 @@ contract TGBP is ERC20, AccessControl {
      */
     function airdropOnce() external returns (uint256 amount) {
         address caller = _msgSender();
-        require(!_airdropClaimed[caller], "TGBP:Airdrop already claimed");
+        require(!_airdropClaimed[caller], "TToken:Airdrop already claimed");
 
         _airdropClaimed[caller] = true;
         amount = AIRDROP_AMOUNT;
@@ -104,8 +104,8 @@ contract TGBP is ERC20, AccessControl {
      *      delegating to the standard ERC-20 `_mint` implementation.
      */
     function _mintWithCap(address to, uint256 amount) internal {
-        require(amount > 0, "TGBP: amount must be > 0");
-        require(totalSupply() + amount <= MAX_SUPPLY, "TGBP: cap exceeded");
+        require(amount > 0, "TToken: amount must be > 0");
+        require(totalSupply() + amount <= MAX_SUPPLY, "TToken: cap exceeded");
         _mint(to, amount);
     }
 }

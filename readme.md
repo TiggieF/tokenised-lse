@@ -1,16 +1,16 @@
 # Tokenised LSE DEX
 
 ## Overview
-A blockchain prototype that tokenises UK-listed equities and enables on-chain trading using TGBP, a capped stable token.  
+A blockchain prototype that tokenises UK-listed equities and enables on-chain trading using TToken, a capped stable token.  
 Built on EVM (Hardhat local → Sepolia testnet), with full on-chain accounting, rewards, and dividends.
 
 ---
 
 ## Features
 - **On-chain order book** – Limit orders, partial fills, price-time priority.  
-- **Stable token (TGBP)** – Capped supply; airdrop 1 M TGBP per wallet.  
-- **Rewards** – Top trader per 3-minute epoch earns 3 TGBP.  
-- **Dividends** – Admin-declared payouts in TGBP.  
+- **Stable token (TToken)** – Capped supply; airdrop 1 M TToken per wallet.  
+- **Rewards** – Top trader per 3-minute epoch earns 3 TToken.  
+- **Dividends** – Admin-declared payouts in TToken.  
 - **Analytics** – Portfolio composition, Fresh/Stale prices, charts.  
 - **Wallets** – Coinbase / MetaMask integration for trading.  
 

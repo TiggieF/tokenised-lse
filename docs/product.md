@@ -3,7 +3,7 @@
 ## 1. Vision  
 Create a decentralised, on-chain trading prototype for UK-listed equities, built on an EVM-compatible blockchain.  
 Each listed company is represented by its own ERC-20 “EquityToken”.  
-Users trade these tokens using the stable currency “TGBP”.  
+Users trade these tokens using the stable currency “TToken”.  
 Full orderbook, trades, balances, rewards, dividends, listings—all visible on‐chain.  
 The UI presents both trading and analytics (portfolio breakdown, holder data, company profile).  
 This is a **research prototype**, not a live brokerage.
@@ -15,25 +15,25 @@ This is a **research prototype**, not a live brokerage.
 
 ## 3. Target Users & Personas  
 - **Admin**: Lists companies, mints stock tokens, sets prices, declares dividends, funds reward pool.  
-- **Trader**: Connects wallet (non-custodial), receives initial TGBP airdrop, places limit orders, competes for rewards, claims dividends.  
+- **Trader**: Connects wallet (non-custodial), receives initial TToken airdrop, places limit orders, competes for rewards, claims dividends.  
 - **Observer / Marker**: Examines on-chain transparency, solidity design, UI clarity and analytics features.
 
 ## 4. Key Features  
-- TGBP token: capped supply (3×10^50 units), 18 decimals, airdrop of 1,000,000 to each user wallet once.  
+- TToken token: capped supply (3×10^50 units), 18 decimals, airdrop of 1,000,000 to each user wallet once.  
 - EquityTokenFactory: Deploys per-company ERC-20 tokens.  
 - ListingsRegistry: Maintains list of symbols → token addresses.  
 - PriceFeed: Admin-only single source sets price in pence and timestamp; UI shows “Fresh” or “Stale”.  
 - OrderBookDEX: Limit orders only (no IOC), partial fills allowed, taker pays 0.0001% fee (1 ppm).  
-- FeePool: Tracks trading volume every 3-minute epoch; top trader earns 3 TGBP.  
-- Dividends: Admin declares payout in TGBP; token holders claim proportionally via snapshot.  
+- FeePool: Tracks trading volume every 3-minute epoch; top trader earns 3 TToken.  
+- Dividends: Admin declares payout in TToken; token holders claim proportionally via snapshot.  
 - Portfolio Aggregator & UI: Portfolio value, composition, charts, holders’ breakdown, company profile.
 
 ## 5. Frozen Rules (Core Constraints)  
 - Order type: Limit only. Partial fills allowed. Immediate or Cancel (IOC) orders **not** allowed.  
 - Protocol fee fixed at 0.0001% (1 part per million), adjustable only by admin role.  
-- Reward: 3 TGBP per epoch (3 minutes) earned by highest-volume trader; if no trades, no reward.  
-- Airdrop: One-time only; each wallet receives 1,000,000 TGBP on first connect.  
-- Max supply of TGBP: 3 × 10^50 units (18 decimals).  
+- Reward: 3 TToken per epoch (3 minutes) earned by highest-volume trader; if no trades, no reward.  
+- Airdrop: One-time only; each wallet receives 1,000,000 TToken on first connect.  
+- Max supply of TToken: 3 × 10^50 units (18 decimals).  
 - On-chain canonical truth for: trading ledger, token balances, orderbook state, rewards, dividends, listings.  
 - Oracle: Admin (or script) updates price on-chain; no off-chain matching or Merkle proofs in MVP.  
 - Market hours indicator (Fresh/Stale) shown in UI (08:00–16:30 Europe/London), but trading always possible on-chain.

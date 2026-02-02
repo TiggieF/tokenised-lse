@@ -1,12 +1,12 @@
-# Stage 1 — TGBP Token
+# Stage 1 — TToken Token
 
 ## Objective
 
-Implement a capped ERC-20 stable token “TGBP” serving as the base trading currency.
+Implement a capped ERC-20 stable token “TToken” serving as the base trading currency.
 
 ## Deliverables
 
-* `contracts/TGBP.sol`
+* `contracts/TToken.sol`
 
   * Inherits OpenZeppelin ERC20 and AccessControl
   * Defines roles: DEFAULT_ADMIN_ROLE, MINTER_ROLE
@@ -14,7 +14,7 @@ Implement a capped ERC-20 stable token “TGBP” serving as the base trading cu
   * Fixed cap set in constructor
 * `scripts/stage1/deploy.js`
 * `scripts/stage1/instructions.md`
-* `test/stage1_TGBP.test.js`
+* `test/stage1_TToken.test.js`
 
 ## Tests
 

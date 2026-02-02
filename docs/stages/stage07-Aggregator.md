@@ -2,7 +2,7 @@
 
 ## Objective
 
-Aggregate portfolio values across TGBP and EquityTokens.
+Aggregate portfolio values across TToken and EquityTokens.
 
 ## Deliverables
 
@@ -10,7 +10,7 @@ Aggregate portfolio values across TGBP and EquityTokens.
 
   * Functions to return user balances and valuations
   * Pulls price data from `PriceFeed`
-  * Returns total value in TGBP equivalent
+  * Returns total value in TToken equivalent
 
 ## Tests
 

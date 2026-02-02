@@ -9,7 +9,7 @@ tokenised-lse/
 ├── repoRoot
 │
 ├── contracts/
-│   └── TGBP.sol
+│   └── TToken.sol
 │
 ├── diagrams/
 │   └── readme.md
@@ -24,7 +24,7 @@ tokenised-lse/
 │   ├── roadmap.md
 │   └── stages/
 │       ├── stage-plan.md
-│       ├── stage01-TGBP.md
+│       ├── stage01-TToken.md
 │       ├── stage02-Listings.md
 │       ├── stage03-PriceFeed.md
 │       ├── stage04-OrderBookDEX.md
@@ -39,4 +39,4 @@ tokenised-lse/
 │       └── instructions.md
 │
 └── test/
-    └── stage1_TGBP.test.js
+    └── stage1_TToken.test.js

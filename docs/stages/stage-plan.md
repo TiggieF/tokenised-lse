@@ -5,17 +5,17 @@ Advancement to the next stage requires **approval** and **passing all defined te
 
 ---
 
-### Stage 1 — TGBP Token
+### Stage 1 — TToken Token
 
 **Objective:**
-Implement the base ERC-20 TGBP stable token with capped supply, role-based minting, and one-time airdrop per wallet.
+Implement the base ERC-20 TToken stable token with capped supply, role-based minting, and one-time airdrop per wallet.
 
 **Key Files:**
 
-* `contracts/TGBP.sol`
+* `contracts/TToken.sol`
 * `scripts/stage1/deploy.js`
 * `scripts/stage1/instructions.md`
-* `test/stage1_TGBP.test.js`
+* `test/stage1_TToken.test.js`
 
 **Approval Criteria:**
 
@@ -66,7 +66,7 @@ Build an on-chain oracle to store and update stock prices in pence, controlled b
 ### Stage 4 — OrderBookDEX
 
 **Objective:**
-Develop the on-chain decentralised exchange supporting limit orders, partial fills, and cancellations, using TGBP as the settlement token.
+Develop the on-chain decentralised exchange supporting limit orders, partial fills, and cancellations, using TToken (18dp) as the settlement token.
 
 **Key Files:**
 
@@ -77,7 +77,7 @@ Develop the on-chain decentralised exchange supporting limit orders, partial fil
 
 * Partial fills function correctly
 * Order matching maintains price-time priority
-* Fee (1 ppm) charged to taker only
+* No trading fee in Stage 4 (rewards handled in Stage 6)
 * Balances conserved before and after trades
 
 ---
@@ -85,7 +85,7 @@ Develop the on-chain decentralised exchange supporting limit orders, partial fil
 ### Stage 5 — Dividends
 
 **Objective:**
-Allow admin to declare dividends for listed stocks, distributing TGBP proportionally to token holders.
+Allow admin to declare dividends for listed stocks, distributing TToken proportionally to token holders.
 
 **Key Files:**
 
@@ -104,7 +104,7 @@ Allow admin to declare dividends for listed stocks, distributing TGBP proportion
 ### Stage 6 — FeePool Rewards
 
 **Objective:**
-Track per-epoch trading volumes and reward the top trader with 3 TGBP every 3 minutes.
+Track per-epoch trading volumes and reward the top trader with 1 TToken every 90 seconds.
 
 **Key Files:**
 
