@@ -67,6 +67,7 @@ Components:
 - Recent fills
 - Oracle‑buy widget (spend exact TToken)
 - Limit order widget (optional)
+- Auto‑trade panel (create/cancel auto‑buy or auto‑sell rules)
 
 ### 5) **Portfolio**
 Purpose: holdings + valuation.
@@ -112,6 +113,8 @@ Components:
 - `placeLimitOrder(...)`
 - `buyExactQuoteAtOracle(...)`
 - `getBuyOrders(...)` / `getSellOrders(...)`
+**Auto‑Trade (backend)**
+- Create / list / cancel auto‑trade rules (see Stage 9)
 
 **PortfolioAggregator**
 - `getHoldings(...)`
@@ -131,11 +134,12 @@ Components:
 
 ## 8.4 Backend (minimal)
 
-Backend is optional for UI but recommended for:
+Backend is optional for UI but required for:
 - PriceFeed updater (oracle)
 - Award finalizer (cron)
+- Auto‑buy / auto‑sell triggers
 
-Stage 8 does **not** require backend development unless you want automation.
+Stage 8 expects Stage 9 to provide these services.
 
 ---
 
