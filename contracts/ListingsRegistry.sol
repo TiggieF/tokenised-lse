@@ -22,6 +22,7 @@ contract ListingsRegistry is AccessControl {
     mapping(bytes32 => Listing) private _listings;
     mapping(address => bool) public isTokenListed;
     mapping(address => string) public tokenToSymbol;
+    string[] private _listedSymbols;
 
     event StockListed(string indexed symbol, address tokenAddr);
 
@@ -50,6 +51,7 @@ contract ListingsRegistry is AccessControl {
         });
         isTokenListed[tokenAddr] = true;
         tokenToSymbol[tokenAddr] = symbol;
+        _listedSymbols.push(symbol);
 
         emit StockListed(symbol, tokenAddr);
     }
@@ -64,6 +66,26 @@ contract ListingsRegistry is AccessControl {
 
     function getSymbolByToken(address token) external view returns (string memory) {
         return tokenToSymbol[token];
+    }
+
+    function getAllSymbols() external view returns (string[] memory) {
+        return _listedSymbols;
+    }
+
+    function getSymbols(uint256 offset, uint256 limit) external view returns (string[] memory) {
+        uint256 total = _listedSymbols.length;
+        if (offset >= total) {
+            return new string[](0);
+        }
+        uint256 end = offset + limit;
+        if (end > total) {
+            end = total;
+        }
+        string[] memory slice = new string[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            slice[i - offset] = _listedSymbols[i];
+        }
+        return slice;
     }
 
     /**
