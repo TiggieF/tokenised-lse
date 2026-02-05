@@ -62,7 +62,7 @@ describe("Stage 5 — Dividends", function () {
     await dividends.connect(alice).claimDividend(await equity.getAddress(), 1);
 
     await expect(dividends.connect(alice).claimDividend(await equity.getAddress(), 1))
-      .to.be.revertedWith("Dividends: already claimed");
+      .to.be.revertedWith("dividends: already claimed");
   });
 
   it("handles zero balance gracefully", async function () {
@@ -71,7 +71,7 @@ describe("Stage 5 — Dividends", function () {
     await dividends.connect(admin).declareDividendPerShare(await equity.getAddress(), ONE_TTOKEN);
 
     await expect(dividends.connect(carol).claimDividend(await equity.getAddress(), 1))
-      .to.be.revertedWith("Dividends: no balance");
+      .to.be.revertedWith("dividends: no balance");
   });
 
   it("enforces minimum dividend per share", async function () {
@@ -79,6 +79,6 @@ describe("Stage 5 — Dividends", function () {
 
     await expect(
       dividends.connect(admin).declareDividendPerShare(await equity.getAddress(), 10n ** 15n)
-    ).to.be.revertedWith("Dividends: div per share too small");
+    ).to.be.revertedWith("dividends: div per share too small");
   });
 });

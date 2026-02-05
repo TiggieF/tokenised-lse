@@ -4,14 +4,35 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IPriceFeed {
-    function getPrice(string memory symbol) external view returns (uint256 priceCents, uint256 timestamp);
-    function isFresh(string memory symbol) external view returns (bool);
+    function getPrice(string memory symbol)
+        external
+        view
+        returns (
+            uint256 priceCents,
+            uint256 timestamp
+        );
+
+    function isFresh(string memory symbol)
+        external
+        view
+        returns (bool);
 }
 
 interface IListingsRegistry {
-    function getAllSymbols() external view returns (string[] memory);
-    function getSymbols(uint256 offset, uint256 limit) external view returns (string[] memory);
-    function getListing(string memory symbol) external view returns (address);
+    function getAllSymbols()
+        external
+        view
+        returns (string[] memory);
+
+    function getSymbols(uint256 offset, uint256 limit)
+        external
+        view
+        returns (string[] memory);
+
+    function getListing(string memory symbol)
+        external
+        view
+        returns (address);
 }
 
 /**
@@ -32,9 +53,9 @@ contract PortfolioAggregator {
     IPriceFeed public immutable priceFeed;
 
     constructor(address ttokenAddress, address registryAddress, address priceFeedAddress) {
-        require(ttokenAddress != address(0), "Aggregator: ttoken is zero");
-        require(registryAddress != address(0), "Aggregator: registry is zero");
-        require(priceFeedAddress != address(0), "Aggregator: priceFeed is zero");
+        require(ttokenAddress != address(0), "aggregator: ttoken is zero");
+        require(registryAddress != address(0), "aggregator: registry is zero");
+        require(priceFeedAddress != address(0), "aggregator: pricefeed is zero");
         ttoken = IERC20(ttokenAddress);
         registry = IListingsRegistry(registryAddress);
         priceFeed = IPriceFeed(priceFeedAddress);
@@ -46,7 +67,7 @@ contract PortfolioAggregator {
 
     function getHoldings(address user) external view returns (Holding[] memory) {
         string[] memory symbols = registry.getAllSymbols();
-        return _buildHoldings(user, symbols);
+        return buildHoldings(user, symbols);
     }
 
     function getHoldingsSlice(address user, uint256 offset, uint256 limit)
@@ -55,7 +76,7 @@ contract PortfolioAggregator {
         returns (Holding[] memory)
     {
         string[] memory symbols = registry.getSymbols(offset, limit);
-        return _buildHoldings(user, symbols);
+        return buildHoldings(user, symbols);
     }
 
     function getTotalValue(address user) external view returns (uint256 totalWei) {
@@ -104,7 +125,7 @@ contract PortfolioAggregator {
         totalValueWei = cashValueWei + stockValueWei;
     }
 
-    function _buildHoldings(address user, string[] memory symbols)
+    function buildHoldings(address user, string[] memory symbols)
         internal
         view
         returns (Holding[] memory)
@@ -112,7 +133,10 @@ contract PortfolioAggregator {
         Holding[] memory holdings = new Holding[](symbols.length);
         for (uint256 i = 0; i < symbols.length; i++) {
             address token = registry.getListing(symbols[i]);
-            uint256 balance = token == address(0) ? 0 : IERC20(token).balanceOf(user);
+            uint256 balance = 0;
+            if (token != address(0)) {
+                balance = IERC20(token).balanceOf(user);
+            }
             uint256 priceCents = 0;
             uint256 valueWei = 0;
             if (token != address(0) && balance > 0) {

@@ -58,7 +58,7 @@ describe("Stage 2 — Listings & Factory", function () {
     await factory.connect(admin).createEquityToken(symbol, name);
 
     await expect(factory.connect(admin).createEquityToken(symbol, "Other Name"))
-      .to.be.revertedWith("ListingsRegistry: symbol already listed");
+      .to.be.revertedWith("listingsregistry: symbol already listed");
   });
 
   it("registry resolves addresses", async function () {
@@ -110,7 +110,7 @@ describe("Stage 2 — Listings & Factory", function () {
     const { admin, factory } = await loadFixture(deployStage2Fixture);
 
     await expect(factory.connect(admin).createEquityToken("Acme", "Acme Corp"))
-      .to.be.revertedWith("ListingsRegistry: symbol must be A-Z or 0-9");
+      .to.be.revertedWith("listingsregistry: symbol must be upper-case or 0-9");
   });
 
   it("allows digits in symbols", async function () {

@@ -109,7 +109,7 @@ describe("Stage 5.5 — buyExactQuote", function () {
 
     await expect(
       dex.connect(taker).buyExactQuote(await equity.getAddress(), budget, price)
-    ).to.be.revertedWith("OrderBookDEX: no fill");
+    ).to.be.revertedWith("orderbook: no fill");
   });
 
   it("reverts when no eligible sells", async function () {
@@ -125,6 +125,6 @@ describe("Stage 5.5 — buyExactQuote", function () {
 
     await expect(
       dex.connect(taker).buyExactQuote(await equity.getAddress(), ONE_SHARE, 10_000n)
-    ).to.be.revertedWith("OrderBookDEX: no fill");
+    ).to.be.revertedWith("orderbook: no fill");
   });
 });

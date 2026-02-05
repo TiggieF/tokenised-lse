@@ -8,16 +8,30 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IPriceFeed {
-    function getPrice(string memory symbol) external view returns (uint256 priceCents, uint256 timestamp);
-    function isFresh(string memory symbol) external view returns (bool);
+    function getPrice(string memory symbol)
+        external
+        view
+        returns (
+            uint256 priceCents,
+            uint256 timestamp
+        );
+
+    function isFresh(string memory symbol)
+        external
+        view
+        returns (bool);
 }
 
 interface IListingsRegistry {
-    function getSymbolByToken(address token) external view returns (string memory);
+    function getSymbolByToken(address token)
+        external
+        view
+        returns (string memory);
 }
 
 interface IAward {
-    function recordTrade(address trader, uint256 quoteVolume) external;
+    function recordTrade(address trader, uint256 quoteVolume)
+        external;
 }
 
 /**
@@ -97,9 +111,9 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
     event OrderCancelled(uint256 indexed id, address indexed trader, uint256 remainingRefunded);
 
     constructor(address ttokenAddress, address registryAddress, address priceFeedAddress) {
-        require(ttokenAddress != address(0), "OrderBookDEX: ttoken is zero");
-        require(registryAddress != address(0), "OrderBookDEX: registry is zero");
-        require(priceFeedAddress != address(0), "OrderBookDEX: priceFeed is zero");
+        require(ttokenAddress != address(0), "orderbook: ttoken is zero");
+        require(registryAddress != address(0), "orderbook: registry is zero");
+        require(priceFeedAddress != address(0), "orderbook: pricefeed is zero");
 
         ttoken = IERC20(ttokenAddress);
         registry = IListingsRegistry(registryAddress);
@@ -119,12 +133,12 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         uint256 price,
         uint256 qty
     ) external nonReentrant returns (uint256 orderId) {
-        require(equityToken != address(0), "OrderBookDEX: equityToken is zero");
-        require(price > 0, "OrderBookDEX: price must be > 0");
-        require(qty > 0, "OrderBookDEX: qty must be > 0");
+        require(equityToken != address(0), "orderbook: equity token is zero");
+        require(price > 0, "orderbook: price must be > 0");
+        require(qty > 0, "orderbook: qty must be > 0");
 
         if (side == Side.BUY) {
-            uint256 quote = _quoteAmount(qty, price);
+            uint256 quote = quoteAmount(qty, price);
             ttoken.safeTransferFrom(msg.sender, address(this), quote);
         } else {
             IERC20(equityToken).safeTransferFrom(msg.sender, address(this), qty);
@@ -144,7 +158,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
 
         emit OrderPlaced(orderId, msg.sender, equityToken, side, price, qty);
 
-        _matchOrder(equityToken, side, orderId);
+        matchOrder(equityToken, side, orderId);
     }
 
     function buyExactQuote(address equityToken, uint256 quoteWei, uint256 maxPriceCents)
@@ -152,7 +166,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 qtyBoughtWei, uint256 quoteSpentWei)
     {
-        (qtyBoughtWei, quoteSpentWei) = _buyExactQuoteInternal(
+        (qtyBoughtWei, quoteSpentWei) = buyExactQuoteInternal(
             msg.sender,
             equityToken,
             quoteWei,
@@ -175,18 +189,18 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
             uint256 oracleMaxPriceCents
         )
     {
-        require(maxSlippageBps <= 5000, "OrderBookDEX: slippage too high");
+        require(maxSlippageBps <= 5000, "orderbook: slippage too high");
 
         string memory symbol = registry.getSymbolByToken(equityToken);
-        require(bytes(symbol).length > 0, "OrderBookDEX: unknown token");
-        require(priceFeed.isFresh(symbol), "OrderBookDEX: stale price");
+        require(bytes(symbol).length > 0, "orderbook: unknown token");
+        require(priceFeed.isFresh(symbol), "orderbook: stale price");
 
         (oraclePriceCents, ) = priceFeed.getPrice(symbol);
-        require(oraclePriceCents > 0, "OrderBookDEX: bad price");
+        require(oraclePriceCents > 0, "orderbook: bad price");
 
         oracleMaxPriceCents = Math.mulDiv(oraclePriceCents, 10000 + maxSlippageBps, 10000);
 
-        (qtyBoughtWei, quoteSpentWei) = _buyExactQuoteInternal(
+        (qtyBoughtWei, quoteSpentWei) = buyExactQuoteInternal(
             msg.sender,
             equityToken,
             quoteWei,
@@ -206,22 +220,22 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         );
     }
 
-    function _buyExactQuoteInternal(
+    function buyExactQuoteInternal(
         address taker,
         address equityToken,
         uint256 quoteWei,
         uint256 maxPriceCents
     ) internal returns (uint256 qtyBoughtWei, uint256 quoteSpentWei) {
-        require(equityToken != address(0), "OrderBookDEX: equityToken is zero");
-        require(quoteWei > 0, "OrderBookDEX: quote must be > 0");
-        require(maxPriceCents > 0, "OrderBookDEX: max price must be > 0");
+        require(equityToken != address(0), "orderbook: equity token is zero");
+        require(quoteWei > 0, "orderbook: quote must be > 0");
+        require(maxPriceCents > 0, "orderbook: max price must be > 0");
 
         ttoken.safeTransferFrom(taker, address(this), quoteWei);
 
         uint256 remainingQuote = quoteWei;
 
         while (remainingQuote > 0) {
-            (bool found, uint256 index) = _findBestSell(equityToken, maxPriceCents);
+            (bool found, uint256 index) = findBestSell(equityToken, maxPriceCents);
             if (!found) {
                 break;
             }
@@ -232,8 +246,11 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
                 break;
             }
 
-            uint256 fillQty = maxQtyWei < maker.remaining ? maxQtyWei : maker.remaining;
-            uint256 tradeQuote = _quoteAmount(fillQty, maker.price);
+            uint256 fillQty = maxQtyWei;
+            if (maker.remaining < fillQty) {
+                fillQty = maker.remaining;
+            }
+            uint256 tradeQuote = quoteAmount(fillQty, maker.price);
 
             remainingQuote -= tradeQuote;
             qtyBoughtWei += fillQty;
@@ -245,14 +262,14 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
 
             IERC20(equityToken).safeTransfer(taker, fillQty);
             ttoken.safeTransfer(maker.trader, tradeQuote);
-            _recordTrade(maker.trader, tradeQuote);
-            _recordTrade(taker, tradeQuote);
+            recordTrade(maker.trader, tradeQuote);
+            recordTrade(taker, tradeQuote);
 
             emit OrderFilled(maker.id, 0, equityToken, maker.price, fillQty);
         }
 
         if (qtyBoughtWei == 0) {
-            revert("OrderBookDEX: no fill");
+            revert("orderbook: no fill");
         }
 
         quoteSpentWei = quoteWei - remainingQuote;
@@ -263,17 +280,17 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
 
     function cancelOrder(uint256 orderId) external nonReentrant {
         OrderRef memory ref = orderRefById[orderId];
-        require(ref.equityToken != address(0), "OrderBookDEX: order not found");
-        Order storage order = _getOrderStorage(ref);
+        require(ref.equityToken != address(0), "orderbook: order not found");
+        Order storage order = getOrderStorage(ref);
 
-        require(order.active, "OrderBookDEX: order inactive");
-        require(order.trader == msg.sender, "OrderBookDEX: not order owner");
+        require(order.active, "orderbook: order inactive");
+        require(order.trader == msg.sender, "orderbook: not order owner");
 
         order.active = false;
         uint256 refundAmount;
 
         if (order.side == Side.BUY) {
-            uint256 quote = _quoteAmount(order.remaining, order.price);
+            uint256 quote = quoteAmount(order.remaining, order.price);
             refundAmount = quote;
             ttoken.safeTransfer(order.trader, refundAmount);
         } else {
@@ -293,36 +310,39 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         return sellOrders[equityToken];
     }
 
-    function _matchOrder(address equityToken, Side takerSide, uint256 takerId) internal {
-        Order storage taker = _getOrderStorage(orderRefById[takerId]);
+    function matchOrder(address equityToken, Side takerSide, uint256 takerId) internal {
+        Order storage taker = getOrderStorage(orderRefById[takerId]);
         if (!taker.active) {
             return;
         }
 
         if (takerSide == Side.BUY) {
-            _matchBuy(equityToken, taker);
+            matchBuy(equityToken, taker);
         } else {
-            _matchSell(equityToken, taker);
+            matchSell(equityToken, taker);
         }
     }
 
-    function _matchBuy(address equityToken, Order storage taker) internal {
+    function matchBuy(address equityToken, Order storage taker) internal {
         while (taker.remaining > 0) {
-            (bool found, uint256 index) = _findBestSell(equityToken, taker.price);
+            (bool found, uint256 index) = findBestSell(equityToken, taker.price);
             if (!found) {
                 break;
             }
             Order storage maker = sellOrders[equityToken][index];
-            uint256 fillQty = taker.remaining < maker.remaining ? taker.remaining : maker.remaining;
-            uint256 tradeValue = _quoteAmount(fillQty, maker.price);
+            uint256 fillQty = taker.remaining;
+            if (maker.remaining < fillQty) {
+                fillQty = maker.remaining;
+            }
+            uint256 tradeValue = quoteAmount(fillQty, maker.price);
 
-            uint256 escrowQuote = _quoteAmount(fillQty, taker.price);
+            uint256 escrowQuote = quoteAmount(fillQty, taker.price);
             uint256 refund = escrowQuote - tradeValue;
 
             IERC20(equityToken).safeTransfer(taker.trader, fillQty);
             ttoken.safeTransfer(maker.trader, tradeValue);
-            _recordTrade(maker.trader, tradeValue);
-            _recordTrade(taker.trader, tradeValue);
+            recordTrade(maker.trader, tradeValue);
+            recordTrade(taker.trader, tradeValue);
             if (refund > 0) {
                 ttoken.safeTransfer(taker.trader, refund);
             }
@@ -340,20 +360,23 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         }
     }
 
-    function _matchSell(address equityToken, Order storage taker) internal {
+    function matchSell(address equityToken, Order storage taker) internal {
         while (taker.remaining > 0) {
-            (bool found, uint256 index) = _findBestBuy(equityToken, taker.price);
+            (bool found, uint256 index) = findBestBuy(equityToken, taker.price);
             if (!found) {
                 break;
             }
             Order storage maker = buyOrders[equityToken][index];
-            uint256 fillQty = taker.remaining < maker.remaining ? taker.remaining : maker.remaining;
-            uint256 tradeValue = _quoteAmount(fillQty, maker.price);
+            uint256 fillQty = taker.remaining;
+            if (maker.remaining < fillQty) {
+                fillQty = maker.remaining;
+            }
+            uint256 tradeValue = quoteAmount(fillQty, maker.price);
 
             IERC20(equityToken).safeTransfer(maker.trader, fillQty);
             ttoken.safeTransfer(taker.trader, tradeValue);
-            _recordTrade(maker.trader, tradeValue);
-            _recordTrade(taker.trader, tradeValue);
+            recordTrade(maker.trader, tradeValue);
+            recordTrade(taker.trader, tradeValue);
 
             taker.remaining -= fillQty;
             maker.remaining -= fillQty;
@@ -368,7 +391,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         }
     }
 
-    function _findBestSell(address equityToken, uint256 maxPrice) internal view returns (bool found, uint256 index) {
+    function findBestSell(address equityToken, uint256 maxPrice) internal view returns (bool found, uint256 index) {
         Order[] storage orders = sellOrders[equityToken];
         uint256 bestPrice = 0;
         uint256 bestIndex = 0;
@@ -388,7 +411,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         return (found, bestIndex);
     }
 
-    function _findBestBuy(address equityToken, uint256 minPrice) internal view returns (bool found, uint256 index) {
+    function findBestBuy(address equityToken, uint256 minPrice) internal view returns (bool found, uint256 index) {
         Order[] storage orders = buyOrders[equityToken];
         uint256 bestPrice = 0;
         uint256 bestIndex = 0;
@@ -408,7 +431,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         return (found, bestIndex);
     }
 
-    function _getOrderStorage(OrderRef memory ref) internal view returns (Order storage order) {
+    function getOrderStorage(OrderRef memory ref) internal view returns (Order storage order) {
         if (ref.side == Side.BUY) {
             order = buyOrders[ref.equityToken][ref.index];
         } else {
@@ -416,11 +439,11 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         }
     }
 
-    function _quoteAmount(uint256 qty, uint256 price) internal pure returns (uint256) {
+    function quoteAmount(uint256 qty, uint256 price) internal pure returns (uint256) {
         return (qty * price) / 100;
     }
 
-    function _recordTrade(address trader, uint256 quoteVolume) internal {
+    function recordTrade(address trader, uint256 quoteVolume) internal {
         if (address(award) != address(0)) {
             award.recordTrade(trader, quoteVolume);
         }

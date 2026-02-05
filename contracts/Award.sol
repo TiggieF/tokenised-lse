@@ -4,7 +4,8 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 interface ITTokenMintable {
-    function mint(address to, uint256 amount) external;
+    function mint(address to, uint256 amount)
+        external;
 }
 
 /**
@@ -30,8 +31,8 @@ contract Award is AccessControl {
     event EpochFinalized(uint256 indexed epochId, address indexed winner, uint256 reward);
 
     constructor(address ttokenAddress, address admin, address dexAddress) {
-        require(ttokenAddress != address(0), "Award: ttoken is zero");
-        require(admin != address(0), "Award: admin is zero");
+        require(ttokenAddress != address(0), "award: ttoken is zero");
+        require(admin != address(0), "award: admin is zero");
         ttoken = ITTokenMintable(ttokenAddress);
         dex = dexAddress;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -47,9 +48,9 @@ contract Award is AccessControl {
     }
 
     function recordTrade(address trader, uint256 quoteVolume) external {
-        require(msg.sender == dex, "Award: only dex");
-        require(trader != address(0), "Award: trader is zero");
-        require(quoteVolume > 0, "Award: volume is zero");
+        require(msg.sender == dex, "award: only dex");
+        require(trader != address(0), "award: trader is zero");
+        require(quoteVolume > 0, "award: volume is zero");
 
         uint256 epochId = currentEpoch();
         uint256 newVolume = volumeByEpoch[epochId][trader] + quoteVolume;
@@ -64,8 +65,8 @@ contract Award is AccessControl {
     }
 
     function finalizeEpoch(uint256 epochId) external {
-        require(epochId < currentEpoch(), "Award: epoch not ended");
-        require(!rewarded[epochId], "Award: already finalized");
+        require(epochId < currentEpoch(), "award: epoch not ended");
+        require(!rewarded[epochId], "award: already finalised");
 
         rewarded[epochId] = true;
         address winner = topTraderByEpoch[epochId];

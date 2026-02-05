@@ -41,7 +41,7 @@ contract TToken is ERC20, AccessControl {
     uint256 public constant AIRDROP_AMOUNT = 1_000_000 * 1e18;
 
     /// @dev Tracks whether an address has already received the signup airdrop.
-    mapping(address => bool) private _airdropClaimed;
+    mapping(address => bool) private airdropClaimed;
 
     /// @notice Emitted whenever a wallet successfully claims the airdrop.
     event AirdropClaimed(address indexed account, uint256 amount);
@@ -53,9 +53,9 @@ contract TToken is ERC20, AccessControl {
      */
     constructor() ERC20("Tokenised dollar", "TToken") {
         // Grant the deployer the admin role so they can manage other roles.
-        _grantRole(DEFAULT_ADMIN_ROLE, _msgSender());
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         // The deployer also receives the minter role for operational minting.
-        _grantRole(MINTER_ROLE, _msgSender());
+        _grantRole(MINTER_ROLE, msg.sender);
     }
 
     /**
@@ -69,7 +69,7 @@ contract TToken is ERC20, AccessControl {
      *  - Post-mint total supply must not exceed {MAX_SUPPLY}.
      */
     function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {
-        _mintWithCap(to, amount);
+        mintWithCap(to, amount);
     }
 
     /**
@@ -79,12 +79,12 @@ contract TToken is ERC20, AccessControl {
      * @return amount The number of tokens minted to the caller.
      */
     function airdropOnce() external returns (uint256 amount) {
-        address caller = _msgSender();
-        require(!_airdropClaimed[caller], "TToken:Airdrop already claimed");
+        address caller = msg.sender;
+        require(!airdropClaimed[caller], "ttoken: airdrop already claimed");
 
-        _airdropClaimed[caller] = true;
+        airdropClaimed[caller] = true;
         amount = AIRDROP_AMOUNT;
-        _mintWithCap(caller, amount);
+        mintWithCap(caller, amount);
 
         emit AirdropClaimed(caller, amount);
     }
@@ -96,16 +96,16 @@ contract TToken is ERC20, AccessControl {
      * @return True if the account has already claimed, false otherwise.
      */
     function hasClaimedAirdrop(address account) external view returns (bool) {
-        return _airdropClaimed[account];
+        return airdropClaimed[account];
     }
 
     /**
      * @dev Internal mint helper that enforces the global supply cap before
      *      delegating to the standard ERC-20 `_mint` implementation.
      */
-    function _mintWithCap(address to, uint256 amount) internal {
-        require(amount > 0, "TToken: amount must be > 0");
-        require(totalSupply() + amount <= MAX_SUPPLY, "TToken: cap exceeded");
+    function mintWithCap(address to, uint256 amount) internal {
+        require(amount > 0, "ttoken: amount must be > 0");
+        require(totalSupply() + amount <= MAX_SUPPLY, "ttoken: cap exceeded");
         _mint(to, amount);
     }
 }

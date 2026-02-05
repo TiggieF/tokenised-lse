@@ -21,9 +21,9 @@ contract EquityToken is ERC20, AccessControl {
         uint256[] values;
     }
 
-    mapping(address => Snapshots) private _accountBalanceSnapshots;
-    Snapshots private _totalSupplySnapshots;
-    uint256 private _currentSnapshotId;
+    mapping(address => Snapshots) private accountBalanceSnapshots;
+    Snapshots private totalSupplySnapshots;
+    uint256 private currentSnapshotId;
 
     event Snapshot(uint256 id);
 
@@ -39,8 +39,8 @@ contract EquityToken is ERC20, AccessControl {
         address admin,
         address minter
     ) ERC20(name_, symbol_) {
-        require(admin != address(0), "EquityToken: admin is zero");
-        require(minter != address(0), "EquityToken: minter is zero");
+        require(admin != address(0), "equitytoken: admin is zero");
+        require(minter != address(0), "equitytoken: minter is zero");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(MINTER_ROLE, minter);
@@ -51,76 +51,86 @@ contract EquityToken is ERC20, AccessControl {
      * @notice Mint new equity tokens to a recipient.
      */
     function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {
-        require(amount > 0, "EquityToken: amount must be > 0");
+        require(amount > 0, "equitytoken: amount must be > 0");
         _mint(to, amount);
     }
 
     function snapshot() external onlyRole(SNAPSHOT_ROLE) returns (uint256 snapshotId) {
-        snapshotId = _snapshot();
+        snapshotId = takeSnapshot();
     }
 
     function balanceOfAt(address account, uint256 snapshotId) external view returns (uint256) {
-        (bool found, uint256 value) = _valueAt(snapshotId, _accountBalanceSnapshots[account]);
-        return found ? value : balanceOf(account);
+        (bool found, uint256 value) = valueAt(snapshotId, accountBalanceSnapshots[account]);
+        if (found) {
+            return value;
+        }
+        return balanceOf(account);
     }
 
     function totalSupplyAt(uint256 snapshotId) external view returns (uint256) {
-        (bool found, uint256 value) = _valueAt(snapshotId, _totalSupplySnapshots);
-        return found ? value : totalSupply();
+        (bool found, uint256 value) = valueAt(snapshotId, totalSupplySnapshots);
+        if (found) {
+            return value;
+        }
+        return totalSupply();
     }
 
-    function _snapshot() internal returns (uint256 snapshotId) {
-        snapshotId = ++_currentSnapshotId;
+    function takeSnapshot() internal returns (uint256 snapshotId) {
+        currentSnapshotId = currentSnapshotId + 1;
+        snapshotId = currentSnapshotId;
         emit Snapshot(snapshotId);
     }
 
     function _update(address from, address to, uint256 value) internal override {
-        if (_currentSnapshotId > 0) {
+        if (currentSnapshotId > 0) {
             if (from != address(0)) {
-                _updateAccountSnapshot(from);
+                updateAccountSnapshot(from);
             }
             if (to != address(0)) {
-                _updateAccountSnapshot(to);
+                updateAccountSnapshot(to);
             }
-            _updateTotalSupplySnapshot();
+            updateTotalSupplySnapshot();
         }
         super._update(from, to, value);
     }
 
-    function _updateAccountSnapshot(address account) private {
-        _updateSnapshot(_accountBalanceSnapshots[account], balanceOf(account));
+    function updateAccountSnapshot(address account) private {
+        updateSnapshot(accountBalanceSnapshots[account], balanceOf(account));
     }
 
-    function _updateTotalSupplySnapshot() private {
-        _updateSnapshot(_totalSupplySnapshots, totalSupply());
+    function updateTotalSupplySnapshot() private {
+        updateSnapshot(totalSupplySnapshots, totalSupply());
     }
 
-    function _updateSnapshot(Snapshots storage snapshots, uint256 currentValue) private {
-        uint256 currentId = _currentSnapshotId;
-        if (_lastSnapshotId(snapshots.ids) < currentId) {
+    function updateSnapshot(Snapshots storage snapshots, uint256 currentValue) private {
+        uint256 currentId = currentSnapshotId;
+        if (lastSnapshotId(snapshots.ids) < currentId) {
             snapshots.ids.push(currentId);
             snapshots.values.push(currentValue);
         }
     }
 
-    function _valueAt(uint256 snapshotId, Snapshots storage snapshots)
+    function valueAt(uint256 snapshotId, Snapshots storage snapshots)
         private
         view
         returns (bool found, uint256 value)
     {
-        require(snapshotId > 0, "EquityToken: snapshotId is 0");
-        uint256 index = _findUpperBound(snapshots.ids, snapshotId);
+        require(snapshotId > 0, "equitytoken: snapshot id is 0");
+        uint256 index = findUpperBound(snapshots.ids, snapshotId);
         if (index == 0) {
             return (false, 0);
         }
         return (true, snapshots.values[index - 1]);
     }
 
-    function _lastSnapshotId(uint256[] storage ids) private view returns (uint256) {
-        return ids.length == 0 ? 0 : ids[ids.length - 1];
+    function lastSnapshotId(uint256[] storage ids) private view returns (uint256) {
+        if (ids.length == 0) {
+            return 0;
+        }
+        return ids[ids.length - 1];
     }
 
-    function _findUpperBound(uint256[] storage ids, uint256 snapshotId) private view returns (uint256) {
+    function findUpperBound(uint256[] storage ids, uint256 snapshotId) private view returns (uint256) {
         uint256 low = 0;
         uint256 high = ids.length;
         while (low < high) {

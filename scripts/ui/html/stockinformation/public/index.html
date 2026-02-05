@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Stock Info Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #0b1020;
+      color: #f5f7ff;
+    }
+
+    h1, h2 {
+      margin-bottom: 0.3rem;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+    }
+
+    h2 {
+      font-size: 1.3rem;
+      margin-top: 1.5rem;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: #151b30;
+      border-radius: 14px;
+      padding: 16px 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+      border: 1px solid #262d4a;
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 8px;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .muted {
+      color: #9aa0c3;
+      font-size: 0.9rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 6px 4px;
+      font-size: 0.9rem;
+    }
+
+    th {
+      color: #9aa0c3;
+      font-weight: 600;
+      border-bottom: 1px solid #252b47;
+    }
+
+    tr:nth-child(even) td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .pill-buy {
+      background: rgba(46, 213, 115, 0.15);
+      color: #2ed573;
+    }
+
+    .pill-sell {
+      background: rgba(255, 71, 87, 0.15);
+      color: #ff4757;
+    }
+
+    .pill-hold {
+      background: rgba(255, 203, 0, 0.15);
+      color: #ffcb00;
+    }
+
+    .error {
+      color: #ff6b81;
+      margin-top: 10px;
+    }
+
+    .loader {
+      margin-top: 10px;
+      font-size: 0.9rem;
+      color: #9aa0c3;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+
+    .chart-wrapper {
+      margin-top: 16px;
+      background: #0f1425;
+      border: 1px solid #262d4a;
+      border-radius: 12px;
+      padding: 12px;
+    }
+
+    #today-candles-chart {
+      width: 100%;
+      height: 360px;
+    }
+
+    .highlight-value {
+      font-size: 1.6rem;
+      font-weight: 600;
+    }
+
+    .price-blocks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      justify-content: flex-end;
+      flex: 1;
+    }
+
+    .price-block {
+      min-width: 180px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      text-align: right;
+      gap: 2px;
+    }
+
+    .price-label {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #9aa0c3;
+    }
+
+    .price-value {
+      font-size: 2rem;
+      font-weight: 600;
+      color: #f5f7ff;
+    }
+
+    .price-change {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .price-time {
+      font-size: 0.8rem;
+      color: #9aa0c3;
+    }
+
+    .change-positive {
+      color: #2ed573;
+    }
+
+    .change-negative {
+      color: #ff4757;
+    }
+
+    .change-neutral {
+      color: #f5f7ff;
+    }
+
+    .sub-label {
+      font-size: 0.8rem;
+      color: #9aa0c3;
+    }
+
+    .tagline {
+      font-size: 0.9rem;
+      color: #9aa0c3;
+      margin-bottom: 1rem;
+    }
+
+    input[type="text"] {
+      background: #0f1425;
+      border-radius: 999px;
+      border: 1px solid #262d4a;
+      padding: 8px 12px;
+      color: #f5f7ff;
+      outline: none;
+      min-width: 120px;
+    }
+
+    button {
+      background: #3b82f6;
+      border: none;
+      border-radius: 999px;
+      padding: 8px 16px;
+      color: white;
+      font-weight: 600;
+      margin-left: 8px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #2563eb;
+    }
+
+    .toolbar {
+      margin-bottom: 16px;
+    }
+
+    .toolbar form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Stock Overview</h1>
+
+
+
+
+    <!-- Price Card -->
+    <div class="card" id="price-card" style="display:none;">
+      <div class="card-header">
+        <div>
+          <h2 id="stock-name"></h2>
+          <div class="muted" id="stock-exchange"></div>
+        </div>
+        <div class="price-blocks">
+          <div class="price-block" id="market-block">
+            <div class="price-label">Market price</div>
+            <div class="price-value" id="market-price">-</div>
+            <div class="price-change change-neutral" id="market-change">-</div>
+            <div class="price-time" id="market-time"></div>
+            <div class="price-time" id="price-updated"></div>
+          </div>
+          <div class="price-block" id="after-block" style="display:none;">
+            <div class="price-label">After hours</div>
+            <div class="price-value" id="after-price">-</div>
+            <div class="price-change change-neutral" id="after-change">-</div>
+            <div class="price-time" id="after-time"></div>
+          </div>
+        </div>
+      </div>
+      <div class="chart-wrapper">
+        <div id="today-candles-chart"></div>
+      </div>
+      <div class="grid">
+        <div>
+          <table>
+            <tr><th>Open</th><td id="open"></td></tr>
+            <tr><th>Previous Close</th><td id="prev-close"></td></tr>
+            <tr><th>Day Low / High</th><td id="day-range"></td></tr>
+            <tr><th>52w Low / High</th><td id="fiftytwo-range"></td></tr>
+          </table>
+        </div>
+        <div>
+          <table>
+            <tr><th>Volume</th><td id="volume"></td></tr>
+            <tr><th>Avg Vol (3m)</th><td id="avg-volume"></td></tr>
+            <tr><th>Market Cap</th><td id="market-cap"></td></tr>
+            <tr><th>Currency</th><td id="currency"></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Financial Data Card -->
+    <div class="card" id="financial-card" style="display:none;">
+      <div class="card-header">
+        <h2>Financial Data</h2>
+        <div id="recommendation-pill"></div>
+      </div>
+      <div class="grid">
+        <div>
+          <table>
+            <tr><th>Target Price (Low / Mean / High)</th><td id="target-prices"></td></tr>
+            <tr><th>Number of Analyst Opinions</th><td id="analyst-opinions"></td></tr>
+            <tr><th>Current Price</th><td id="fd-current-price"></td></tr>
+            <tr><th>Total Revenue</th><td id="total-revenue"></td></tr>
+            <tr><th>Revenue per Share</th><td id="revenue-per-share"></td></tr>
+            <tr><th>Free Cashflow</th><td id="free-cashflow"></td></tr>
+          </table>
+        </div>
+        <div>
+          <table>
+            <tr><th>Debt to Equity</th><td id="debt-to-equity"></td></tr>
+            <tr><th>Return on Assets</th><td id="roa"></td></tr>
+            <tr><th>Return on Equity</th><td id="roe"></td></tr>
+            <tr><th>Profit Margin</th><td id="profit-margins"></td></tr>
+            <tr><th>Operating Margin</th><td id="operating-margins"></td></tr>
+            <tr><th>Gross Margin</th><td id="gross-margins"></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Summary Detail Card -->
+    <div class="card" id="summary-card" style="display:none;">
+      <div class="card-header">
+        <h2>Summary Detail</h2>
+      </div>
+      <div class="grid">
+        <div>
+          <table>
+            <tr><th>Trailing P/E</th><td id="trailing-pe"></td></tr>
+            <tr><th>Forward P/E</th><td id="forward-pe"></td></tr>
+            <tr><th>Price-to-Sales (TTM)</th><td id="price-to-sales"></td></tr>
+            <tr><th>Beta</th><td id="beta"></td></tr>
+            <tr><th>Dividend Rate / Yield</th><td id="dividend"></td></tr>
+            <tr><th>Ex-Dividend Date</th><td id="ex-dividend-date"></td></tr>
+          </table>
+        </div>
+        <div>
+          <table>
+            <tr><th>50 Day Average</th><td id="fifty-day-avg"></td></tr>
+            <tr><th>200 Day Average</th><td id="twohundred-day-avg"></td></tr>
+            <tr><th>All-time Low / High</th><td id="alltime-range"></td></tr>
+            <tr><th>Tradeable</th><td id="tradeable"></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+    <!-- Major Holders -->
+<div class="card" id="holders-card" style="display:none;">
+  <div class="card-header">
+    <h2>Major Shareholders</h2>
+  </div>
+  <table>
+    <tr><th>Insiders Percent Held</th><td id="insider-pct"></td></tr>
+    <tr><th>Institutions Percent Held</th><td id="institution-pct"></td></tr>
+    <tr><th>Institutions Float Percent</th><td id="float-institution-pct"></td></tr>
+  </table>
+</div>
+    <div class="toolbar">
+      <form id="symbol-form">
+        <label for="symbol-input" class="muted">Symbol:</label>
+        <input id="symbol-input" type="text" value="AAPL" />
+        <button type="submit">Load</button>
+        <span id="status" class="loader"></span>
+      </form>
+    </div>
+<!-- Institutional Ownership -->
+<div class="card" id="institution-card" style="display:none;">
+  <div class="card-header">
+    <h2>Top Institutional Holders</h2>
+  </div>
+  <table id="institution-table"></table>
+</div>
+
+<!-- Insider Holders -->
+<div class="card" id="insiders-card" style="display:none;">
+  <div class="card-header">
+    <h2>Top Insider Holders</h2>
+  </div>
+  <table id="insiders-table"></table>
+</div>
+
+
+    <div id="error" class="error"></div>
+  </div>
+
+  <script src="https://cdn.plot.ly/plotly-3.3.0.min.js"></script>
+  <script>
+    function formatNumber(n) {
+      if (n === null || n === undefined) return "-";
+      if (typeof n === "number" && Math.abs(n) >= 1e9) {
+        return (n / 1e9).toFixed(2) + "B";
+      }
+      if (typeof n === "number" && Math.abs(n) >= 1e6) {
+        return (n / 1e6).toFixed(2) + "M";
+      }
+      if (typeof n === "number" && Math.abs(n) >= 1e3) {
+        return (n / 1e3).toFixed(2) + "K";
+      }
+      if (typeof n === "number") return n.toLocaleString();
+      return String(n);
+    }
+
+    function formatPercent(v) {
+      if (v === null || v === undefined) return "-";
+      return (v * 100).toFixed(2) + "%";
+    }
+
+    function formatDate(iso) {
+      if (!iso) return "-";
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return "-";
+      return d.toLocaleDateString();
+    }
+
+    function setText(id, value) {
+      document.getElementById(id).textContent = value ?? "-";
+    }
+
+    const usDateFormatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "America/New_York",
+      day: "numeric",
+      month: "long"
+    });
+
+    const usTimeFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+
+    const usTzFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      timeZoneName: "short"
+    });
+
+    const CHANGE_CLASSES = ["change-positive", "change-negative", "change-neutral"];
+
+    function formatUsTimestamp(epochSeconds) {
+      if (epochSeconds == null) return "";
+      const numericValue = Number(epochSeconds);
+      if (!Number.isFinite(numericValue)) return "";
+      const millis = numericValue > 1e12 ? numericValue : numericValue * 1000;
+      const date = new Date(millis);
+      if (Number.isNaN(date.getTime())) return "";
+      const tzPart = usTzFormatter
+        .formatToParts(date)
+        .find((part) => part.type === "timeZoneName");
+      const tzLabel = tzPart ? tzPart.value : "ET";
+      return `${usDateFormatter.format(date)} at ${usTimeFormatter.format(date)} ${tzLabel}`;
+    }
+
+    function formatChangeText(change, percent) {
+      if (change == null && percent == null) return "-";
+      let segments = [];
+      if (change != null) {
+        segments.push(`${change > 0 ? "+" : ""}${change.toFixed(2)}`);
+      }
+      if (percent != null) {
+        const pctValue = percent * 100;
+        segments.push(`${pctValue > 0 ? "+" : ""}${pctValue.toFixed(2)}%`);
+      }
+      if (!segments.length) return "-";
+      if (segments.length === 2) {
+        return `${segments[0]} (${segments[1]})`;
+      }
+      return segments[0];
+    }
+
+    function applyChangeClass(el, direction) {
+      if (!el) return;
+      CHANGE_CLASSES.forEach((cls) => el.classList.remove(cls));
+      if (direction > 0) el.classList.add("change-positive");
+      else if (direction < 0) el.classList.add("change-negative");
+      else el.classList.add("change-neutral");
+    }
+
+    function setPriceBlock(prefix, priceValue, changeValue, changePercent, epochSeconds, timeLabel) {
+      const priceEl = document.getElementById(`${prefix}-price`);
+      if (priceEl) {
+        priceEl.textContent = priceValue != null ? `$${priceValue.toFixed(2)}` : "-";
+      }
+
+      const changeEl = document.getElementById(`${prefix}-change`);
+      if (changeEl) {
+        changeEl.textContent = formatChangeText(changeValue, changePercent);
+        const direction = changeValue ?? (changePercent != null ? changePercent : 0);
+        applyChangeClass(changeEl, direction);
+      }
+
+      const timeEl = document.getElementById(`${prefix}-time`);
+      if (timeEl) {
+        timeEl.textContent = epochSeconds
+          ? `${timeLabel}: ${formatUsTimestamp(epochSeconds)}`
+          : "";
+      }
+    }
+
+    function updatePriceBlocks(priceData) {
+      const fallback = priceData.regularMarketPrice ?? priceData.postMarketPrice ?? null;
+      setPriceBlock(
+        "market",
+        priceData.regularMarketPrice ?? fallback,
+        priceData.regularMarketChange,
+        priceData.regularMarketChangePercent,
+        priceData.regularMarketTime,
+        "At close"
+      );
+
+      const afterBlock = document.getElementById("after-block");
+      const hasAfterHours = priceData.postMarketPrice != null;
+      if (afterBlock) {
+        afterBlock.style.display = hasAfterHours ? "flex" : "none";
+      }
+
+      if (hasAfterHours) {
+        setPriceBlock(
+          "after",
+          priceData.postMarketPrice,
+          priceData.postMarketChange,
+          priceData.postMarketChangePercent,
+          priceData.postMarketTime,
+          "After hours       "
+        );
+      }
+    }
+
+    const todayCandleSeries = {
+      x: [
+        "2025-12-05T16:18:00.000000000",
+        "2025-12-05T16:19:00.000000000",
+        "2025-12-05T16:20:00.000000000",
+        "2025-12-05T16:21:00.000000000",
+        "2025-12-05T16:22:00.000000000",
+        "2025-12-05T16:23:00.000000000",
+        "2025-12-05T16:24:00.000000000",
+        "2025-12-05T16:25:00.000000000",
+        "2025-12-05T16:26:00.000000000",
+        "2025-12-05T16:27:00.000000000",
+        "2025-12-05T16:28:00.000000000",
+        "2025-12-05T16:29:00.000000000",
+        "2025-12-05T16:30:00.000000000",
+        "2025-12-05T16:31:00.000000000",
+        "2025-12-05T16:32:00.000000000",
+        "2025-12-05T16:33:00.000000000",
+        "2025-12-05T16:34:00.000000000",
+        "2025-12-05T16:35:00.000000000",
+        "2025-12-05T16:36:00.000000000",
+        "2025-12-05T16:37:00.000000000",
+        "2025-12-05T16:38:00.000000000",
+        "2025-12-05T16:39:00.000000000",
+        "2025-12-05T16:40:00.000000000",
+        "2025-12-05T16:41:00.000000000",
+        "2025-12-05T16:42:00.000000000",
+        "2025-12-05T16:43:00.000000000",
+        "2025-12-05T16:44:00.000000000",
+        "2025-12-05T16:45:00.000000000",
+        "2025-12-05T16:46:00.000000000"
+      ],
+      open: [
+        279.81,
+        279.65,
+        279.6,
+        279.67,
+        279.59,
+        279.645,
+        279.66,
+        279.58,
+        279.77,
+        279.63,
+        279.55,
+        279.43,
+        279.3,
+        278.99,
+        278.89,
+        278.93,
+        279.005,
+        278.9,
+        279.035,
+        279.16,
+        279.19,
+        279.295,
+        279.225,
+        279.09,
+        279.11,
+        279.1,
+        279.15,
+        279.07,
+        279.07
+      ],
+      high: [
+        279.82,
+        279.69,
+        279.67,
+        279.685,
+        279.68,
+        279.73,
+        279.66,
+        279.76,
+        279.83,
+        279.69,
+        279.55,
+        279.43,
+        279.33,
+        278.99,
+        278.97,
+        279.06,
+        279.035,
+        279.11,
+        279.17,
+        279.265,
+        279.25,
+        279.33,
+        279.23,
+        279.16,
+        279.11,
+        279.175,
+        279.15,
+        279.08,
+        279.07
+      ],
+      low: [
+        279.68,
+        279.62,
+        279.6,
+        279.61,
+        279.59,
+        279.645,
+        279.57,
+        279.575,
+        279.7,
+        279.61,
+        279.36,
+        279.3,
+        279.08,
+        278.795,
+        278.845,
+        278.93,
+        278.84,
+        278.9,
+        279.035,
+        279.155,
+        279.19,
+        279.29,
+        279.13,
+        279.085,
+        279.05,
+        279.1,
+        279.05,
+        279.03,
+        279.045
+      ],
+      close: [279.68,279.67,279.67,
+        279.61,
+        279.675,
+        279.68,
+        279.58,
+        279.76,
+        279.7,
+        279.67,
+        279.39,
+        279.31,
+        279.08,
+        278.82,
+        278.97,
+        278.97,
+        278.87,
+        279.11,
+        279.165,
+        279.265,
+        279.23,
+        279.33,
+        279.165,
+        279.11,
+        279.095,
+        279.15,
+        279.06,
+        279.06,
+        279.045
+      ]
+    };
+
+    const US_TIME_SHIFT_HOURS = -5;
+
+    function shiftIsoByHours(iso, hours) {
+      const normalized = iso.endsWith("Z") ? iso : iso + "Z";
+      const date = new Date(normalized);
+      if (Number.isNaN(date.getTime())) return iso;
+      date.setUTCHours(date.getUTCHours() + hours);
+      return date.toISOString().replace("Z", "").slice(0, 19);
+    }
+
+    const todayCandleTimesUS = todayCandleSeries.x.map((iso) =>
+      shiftIsoByHours(iso, US_TIME_SHIFT_HOURS)
+    );
+
+    function renderTodayCandleChart() {
+      const chartEl = document.getElementById("today-candles-chart");
+      if (!chartEl || typeof Plotly === "undefined") return;
+
+      Plotly.newPlot(
+        chartEl,
+        [
+          {
+            type: "candlestick",
+            x: todayCandleTimesUS,
+            open: todayCandleSeries.open,
+            high: todayCandleSeries.high,
+            low: todayCandleSeries.low,
+            close: todayCandleSeries.close,
+            increasing: { line: { color: "#2ed573" } },
+            decreasing: { line: { color: "#ff4757" } },
+            hoverlabel: { bgcolor: "#151b30" }
+          }
+        ],
+        {
+          title: {
+            text: "Today's Intraday Candles",
+            x: 0.02,
+            font: { size: 16, color: "#f5f7ff" }
+          },
+          paper_bgcolor: "transparent",
+          plot_bgcolor: "#0f1425",
+          font: { color: "#f5f7ff" },
+          margin: { t: 40, r: 20, b: 40, l: 50 },
+          xaxis: {
+            gridcolor: "#262d4a",
+            tickfont: { color: "#9aa0c3" },
+            rangeslider: { visible: false },
+            tickformat: "%H:%M\n%b %-d",
+            title: {
+              text: "Time (US -5h)",
+              font: { color: "#9aa0c3", size: 12 }
+            }
+          },
+          yaxis: {
+            gridcolor: "#262d4a",
+            tickfont: { color: "#9aa0c3" }
+          }
+        },
+        { displaylogo: false, responsive: true }
+      );
+    }
+
+    function renderPriceTimestamp() {
+      const label = document.getElementById("price-updated");
+      if (!label) return;
+      if (!lastPriceUpdate) {
+        label.textContent = "";
+        return;
+      }
+      const seconds = Math.max(
+        0,
+        Math.floor((Date.now() - lastPriceUpdate.getTime()) / 1000)
+      );
+      label.textContent = `Updated ${seconds}s ago`;
+    }
+
+    function startTimestampTicker() {
+      if (priceUpdateTicker) clearInterval(priceUpdateTicker);
+      priceUpdateTicker = setInterval(renderPriceTimestamp, 1000);
+    }
+
+    function markPriceUpdated() {
+      lastPriceUpdate = new Date();
+      renderPriceTimestamp();
+      startTimestampTicker();
+    }
+
+    async function loadSymbol(symbol) {
+      const status = document.getElementById("status");
+      const error = document.getElementById("error");
+      status.textContent = "Loading " + symbol + "...";
+      error.textContent = "";
+
+      try {
+        const res = await fetch("/api/stock/" + encodeURIComponent(symbol));
+        if (!res.ok) {
+          throw new Error("HTTP " + res.status);
+        }
+        const data = await res.json();
+
+        const price = data.price || {};
+        const sd = data.summaryDetail || {};
+        const fd = data.financialData || {};
+        const currentFallback = price.regularMarketPrice ?? fd.currentPrice;
+
+        // Show cards
+        document.getElementById("price-card").style.display = "block";
+        document.getElementById("financial-card").style.display = "block";
+        document.getElementById("summary-card").style.display = "block";
+
+        // Price card
+        setText("stock-name", (price.longName || price.shortName || symbol) + " (" + symbol + ")");
+        setText("stock-exchange", (price.exchangeName || "") + " · " + (price.quoteSourceName || ""));
+
+        updatePriceBlocks(price);
+
+        setText("open", price.regularMarketOpen);
+        setText("prev-close", price.regularMarketPreviousClose);
+        setText(
+          "day-range",
+          `${price.regularMarketDayLow ?? "-"} / ${price.regularMarketDayHigh ?? "-"}`
+        );
+        setText(
+          "fiftytwo-range",
+          `${sd.fiftyTwoWeekLow ?? "-"} / ${sd.fiftyTwoWeekHigh ?? "-"}`
+        );
+        setText("volume", formatNumber(price.regularMarketVolume || sd.volume));
+        setText("avg-volume", formatNumber(price.averageDailyVolume3Month || sd.averageVolume));
+        setText("market-cap", formatNumber(price.marketCap || sd.marketCap));
+        setText("currency", price.currency || sd.currency || fd.financialCurrency || "-");
+
+        // Financial Data card
+        const recKey = fd.recommendationKey;
+        const pill = document.getElementById("recommendation-pill");
+        pill.innerHTML = "";
+        if (recKey) {
+          const span = document.createElement("span");
+          span.textContent = recKey.toUpperCase();
+          span.classList.add("pill");
+          if (recKey.includes("buy")) span.classList.add("pill-buy");
+          else if (recKey.includes("sell")) span.classList.add("pill-sell");
+          else span.classList.add("pill-hold");
+          pill.appendChild(span);
+        }
+
+        setText(
+          "target-prices",
+          `${fd.targetLowPrice ?? "-"} / ${fd.targetMeanPrice ?? "-"} / ${
+            fd.targetHighPrice ?? "-"
+          }`
+        );
+        setText("analyst-opinions", fd.numberOfAnalystOpinions ?? "-");
+        setText("fd-current-price", fd.currentPrice ?? currentFallback ?? "-");
+        setText("total-revenue", formatNumber(fd.totalRevenue));
+        setText("revenue-per-share", fd.revenuePerShare ?? "-");
+        setText("free-cashflow", formatNumber(fd.freeCashflow));
+        setText("debt-to-equity", fd.debtToEquity ?? "-");
+        setText("roa", formatPercent(fd.returnOnAssets));
+        setText("roe", formatPercent(fd.returnOnEquity));
+        setText("profit-margins", formatPercent(fd.profitMargins));
+        setText("operating-margins", formatPercent(fd.operatingMargins));
+        setText("gross-margins", formatPercent(fd.grossMargins));
+
+        // Summary Detail card
+        setText("trailing-pe", sd.trailingPE ?? "-");
+        setText("forward-pe", sd.forwardPE ?? "-");
+        setText("price-to-sales", sd.priceToSalesTrailing12Months ?? "-");
+        setText("beta", sd.beta ?? "-");
+
+        const divRate = sd.dividendRate;
+        const divYield = sd.dividendYield;
+        setText(
+          "dividend",
+          divRate != null || divYield != null
+            ? `${divRate ?? "-"} / ${divYield != null ? (divYield * 100).toFixed(2) + "%" : "-"}`
+            : "-"
+        );
+
+        setText("ex-dividend-date", formatDate(sd.exDividendDate));
+        setText("fifty-day-avg", sd.fiftyDayAverage ?? "-");
+        setText("twohundred-day-avg", sd.twoHundredDayAverage ?? "-");
+        setText(
+          "alltime-range",
+          `${sd.allTimeLow ?? "-"} / ${sd.allTimeHigh ?? "-"}`
+        );
+        setText("tradeable", sd.tradeable === false ? "No" : sd.tradeable === true ? "Yes" : "-");
+
+        currentSymbol = symbol;
+        markPriceUpdated();
+        startAutoUpdate();
+        status.textContent = "Loaded " + symbol;
+      } catch (e) {
+        console.error(e);
+        document.getElementById("price-card").style.display = "none";
+        document.getElementById("financial-card").style.display = "none";
+        document.getElementById("summary-card").style.display = "none";
+        error.textContent = "Failed to load data for " + symbol;
+        status.textContent = "";
+      }
+      
+    }
+
+    document
+      .getElementById("symbol-form")
+      .addEventListener("submit", function (e) {
+        e.preventDefault();
+        const symbol = document
+          .getElementById("symbol-input")
+          .value.trim()
+          .toUpperCase();
+        if (!symbol) return;
+        loadSymbol(symbol);
+      });
+
+    // initial load
+    loadSymbol("AAPL");
+    renderTodayCandleChart();
+    let currentSymbol = "AAPL";
+    let autoUpdateInterval = null;
+    let priceUpdateTicker = null;
+    let lastPriceUpdate = null;
+
+async function updatePriceOnly() {
+  try {
+    const res = await fetch("/api/stock/" + currentSymbol);
+    const data = await res.json();
+    const price = data.price;
+
+    if (!price) return;
+
+    // Update only MOST volatile values
+    updatePriceBlocks(price);
+    setText("market-cap", formatNumber(price.marketCap));
+    markPriceUpdated();
+  } catch (e) {
+    console.error("Auto-update failed:", e);
+  }
+}
+
+function startAutoUpdate() {
+  if (autoUpdateInterval) clearInterval(autoUpdateInterval);
+  autoUpdateInterval = setInterval(updatePriceOnly, 5000);
+}
+
+  </script>
+</body>
+</html>

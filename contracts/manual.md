@@ -30,7 +30,7 @@ Note: Price updates can also be triggered on demand (e.g. when a user clicks
 - `MINTER_ROLE`: AccessControl role for minting.
 - `MAX_SUPPLY`: Hard cap for total supply.
 - `AIRDROP_AMOUNT`: One-time airdrop size per wallet.
-- `_airdropClaimed`: Mapping of wallet → claimed status.
+- `airdropClaimed`: Mapping of wallet → claimed status.
 - `AirdropClaimed`: Event emitted on successful airdrop.
 
 ### EquityToken.sol
@@ -39,7 +39,7 @@ Note: Price updates can also be triggered on demand (e.g. when a user clicks
 
 ### ListingsRegistry.sol
 - `LISTING_ROLE`: Role allowed to register listings (factory holds this).
-- `_listings`: Mapping of symbol hash → `Listing` struct.
+- `listingsByKey`: Mapping of symbol hash → `Listing` struct.
 - `Listing.token`: Equity token address.
 - `Listing.symbol`: Stored symbol string.
 - `Listing.name`: Stored company name.
@@ -51,7 +51,7 @@ Note: Price updates can also be triggered on demand (e.g. when a user clicks
 
 ### PriceFeed.sol
 - `ORACLE_ROLE`: Role allowed to update prices.
-- `_prices`: Mapping of symbol hash → `PriceEntry`.
+- `pricesByKey`: Mapping of symbol hash → `PriceEntry`.
 - `PriceEntry.priceCents`: Latest price in USD cents.
 - `PriceEntry.timestamp`: Last update time (unix seconds).
 - `PriceUpdated`: Event emitted on each price update.

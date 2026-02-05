@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TSLA Intraday Candles</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <style>
+    :root {
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --accent: #e04c4c;
+      --accent-2: #1b8b8b;
+      --panel: rgba(255, 255, 255, 0.85);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 32px;
+    }
+
+    header {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      font-family: "DM Serif Display", serif;
+      font-size: clamp(28px, 3vw, 40px);
+      margin: 0;
+      letter-spacing: 0.3px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 15px;
+      max-width: 640px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 16px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 20px;
+      backdrop-filter: blur(8px);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 6px;
+      display: block;
+    }
+
+    input, select, button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(16, 20, 24, 0.1);
+      font-family: inherit;
+      font-size: 14px;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      font-weight: 600;
+      transition: transform 120ms ease, box-shadow 120ms ease;
+      box-shadow: 0 10px 18px rgba(224, 76, 76, 0.25);
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    #status {
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    #chart {
+      margin-top: 24px;
+      height: 520px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-2);
+    }
+
+    .live-price {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(16, 20, 24, 0.08);
+      background: rgba(255, 255, 255, 0.6);
+      margin-bottom: 16px;
+    }
+
+    .live-label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .live-quote {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      font-size: clamp(24px, 3vw, 32px);
+      font-weight: 600;
+    }
+
+    .live-change {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .live-open {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .live-updated {
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    .change-positive {
+      color: var(--accent-2);
+    }
+
+    .change-negative {
+      color: var(--accent);
+    }
+
+    .change-neutral {
+      color: var(--muted);
+    }
+
+    @media (max-width: 720px) {
+      body {
+        padding: 20px;
+      }
+
+      #chart {
+        height: 420px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+
+  </header>
+
+  <div class="panel">
+    <form id="controls" class="controls">
+      <div>
+        <label for="symbol">Symbol</label>
+        <select id="symbol">
+          <option value="AAPL">Apple (AAPL)</option>
+          <option value="MSFT">Microsoft (MSFT)</option>
+          <option value="AMZN">Amazon (AMZN)</option>
+          <option value="NVDA">NVIDIA (NVDA)</option>
+          <option value="GOOGL">Alphabet (GOOGL)</option>
+          <option value="META">Meta (META)</option>
+          <option value="TSLA" selected>Tesla (TSLA)</option>
+          <option value="BRK.B">Berkshire Hathaway (BRK.B)</option>
+          <option value="JPM">JPMorgan Chase (JPM)</option>
+          <option value="V">Visa (V)</option>
+        </select>
+      </div>
+      <div>
+        <label for="date">Date (ET)</label>
+        <input id="date" type="text" />
+      </div>
+      <div>
+        <label for="range">Range</label>
+        <select id="range">
+          <option value="1d">1 day</option>
+          <option value="5d">5 days</option>
+          <option value="1m">1 month</option>
+        </select>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button id="loadBtn" type="submit">Load Candles</button>
+      </div>
+    </form>
+    <div class="live-price">
+      <div>
+        <div id="live-symbol-label" class="live-label">TSLA live price</div>
+        <div class="live-quote">
+          <span id="live-price">-</span>
+          <span id="live-change" class="live-change change-neutral">-</span>
+        </div>
+        <div class="live-open">Open: <span id="live-open">-</span></div>
+        <div id="live-updated" class="live-updated change-neutral">Updated -</div>
+      </div>
+    </div>
+    <div id="status" class="badge"><span class="dot"></span><span>Ready.</span></div>
+  </div>
+
+  <div id="chart" class="panel"></div>
+  <!-- <div id="qfchart" class="panel" style="margin-top: 24px; height: 520px;"></div> -->
+
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
+  <!-- <script src="/qfchart/qfchart.dev.browser.js"></script> -->
+  <script>
+    const statusEl = document.getElementById("status");
+    const statusText = statusEl.querySelector("span:last-child");
+    const form = document.getElementById("controls");
+    const symbolInput = document.getElementById("symbol");
+    const dateInput = document.getElementById("date");
+    const rangeInput = document.getElementById("range");
+    const chartEl = document.getElementById("chart");
+    // const qfChartEl = document.getElementById("qfchart");
+    const liveSymbolLabel = document.getElementById("live-symbol-label");
+    const livePriceEl = document.getElementById("live-price");
+    const liveChangeEl = document.getElementById("live-change");
+    const liveOpenEl = document.getElementById("live-open");
+    const liveUpdatedEl = document.getElementById("live-updated");
+
+    const CHANGE_CLASSES = ["change-positive", "change-negative", "change-neutral"];
+    let liveSymbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+    let liveOpenPrice = null;
+    let lastLiveUpdate = null;
+    let livePoller = null;
+    let liveTicker = null;
+
+    function setStatus(text, tone = "neutral") {
+      statusText.textContent = text;
+      statusEl.querySelector(".dot").style.background =
+        tone === "error" ? "#e04c4c" : "#1b8b8b";
+    }
+
+    function applyChangeClass(el, direction) {
+      if (!el) return;
+      CHANGE_CLASSES.forEach((cls) => el.classList.remove(cls));
+      if (direction > 0) el.classList.add("change-positive");
+      else if (direction < 0) el.classList.add("change-negative");
+      else el.classList.add("change-neutral");
+    }
+
+    function formatPrice(value) {
+      return value == null || Number.isNaN(value) ? "-" : `$${value.toFixed(2)}`;
+    }
+
+    function formatChangePercent(percent) {
+      if (percent == null || Number.isNaN(percent)) return "-";
+      const pctValue = percent * 100;
+      return `${pctValue > 0 ? "+" : ""}${pctValue.toFixed(2)}%`;
+    }
+
+    function renderLiveUpdated() {
+      if (!liveUpdatedEl) return;
+      if (!lastLiveUpdate) {
+        liveUpdatedEl.textContent = "Updated -";
+        applyChangeClass(liveUpdatedEl, 0);
+        return;
+      }
+      const seconds = Math.max(0, Math.floor((Date.now() - lastLiveUpdate) / 1000));
+      liveUpdatedEl.textContent = `Updated ${seconds}s ago`;
+    }
+
+    function getETDateString() {
+      const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const y = etNow.getFullYear();
+      const m = String(etNow.getMonth() + 1).padStart(2, "0");
+      const d = String(etNow.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    }
+
+    const HOLIDAYS_ET = [
+      "2025-01-01","2025-01-20","2025-02-17","2025-04-18","2025-05-26","2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
+      "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
+    ];
+
+    function isWeekend(ymd) {
+      const [y, m, d] = ymd.split("-").map(Number);
+      const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+      return weekday === 0 || weekday === 6;
+    }
+
+    function isTradingDay(ymd) {
+      return !isWeekend(ymd) && !HOLIDAYS_ET.includes(ymd);
+    }
+
+    function previousTradingDay(ymd) {
+      let [y, m, d] = ymd.split("-").map(Number);
+      let dt = new Date(Date.UTC(y, m - 1, d));
+      for (let i = 0; i < 10; i++) {
+        dt.setUTCDate(dt.getUTCDate() - 1);
+        const cur = dt.toISOString().slice(0, 10);
+        if (isTradingDay(cur)) return cur;
+      }
+      return ymd;
+    }
+
+    const lastValidDate = previousTradingDay(getETDateString());
+    dateInput.value = lastValidDate;
+
+    flatpickr(dateInput, {
+      dateFormat: "Y-m-d",
+      defaultDate: lastValidDate,
+      maxDate: getETDateString(),
+      disable: [
+        (date) => date.getDay() === 0 || date.getDay() === 6,
+        ...HOLIDAYS_ET,
+      ],
+      onChange: (selectedDates, dateStr) => {
+        if (!dateStr) return;
+        if (!isTradingDay(dateStr)) {
+          setStatus("Market closed on weekends/holidays. Pick a trading day.", "error");
+          return;
+        }
+        lastValidDate = dateStr;
+        setStatus("Ready.");
+        loadCandles();
+      },
+    });
+
+    const etFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    function toETTimestampMs(unixSec) {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).formatToParts(new Date(unixSec * 1000));
+
+      const get = (t) => parts.find(p => p.type === t)?.value;
+      return Date.UTC(
+        Number(get("year")),
+        Number(get("month")) - 1,
+        Number(get("day")),
+        Number(get("hour")),
+        Number(get("minute")),
+        Number(get("second"))
+      );
+    }
+
+    const chart = LightweightCharts.createChart(chartEl, {
+      layout: {
+        background: { color: "transparent" },
+        textColor: "#101418",
+        fontFamily: "Space Grotesk, sans-serif",
+      },
+      grid: {
+        vertLines: { color: "rgba(16, 20, 24, 0.08)" },
+        horzLines: { color: "rgba(16, 20, 24, 0.08)" },
+      },
+      rightPriceScale: {
+        borderVisible: false,
+      },
+      timeScale: {
+        borderVisible: false,
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time) => etFormatter.format(new Date(time * 1000)),
+      },
+      localization: {
+        timeFormatter: (time) => etFormatter.format(new Date(time * 1000)),
+      },
+    });
+
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: "#1b8b8b",
+      downColor: "#e04c4c",
+      borderVisible: false,
+      wickUpColor: "#1b8b8b",
+      wickDownColor: "#e04c4c",
+    });
+
+    // const { QFChart } = window.QFChart || {};
+    // const qfChart = QFChart ? new QFChart(qfChartEl, {
+    //   title: symbolInput.value,
+    //   height: "520px",
+    //   databox: { position: "right" },
+    //   dataZoom: {
+    //     visible: true,
+    //     position: "bottom",
+    //     height: 6,
+    //     start: 0,
+    //     end: 100,
+    //   },
+    // }) : null;
+
+    window.addEventListener("resize", () => {
+      chart.applyOptions({ width: chartEl.clientWidth });
+    });
+
+    function resetLivePriceState(symbol) {
+      liveSymbol = symbol;
+      liveOpenPrice = null;
+      lastLiveUpdate = null;
+      if (livePriceEl) livePriceEl.textContent = "-";
+      if (liveChangeEl) liveChangeEl.textContent = "-";
+      if (liveOpenEl) liveOpenEl.textContent = "-";
+      renderLiveUpdated();
+    }
+
+    async function loadLivePrice() {
+      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      if (symbol !== liveSymbol) {
+        resetLivePriceState(symbol);
+      }
+
+      if (liveSymbolLabel) {
+        liveSymbolLabel.textContent = `${symbol} live price`;
+      }
+
+      try {
+        const res = await fetch(`/api/stock/${encodeURIComponent(symbol)}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to load quote");
+        }
+
+        const price = data.price || {};
+        const currentPrice =
+          price.regularMarketPrice ??
+          price.postMarketPrice ??
+          price.preMarketPrice ??
+          null;
+        const changePct =
+          price.regularMarketChangePercent ??
+          price.postMarketChangePercent ??
+          price.preMarketChangePercent ??
+          null;
+        const changeValue =
+          price.regularMarketChange ??
+          price.postMarketChange ??
+          price.preMarketChange ??
+          null;
+
+        if (liveOpenPrice == null && price.regularMarketOpen != null) {
+          liveOpenPrice = price.regularMarketOpen;
+        }
+
+        if (livePriceEl) livePriceEl.textContent = formatPrice(currentPrice);
+        if (liveChangeEl) liveChangeEl.textContent = formatChangePercent(changePct);
+        if (liveOpenEl) liveOpenEl.textContent = formatPrice(liveOpenPrice);
+
+        const direction = changeValue ?? (changePct != null ? changePct : 0);
+        applyChangeClass(liveChangeEl, direction);
+        applyChangeClass(liveUpdatedEl, direction);
+
+        lastLiveUpdate = Date.now();
+        renderLiveUpdated();
+      } catch (err) {
+        if (liveChangeEl) applyChangeClass(liveChangeEl, 0);
+        if (liveUpdatedEl) applyChangeClass(liveUpdatedEl, 0);
+      }
+    }
+
+    function startLivePricePolling() {
+      if (livePoller) clearInterval(livePoller);
+      if (liveTicker) clearInterval(liveTicker);
+      livePoller = setInterval(loadLivePrice, 5000);
+      liveTicker = setInterval(renderLiveUpdated, 1000);
+    }
+
+    async function loadCandles() {
+      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      const date = dateInput.value;
+      const range = rangeInput.value;
+      const interval =
+        range === "1d" ? "5" :
+        range === "5d" ? "360" :
+        range === "1m" ? "1440" :
+        range === "3m" ? "1440" :
+        range === "6m" ? "17280" :
+        "5";
+
+      if (!date) {
+        setStatus("Pick a date first.", "error");
+        return;
+      }
+
+      setStatus("Loading candles...");
+
+      try {
+        const res = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}&date=${date}&interval=${interval}&range=${range}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to load candles");
+        }
+
+        const candleData = data.candles.map(c => ({
+          time: c.timeSec,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }));
+
+        candleSeries.setData(candleData);
+        chart.timeScale().fitContent();
+
+        const qfData = data.candles.map(c => ({
+          time: toETTimestampMs(c.timeSec),
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume ?? 0,
+        }));
+        // if (qfChart) {
+        //   qfChart.setMarketData(qfData);
+        // }
+        const rangeLabel =
+          data.range === "5d" ? "5 trading days" :
+          data.range === "1m" ? "1 month (trading days)" :
+          data.range === "3m" ? "3 months (trading days)" :
+          data.range === "6m" ? "6 months (trading days)" :
+          "1 trading day";
+        setStatus(`Loaded ${data.candles.length} candles for ${data.symbol} (${rangeLabel} ending ${data.date}).`);
+      } catch (err) {
+        setStatus(err.message, "error");
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      loadCandles();
+      loadLivePrice();
+    });
+
+    symbolInput.addEventListener("change", () => {
+      setStatus("Ready.");
+      resetLivePriceState(symbolInput.value.trim().toUpperCase() || "TSLA");
+      loadLivePrice();
+    });
+
+    rangeInput.addEventListener("change", () => {
+      setStatus("Ready.");
+    });
+
+    loadCandles();
+    loadLivePrice();
+    startLivePricePolling();
+  </script>
+</body>
+</html>

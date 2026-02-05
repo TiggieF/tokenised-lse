@@ -58,14 +58,14 @@ describe("Stage 3 — PriceFeed oracle", function () {
     const { feed, oracle } = await loadFixture(deployPriceFeedFixture);
 
     await expect(feed.connect(oracle).setPrice("ACME1", 0))
-      .to.be.revertedWith("PriceFeed: price must be > 0");
+      .to.be.revertedWith("pricefeed: price must be > 0");
   });
 
   it("rejects symbols with lowercase letters", async function () {
     const { feed, oracle } = await loadFixture(deployPriceFeedFixture);
 
     await expect(feed.connect(oracle).setPrice("Acme1", 1000))
-      .to.be.revertedWith("PriceFeed: symbol must be A-Z or 0-9");
+      .to.be.revertedWith("pricefeed: symbol must be upper-case or 0-9");
   });
 
   it("reports freshness for recent updates", async function () {

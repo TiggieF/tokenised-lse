@@ -1,0 +1,13 @@
+{
+  "name": "tlse-stage0-html",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "node html/server.js",
+    "start": "node html/server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "yahoo-finance2": "^3.10.2"
+  }
+}

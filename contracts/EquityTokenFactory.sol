@@ -36,7 +36,7 @@ contract EquityTokenFactory is AccessControl {
         require(bytes(symbol).length > 0, "EquityTokenFactory: symbol required");
         require(bytes(name).length > 0, "EquityTokenFactory: name required");
 
-        EquityToken token = new EquityToken(name, symbol, _msgSender(), defaultMinter);
+        EquityToken token = new EquityToken(name, symbol, msg.sender, defaultMinter);
         tokenAddr = address(token);
 
         registry.registerListing(symbol, name, tokenAddr);

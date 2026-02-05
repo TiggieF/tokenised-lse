@@ -71,7 +71,7 @@ describe("Stage 1 — TToken token", function () {
       await token.connect(admin).mint(admin.address, nearCap);
 
       await expect(token.connect(admin).mint(admin.address, AIRDROP_AMOUNT))
-        .to.be.revertedWith("TToken: cap exceeded");
+        .to.be.revertedWith("ttoken: cap exceeded");
     });
   });
 
@@ -87,7 +87,7 @@ describe("Stage 1 — TToken token", function () {
       expect(await token.totalSupply()).to.equal(AIRDROP_AMOUNT);
 
       await expect(token.connect(otherUser).airdropOnce())
-        .to.be.revertedWith("TToken:Airdrop already claimed");
+        .to.be.revertedWith("ttoken: airdrop already claimed");
     });
 
     it("prevents airdrop when cap would be exceeded", async function () {
@@ -97,7 +97,7 @@ describe("Stage 1 — TToken token", function () {
       await token.connect(admin).mint(admin.address, nearCap);
 
       await expect(token.connect(otherUser).airdropOnce())
-        .to.be.revertedWith("TToken: cap exceeded");
+        .to.be.revertedWith("ttoken: cap exceeded");
     });
 
     it("exposes helper to check claim status", async function () {

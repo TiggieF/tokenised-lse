@@ -98,7 +98,7 @@ describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
 
     await expect(
       dex.connect(taker).buyExactQuoteAtOracle(await equity.getAddress(), quoteAmount(ONE_SHARE, 10_000n), 0)
-    ).to.be.revertedWith("OrderBookDEX: stale price");
+    ).to.be.revertedWith("orderbook: stale price");
   });
 
   it("reverts for unknown token", async function () {
@@ -110,7 +110,7 @@ describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
 
     await expect(
       dex.connect(taker).buyExactQuoteAtOracle(ethers.Wallet.createRandom().address, quoteAmount(ONE_SHARE, 10_000n), 0)
-    ).to.be.revertedWith("OrderBookDEX: unknown token");
+    ).to.be.revertedWith("orderbook: unknown token");
   });
 
   it("emits OracleQuoteBuyExecuted", async function () {

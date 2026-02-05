@@ -19,15 +19,15 @@ contract ListingsRegistry is AccessControl {
         string name;
     }
 
-    mapping(bytes32 => Listing) private _listings;
+    mapping(bytes32 => Listing) private listingsByKey;
     mapping(address => bool) public isTokenListed;
     mapping(address => string) public tokenToSymbol;
-    string[] private _listedSymbols;
+    string[] private listedSymbols;
 
     event StockListed(string indexed symbol, address tokenAddr);
 
     constructor(address admin) {
-        require(admin != address(0), "ListingsRegistry: admin is zero");
+        require(admin != address(0), "listingsregistry: admin is zero");
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(LISTING_ROLE, admin);
     }
@@ -40,18 +40,18 @@ contract ListingsRegistry is AccessControl {
         string memory name,
         address tokenAddr
     ) external onlyRole(LISTING_ROLE) {
-        require(tokenAddr != address(0), "ListingsRegistry: token is zero");
-        bytes32 key = _symbolKey(symbol);
-        require(_listings[key].token == address(0), "ListingsRegistry: symbol already listed");
+        require(tokenAddr != address(0), "listingsregistry: token is zero");
+        bytes32 key = symbolKey(symbol);
+        require(listingsByKey[key].token == address(0), "listingsregistry: symbol already listed");
 
-        _listings[key] = Listing({
+        listingsByKey[key] = Listing({
             token: tokenAddr,
             symbol: symbol,
             name: name
         });
         isTokenListed[tokenAddr] = true;
         tokenToSymbol[tokenAddr] = symbol;
-        _listedSymbols.push(symbol);
+        listedSymbols.push(symbol);
 
         emit StockListed(symbol, tokenAddr);
     }
@@ -60,7 +60,7 @@ contract ListingsRegistry is AccessControl {
      * @notice Returns the token address for a ticker symbol or address(0).
      */
     function getListing(string memory symbol) external view returns (address) {
-        Listing storage listing = _listings[_symbolKey(symbol)];
+        Listing storage listing = listingsByKey[symbolKey(symbol)];
         return listing.token;
     }
 
@@ -69,11 +69,11 @@ contract ListingsRegistry is AccessControl {
     }
 
     function getAllSymbols() external view returns (string[] memory) {
-        return _listedSymbols;
+        return listedSymbols;
     }
 
     function getSymbols(uint256 offset, uint256 limit) external view returns (string[] memory) {
-        uint256 total = _listedSymbols.length;
+        uint256 total = listedSymbols.length;
         if (offset >= total) {
             return new string[](0);
         }
@@ -83,7 +83,7 @@ contract ListingsRegistry is AccessControl {
         }
         string[] memory slice = new string[](end - offset);
         for (uint256 i = offset; i < end; i++) {
-            slice[i - offset] = _listedSymbols[i];
+            slice[i - offset] = listedSymbols[i];
         }
         return slice;
     }
@@ -96,7 +96,7 @@ contract ListingsRegistry is AccessControl {
         view
         returns (address token, string memory sym, string memory name)
     {
-        Listing storage listing = _listings[_symbolKey(symbol)];
+        Listing storage listing = listingsByKey[symbolKey(symbol)];
         return (listing.token, listing.symbol, listing.name);
     }
 
@@ -104,22 +104,22 @@ contract ListingsRegistry is AccessControl {
      * @notice Returns true when a symbol has been listed.
      */
     function isListed(string memory symbol) external view returns (bool) {
-        return _listings[_symbolKey(symbol)].token != address(0);
+        return listingsByKey[symbolKey(symbol)].token != address(0);
     }
 
-    function _symbolKey(string memory symbol) internal pure returns (bytes32) {
-        _validateSymbol(symbol);
+    function symbolKey(string memory symbol) internal pure returns (bytes32) {
+        validateSymbol(symbol);
         return keccak256(abi.encodePacked(symbol));
     }
 
-    function _validateSymbol(string memory symbol) internal pure {
+    function validateSymbol(string memory symbol) internal pure {
         bytes memory raw = bytes(symbol);
-        require(raw.length > 0, "ListingsRegistry: symbol required");
+        require(raw.length > 0, "listingsregistry: symbol required");
         for (uint256 i = 0; i < raw.length; i++) {
             bytes1 char = raw[i];
             bool isUpper = char >= 0x41 && char <= 0x5A;
             bool isDigit = char >= 0x30 && char <= 0x39;
-            require(isUpper || isDigit, "ListingsRegistry: symbol must be A-Z or 0-9");
+            require(isUpper || isDigit, "listingsregistry: symbol must be upper-case or 0-9");
         }
     }
 }
