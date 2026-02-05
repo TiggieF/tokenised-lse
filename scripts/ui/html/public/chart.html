@@ -186,6 +186,48 @@
       color: var(--muted);
     }
 
+    .info-panel {
+      margin-top: 24px;
+    }
+
+    .info-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .info-title {
+      font-weight: 600;
+      font-size: 16px;
+    }
+
+    .info-updated {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px 18px;
+    }
+
+    .info-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .info-item strong {
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 600;
+    }
+
     @media (max-width: 720px) {
       body {
         padding: 20px;
@@ -251,6 +293,26 @@
   </div>
 
   <div id="chart" class="panel"></div>
+  <div id="stock-info" class="panel info-panel">
+    <div class="info-header">
+      <div class="info-title">Stock information</div>
+      <div id="info-updated" class="info-updated">Updated -</div>
+    </div>
+    <div class="info-grid">
+      <div class="info-item"><span>Previous close</span><strong id="info-prev-close">-</strong></div>
+      <div class="info-item"><span>Open</span><strong id="info-open">-</strong></div>
+      <div class="info-item"><span>Day range</span><strong id="info-day-range">-</strong></div>
+      <div class="info-item"><span>52-week range</span><strong id="info-year-range">-</strong></div>
+      <div class="info-item"><span>Volume</span><strong id="info-volume">-</strong></div>
+      <div class="info-item"><span>Avg. volume</span><strong id="info-avg-volume">-</strong></div>
+      <div class="info-item"><span>Market cap</span><strong id="info-market-cap">-</strong></div>
+      <div class="info-item"><span>Beta (5Y)</span><strong id="info-beta">-</strong></div>
+      <div class="info-item"><span>PE ratio (TTM)</span><strong id="info-pe">-</strong></div>
+      <div class="info-item"><span>EPS (TTM)</span><strong id="info-eps">-</strong></div>
+      <div class="info-item"><span>Bid</span><strong id="info-bid">-</strong></div>
+      <div class="info-item"><span>Ask</span><strong id="info-ask">-</strong></div>
+    </div>
+  </div>
   <!-- <div id="qfchart" class="panel" style="margin-top: 24px; height: 520px;"></div> -->
 
   <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
@@ -271,6 +333,19 @@
     const liveChangeEl = document.getElementById("live-change");
     const liveOpenEl = document.getElementById("live-open");
     const liveUpdatedEl = document.getElementById("live-updated");
+    const infoUpdatedEl = document.getElementById("info-updated");
+    const infoPrevCloseEl = document.getElementById("info-prev-close");
+    const infoOpenEl = document.getElementById("info-open");
+    const infoDayRangeEl = document.getElementById("info-day-range");
+    const infoYearRangeEl = document.getElementById("info-year-range");
+    const infoVolumeEl = document.getElementById("info-volume");
+    const infoAvgVolumeEl = document.getElementById("info-avg-volume");
+    const infoMarketCapEl = document.getElementById("info-market-cap");
+    const infoBetaEl = document.getElementById("info-beta");
+    const infoPeEl = document.getElementById("info-pe");
+    const infoEpsEl = document.getElementById("info-eps");
+    const infoBidEl = document.getElementById("info-bid");
+    const infoAskEl = document.getElementById("info-ask");
 
     const CHANGE_CLASSES = ["change-positive", "change-negative", "change-neutral"];
     let liveSymbol = symbolInput.value.trim().toUpperCase() || "TSLA";
@@ -278,6 +353,7 @@
     let lastLiveUpdate = null;
     let livePoller = null;
     let liveTicker = null;
+    let latestStockInfo = null;
 
     function setStatus(text, tone = "neutral") {
       statusText.textContent = text;
@@ -297,6 +373,21 @@
       return value == null || Number.isNaN(value) ? "-" : `$${value.toFixed(2)}`;
     }
 
+    function formatNumber(value, digits = 2) {
+      if (value == null || Number.isNaN(value)) return "-";
+      return Number(value).toFixed(digits);
+    }
+
+    function formatInt(value) {
+      if (value == null || Number.isNaN(value)) return "-";
+      return Math.round(Number(value)).toLocaleString("en-US");
+    }
+
+    function formatRange(low, high) {
+      if (low == null || high == null) return "-";
+      return `${formatPrice(Number(low))} - ${formatPrice(Number(high))}`;
+    }
+
     function formatChangePercent(percent) {
       if (percent == null || Number.isNaN(percent)) return "-";
       const pctValue = percent * 100;
@@ -312,6 +403,58 @@
       }
       const seconds = Math.max(0, Math.floor((Date.now() - lastLiveUpdate) / 1000));
       liveUpdatedEl.textContent = `Updated ${seconds}s ago`;
+    }
+
+    function setInfoText(el, value) {
+      if (!el) return;
+      el.textContent = value == null ? "-" : value;
+    }
+
+    function updateStockInfo(data) {
+      if (!data) return;
+      latestStockInfo = data;
+      setInfoText(infoPrevCloseEl, data.previousClose != null ? formatPrice(Number(data.previousClose)) : "-");
+      setInfoText(infoOpenEl, data.open != null ? formatPrice(Number(data.open)) : "-");
+      setInfoText(infoDayRangeEl, formatRange(data.dayLow, data.dayHigh));
+      setInfoText(infoYearRangeEl, formatRange(data.yearLow, data.yearHigh));
+      setInfoText(infoVolumeEl, formatInt(data.volume));
+      setInfoText(infoAvgVolumeEl, formatInt(data.avgVolume));
+      setInfoText(infoMarketCapEl, formatInt(data.marketCap));
+      setInfoText(infoBetaEl, formatNumber(data.beta, 2));
+      setInfoText(infoPeEl, formatNumber(data.peTTM, 2));
+      setInfoText(infoEpsEl, formatNumber(data.epsTTM, 2));
+
+      const bidText =
+        data.bid != null
+          ? `${formatPrice(Number(data.bid))}${data.bidSize ? ` x ${formatInt(data.bidSize)}` : ""}`
+          : "-";
+      const askText =
+        data.ask != null
+          ? `${formatPrice(Number(data.ask))}${data.askSize ? ` x ${formatInt(data.askSize)}` : ""}`
+          : "-";
+      setInfoText(infoBidEl, bidText);
+      setInfoText(infoAskEl, askText);
+      if (infoUpdatedEl) {
+        infoUpdatedEl.textContent = data.stale ? "Snapshot (stale)" : "Snapshot";
+      }
+    }
+
+    async function loadStockInfo() {
+      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      try {
+        const res = await fetch(`/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to load stock info");
+        }
+        updateStockInfo(data);
+        if (liveOpenPrice == null && data.open != null) {
+          liveOpenPrice = Number(data.open);
+          if (liveOpenEl) liveOpenEl.textContent = formatPrice(liveOpenPrice);
+        }
+      } catch (err) {
+        if (infoUpdatedEl) infoUpdatedEl.textContent = "Updated -";
+      }
     }
 
     function getETDateString() {
@@ -456,6 +599,7 @@
       liveSymbol = symbol;
       liveOpenPrice = null;
       lastLiveUpdate = null;
+      latestStockInfo = null;
       if (livePriceEl) livePriceEl.textContent = "-";
       if (liveChangeEl) liveChangeEl.textContent = "-";
       if (liveOpenEl) liveOpenEl.textContent = "-";
@@ -473,32 +617,22 @@
       }
 
       try {
-        const res = await fetch(`/api/stock/${encodeURIComponent(symbol)}`);
+        const res = await fetch(`/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`);
         const data = await res.json();
         if (!res.ok || data.error) {
           throw new Error(data.error || "Failed to load quote");
         }
 
-        const price = data.price || {};
-        const currentPrice =
-          price.regularMarketPrice ??
-          price.postMarketPrice ??
-          price.preMarketPrice ??
-          null;
-        const changePct =
-          price.regularMarketChangePercent ??
-          price.postMarketChangePercent ??
-          price.preMarketChangePercent ??
-          null;
+        const currentPrice = data.price ?? null;
+        const previousClose = latestStockInfo?.previousClose ?? null;
         const changeValue =
-          price.regularMarketChange ??
-          price.postMarketChange ??
-          price.preMarketChange ??
-          null;
-
-        if (liveOpenPrice == null && price.regularMarketOpen != null) {
-          liveOpenPrice = price.regularMarketOpen;
-        }
+          previousClose != null && currentPrice != null
+            ? Number((currentPrice - previousClose).toFixed(2))
+            : null;
+        const changePct =
+          previousClose != null && currentPrice != null
+            ? (currentPrice - previousClose) / previousClose
+            : null;
 
         if (livePriceEl) livePriceEl.textContent = formatPrice(currentPrice);
         if (liveChangeEl) liveChangeEl.textContent = formatChangePercent(changePct);
@@ -593,6 +727,7 @@
       setStatus("Ready.");
       resetLivePriceState(symbolInput.value.trim().toUpperCase() || "TSLA");
       loadLivePrice();
+      loadStockInfo();
     });
 
     rangeInput.addEventListener("change", () => {
@@ -601,6 +736,7 @@
 
     loadCandles();
     loadLivePrice();
+    loadStockInfo();
     startLivePricePolling();
   </script>
 </body>

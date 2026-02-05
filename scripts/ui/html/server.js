@@ -12,6 +12,11 @@ const candleCache = new Map();
 const CANDLE_TTL_MS = 300000;
 const quoteCache = new Map();
 const QUOTE_TTL_MS = 5000;
+const fmpQuoteCache = new Map();
+const FMP_QUOTE_TTL_MS = 5000;
+const fmpInfoCache = new Map();
+const FMP_INFO_TTL_MS = 60000;
+const FMP_API_KEY = process.env.FMP_API_KEY || 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(
@@ -72,6 +77,33 @@ function etToUnixSec(ymd, hh, mm) {
 
 function round2(x) {
   return x == null ? null : Number(x.toFixed(2));
+}
+
+function pick(obj, keys) {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
+  }
+  return null;
+}
+
+async function fetchFmpJson(url) {
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`FMP HTTP ${res.status}: ${text}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`FMP non-JSON response: ${text.slice(0, 200)}...`);
+  }
+}
+
+function getFmpUrl(pathname, params) {
+  const url = new URL(`https://financialmodelingprep.com/stable/${pathname}`);
+  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+  url.searchParams.set('apikey', FMP_API_KEY);
+  return url.toString();
 }
 
 function isWeekend(ymd) {
@@ -239,6 +271,87 @@ app.get('/api/quote', async (req, res) => {
     }
 
     const msg = err.message || 'Failed to fetch quote';
+    res.status(502).json({ error: msg });
+  }
+});
+
+app.get('/api/fmp/quote-short', async (req, res) => {
+  const symbol = String(req.query.symbol || 'TSLA').toUpperCase();
+  const cached = fmpQuoteCache.get(symbol);
+
+  try {
+    if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
+      return res.json(cached.data);
+    }
+
+    const url = getFmpUrl('quote-short', { symbol });
+    const payload = await fetchFmpJson(url);
+    const quote = Array.isArray(payload) ? payload[0] : null;
+    if (!quote) {
+      throw new Error(`Empty FMP payload: ${JSON.stringify(payload)}`);
+    }
+    const data = {
+      symbol: quote.symbol || symbol,
+      price: quote.price ?? null,
+      volume: quote.volume ?? null,
+    };
+    fmpQuoteCache.set(symbol, { data, timestamp: Date.now() });
+    res.json(data);
+  } catch (err) {
+    if (cached) {
+      return res.json({ ...cached.data, stale: true });
+    }
+    const msg = err.message || 'Failed to fetch FMP quote';
+    res.status(502).json({ error: msg });
+  }
+});
+
+app.get('/api/fmp/stock-info', async (req, res) => {
+  const symbol = String(req.query.symbol || 'TSLA').toUpperCase();
+  const cached = fmpInfoCache.get(symbol);
+
+  try {
+    if (cached && (Date.now() - cached.timestamp) < FMP_INFO_TTL_MS) {
+      return res.json(cached.data);
+    }
+
+    const [quotePayload, afterPayload] = await Promise.all([
+      fetchFmpJson(getFmpUrl('quote', { symbol })),
+      fetchFmpJson(getFmpUrl('aftermarket-quote', { symbol })).catch((e) => ({ __error: e.message })),
+    ]);
+
+    const quote = Array.isArray(quotePayload) ? quotePayload[0] : quotePayload;
+    const after = afterPayload && afterPayload.__error ? null : (Array.isArray(afterPayload) ? afterPayload[0] : afterPayload);
+
+    const data = {
+      symbol,
+      currency: quote?.currency ?? 'USD',
+      previousClose: pick(quote, ['previousClose', 'prevClose']),
+      open: pick(quote, ['open', 'priceOpen']),
+      dayLow: pick(quote, ['dayLow', 'low']),
+      dayHigh: pick(quote, ['dayHigh', 'high']),
+      yearLow: pick(quote, ['yearLow', 'fiftyTwoWeekLow', '52WeekLow']),
+      yearHigh: pick(quote, ['yearHigh', 'fiftyTwoWeekHigh', '52WeekHigh']),
+      volume: pick(quote, ['volume']),
+      avgVolume: pick(quote, ['avgVolume', 'averageVolume']),
+      marketCap: pick(quote, ['marketCap', 'mktCap']),
+      beta: pick(quote, ['beta']),
+      peTTM: pick(quote, ['pe', 'peRatioTTM', 'peTTM']),
+      epsTTM: pick(quote, ['eps', 'epsTTM']),
+      bid: pick(after, ['bid', 'bidPrice']),
+      bidSize: pick(after, ['bidSize', 'bidSizeShares']),
+      ask: pick(after, ['ask', 'askPrice']),
+      askSize: pick(after, ['askSize', 'askSizeShares']),
+      stale: Boolean(afterPayload && afterPayload.__error),
+    };
+
+    fmpInfoCache.set(symbol, { data, timestamp: Date.now() });
+    res.json(data);
+  } catch (err) {
+    if (cached) {
+      return res.json({ ...cached.data, stale: true });
+    }
+    const msg = err.message || 'Failed to fetch FMP stock info';
     res.status(502).json({ error: msg });
   }
 });
