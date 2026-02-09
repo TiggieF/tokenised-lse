@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TToken Airdrop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --accent: #e04c4c;
+      --accent-2: #1b8b8b;
+      --panel: rgba(255, 255, 255, 0.85);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 32px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 28px;
+      backdrop-filter: blur(8px);
+    }
+
+    .title {
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0 0 18px;
+    }
+
+    .center-wrap {
+      background: rgba(255, 255, 255, 0.75);
+      border-radius: 20px;
+      padding: 40px 24px 52px;
+      text-align: center;
+      border: 1px solid rgba(16, 20, 24, 0.08);
+    }
+
+    .counter {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      margin-top: 20px;
+      margin-bottom: 36px;
+    }
+
+    .counter-btn {
+      width: 52px;
+      height: 52px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 20, 24, 0.1);
+      background: #fff;
+      font-size: 28px;
+      font-weight: 600;
+      color: var(--muted);
+      cursor: pointer;
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+
+    .counter-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 18px rgba(16, 20, 24, 0.12);
+    }
+
+    .counter-value {
+      font-size: clamp(40px, 6vw, 64px);
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .airdrop-btn {
+      padding: 12px 32px;
+      border-radius: 10px;
+      border: none;
+      background: var(--accent);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      box-shadow: 0 10px 18px rgba(224, 76, 76, 0.25);
+      cursor: pointer;
+      transition: transform 120ms ease;
+    }
+
+    .airdrop-btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .status {
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    @media (max-width: 720px) {
+      body {
+        padding: 20px;
+      }
+
+      .counter {
+        gap: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="title">TToken</div>
+    <div class="center-wrap">
+      <div style="display:flex; flex-direction:column; gap: 10px; align-items:center;">
+        <div class="status">Mint amount (TToken)</div>
+        <input
+          id="amount-input"
+          type="text"
+          value="1000"
+          style="width: 180px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(16, 20, 24, 0.1); font-family: inherit; text-align: center;"
+        />
+      </div>
+      <button class="airdrop-btn" id="airdrop-btn" type="button">Airdrop</button>
+      <div class="status" id="status-text">Select an amount and airdrop to your wallet.</div>
+      <div class="status">Wallet: <span id="ttoken-wallet">-</span></div>
+      <div class="status" id="import-hint" style="display:none;"></div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top: 24px;">
+    <div class="title">Equity Token Factory</div>
+    <div class="center-wrap">
+      <div style="display:flex; flex-direction:column; gap: 16px; align-items:center;">
+        <select id="equity-symbol" style="max-width: 260px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(16, 20, 24, 0.1); font-family: inherit;">
+        </select>
+        <div class="counter" style="margin-top: 6px;">
+          <button class="counter-btn" id="equity-minus-btn" type="button">−</button>
+          <div class="counter-value" id="equity-amount-value">1000</div>
+          <button class="counter-btn" id="equity-plus-btn" type="button">+</button>
+        </div>
+        <button class="airdrop-btn" id="mint-equity-btn" type="button">Mint Equity</button>
+        <div class="status" id="equity-status">Create or mint to your wallet.</div>
+        <div class="status">Wallet: <span id="equity-wallet">-</span></div>
+        <div class="status" id="equity-import-hint" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const amountInput = document.getElementById("amount-input");
+    const airdropBtn = document.getElementById("airdrop-btn");
+    const statusText = document.getElementById("status-text");
+    const importHint = document.getElementById("import-hint");
+    const equitySymbol = document.getElementById("equity-symbol");
+    const equityMinusBtn = document.getElementById("equity-minus-btn");
+    const equityPlusBtn = document.getElementById("equity-plus-btn");
+    const equityAmountValue = document.getElementById("equity-amount-value");
+    const mintEquityBtn = document.getElementById("mint-equity-btn");
+    const equityStatus = document.getElementById("equity-status");
+    const equityImportHint = document.getElementById("equity-import-hint");
+    const ttokenWallet = document.getElementById("ttoken-wallet");
+    const equityWallet = document.getElementById("equity-wallet");
+
+    const STEP = 1000;
+    let equityAmount = 1000;
+    let currentAccount = "";
+
+    const STOCKS = [
+      { symbol: "AAPL", name: "Apple" },
+      { symbol: "MSFT", name: "Microsoft" },
+      { symbol: "AMZN", name: "Amazon" },
+      { symbol: "NVDA", name: "NVIDIA" },
+      { symbol: "GOOGL", name: "Alphabet" },
+      { symbol: "META", name: "Meta" },
+      { symbol: "TSLA", name: "Tesla" },
+      { symbol: "BRKB", name: "Berkshire Hathaway (BRK.B)" },
+      { symbol: "JPM", name: "JPMorgan Chase" },
+      { symbol: "V", name: "Visa" },
+    ];
+
+    function renderEquityAmount() {
+      equityAmountValue.textContent = String(equityAmount);
+    }
+
+    function setEquityStatus(message, tone = "neutral") {
+      equityStatus.textContent = message;
+      equityStatus.style.color = tone === "error" ? "#e04c4c" : "#5b6b7a";
+    }
+
+    function setEquityImportHint(tokenAddress, symbol) {
+      equityImportHint.style.display = "block";
+      equityImportHint.textContent = `Import ${symbol} in MetaMask. Address: ${tokenAddress} | Decimals: 18`;
+    }
+
+    function setStatus(message, tone = "neutral") {
+      statusText.textContent = message;
+      statusText.style.color = tone === "error" ? "#e04c4c" : "#5b6b7a";
+    }
+
+    function setWalletAddress(address) {
+      currentAccount = address;
+      ttokenWallet.textContent = address;
+      equityWallet.textContent = address;
+    }
+
+    async function connectWallet() {
+      const accounts = await window.ethereum.request(
+        {
+          method: "eth_requestAccounts",
+        }
+      );
+      setWalletAddress(accounts[0]);
+    }
+
+    equityMinusBtn.addEventListener("click", () => {
+      equityAmount = Math.max(1000, equityAmount - STEP);
+      renderEquityAmount();
+    });
+
+    equityPlusBtn.addEventListener("click", () => {
+      equityAmount += STEP;
+      renderEquityAmount();
+    });
+
+    async function getTTokenAddress() {
+      const res = await fetch("/api/ttoken-address");
+      const data = await res.json();
+      return data.address;
+    }
+
+    async function airdrop() {
+      try {
+        setStatus("Submitting airdrop...");
+        const rawAmount = amountInput.value;
+        const parsedAmount = Number(rawAmount);
+        const ttokenAddress = await getTTokenAddress();
+        const res = await fetch("/api/ttoken/mint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ to: currentAccount, amount: parsedAmount }),
+        });
+        const data = await res.json();
+
+        const txHash = data.txHash || "";
+        if (txHash.length > 0) {
+          setStatus(`Airdrop sent: ${txHash.slice(0, 10)}...`);
+        } else {
+          setStatus("Airdrop sent: submitted");
+        }
+        importHint.style.display = "block";
+        importHint.textContent = `token address: ${ttokenAddress} and name: TToken`;
+      } catch (err) {
+        setStatus(err.message || "Airdrop failed.", "error");
+      }
+    }
+
+    airdropBtn.addEventListener("click", airdrop);
+
+    function populateStocks() {
+      equitySymbol.innerHTML = "";
+      STOCKS.forEach((stock) => {
+        const opt = document.createElement("option");
+        opt.value = stock.symbol;
+        opt.textContent = `${stock.name} (${stock.symbol})`;
+        equitySymbol.appendChild(opt);
+      });
+    }
+
+    async function mintEquityToken() {
+      try {
+        setEquityStatus("Creating & minting equity...");
+        const selected = STOCKS.find((stock) => {
+          return stock.symbol === equitySymbol.value;
+        });
+        let selectedName = equitySymbol.value;
+        if (selected && selected.name) {
+          selectedName = selected.name;
+        }
+        const res = await fetch("/api/equity/create-mint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol: equitySymbol.value,
+            name: `${selectedName} Equity`,
+            to: currentAccount,
+            amount: equityAmount,
+          }),
+        });
+        const data = await res.json();
+        const mintHash = data.mintTx || data.txHash || "";
+        setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value}. Tx: ${mintHash.slice(0, 10)}...`);
+        setEquityImportHint(data.tokenAddress, equitySymbol.value);
+      } catch (err) {
+        setEquityStatus(err.message || "Mint failed", "error");
+      }
+    }
+
+    mintEquityBtn.addEventListener("click", mintEquityToken);
+
+    renderEquityAmount();
+    populateStocks();
+    connectWallet();
+    window.ethereum.on("accountsChanged", (accounts) => {
+      setWalletAddress(accounts[0]);
+    });
+  </script>
+</body>
+</html>

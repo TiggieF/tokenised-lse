@@ -22,7 +22,14 @@ async function writeDeployment(networkName, payload) {
   const dir = path.join(__dirname, "..", "deployments");
   await ensureDir(dir);
   const filePath = path.join(dir, `${networkName}.json`);
-  await fs.promises.writeFile(filePath, JSON.stringify(payload, null, 2));
+  let existing = {};
+  try {
+    existing = JSON.parse(await fs.promises.readFile(filePath, "utf8"));
+  } catch (err) {
+    existing = {};
+  }
+  const merged = { ...existing, ...payload };
+  await fs.promises.writeFile(filePath, JSON.stringify(merged, null, 2) + "\n");
   return filePath;
 }
 
@@ -49,6 +56,10 @@ async function main() {
   const listingRole = await registry.LISTING_ROLE();
   await registry.connect(admin).grantRole(listingRole, await factory.getAddress());
 
+  const PriceFeed = await ethers.getContractFactory("PriceFeed");
+  const priceFeed = await PriceFeed.deploy(admin.address, admin.address);
+  await priceFeed.waitForDeployment();
+
   if (shouldCreateListings) {
     for (const listing of DEFAULT_LISTINGS) {
       const tx = await factory.connect(admin).createEquityToken(listing.symbol, listing.name);
@@ -64,6 +75,7 @@ async function main() {
     defaultMinter: defaultMinter.address,
     listingsRegistry: await registry.getAddress(),
     equityTokenFactory: await factory.getAddress(),
+    priceFeed: await priceFeed.getAddress(),
   };
 
   const outputPath = await writeDeployment(network.name, payload);

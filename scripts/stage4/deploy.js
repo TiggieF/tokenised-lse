@@ -26,18 +26,11 @@ async function writeDeployment(networkName, payload) {
 
 async function main() {
   const [deployer] = await ethers.getSigners();
-  const ttokenAddress = process.env.TTOKEN_ADDRESS;
-  const priceFeedAddress = process.env.PRICE_FEED_ADDRESS;
-  const registryAddress = process.env.LISTINGS_REGISTRY;
-  if (!ttokenAddress) {
-    throw new Error("Set TTOKEN_ADDRESS env var");
-  }
-  if (!registryAddress) {
-    throw new Error("Set LISTINGS_REGISTRY env var");
-  }
-  if (!priceFeedAddress) {
-    throw new Error("Set PRICE_FEED_ADDRESS env var");
-  }
+  const deploymentsPath = path.join(__dirname, "..", "..", "deployments", `${network.name}.json`);
+  const deployments = JSON.parse(await fs.promises.readFile(deploymentsPath, "utf8"));
+  const ttokenAddress = deployments.ttoken;
+  const registryAddress = deployments.listingsRegistry;
+  const priceFeedAddress = deployments.priceFeed;
 
   console.log("Network:", network.name);
   console.log("Deployer:", deployer.address);

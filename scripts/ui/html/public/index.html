@@ -48,6 +48,55 @@
       color: #94a3b8;
     }
 
+    .wallet-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      background: rgba(15, 23, 42, 0.75);
+      color: #cbd5f5;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+
+    .wallet-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #ef4444;
+      box-shadow: 0 0 10px rgba(239, 68, 68, 0.6);
+    }
+
+    .wallet-dot.connected {
+      background: #22c55e;
+      box-shadow: 0 0 10px rgba(34, 197, 94, 0.6);
+    }
+
+    .wallet-text {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .wallet-label {
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-size: 0.7rem;
+      color: #94a3b8;
+    }
+
+    .wallet-account {
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+
+    .wallet-hint {
+      font-size: 0.7rem;
+      color: #94a3b8;
+    }
+
     .nav {
       display: flex;
       flex-direction: column;
@@ -179,11 +228,20 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="logo">TOKENISED NASDAQ</div>
+      <div class="wallet-status" id="wallet-status" role="button" aria-label="Connect wallet">
+        <span class="wallet-dot" id="wallet-dot"></span>
+        <div class="wallet-text">
+          <span class="wallet-label">Wallet</span>
+          <span class="wallet-account" id="wallet-account">Not connected</span>
+          <span class="wallet-hint" id="wallet-hint">Click to connect</span>
+        </div>
+      </div>
       <nav class="nav">
-        <a class="active" href="#">Markets</a>
-        <a href="#">Portfolio</a>
-        <a href="#">TToken</a>
-        <a href="#">Admin</a>
+        <a class="nav-link active" href="#" data-page="markets">Markets</a>
+        <a class="nav-link" href="#" data-page="portfolio">Portfolio</a>
+        <a class="nav-link" href="#" data-page="ttoken">TToken</a>
+        <a class="nav-link" href="#" data-page="trade">Trade</a>
+        <a class="nav-link" href="#" data-page="admin">Admin</a>
       </nav>
     </aside>
 
@@ -194,16 +252,125 @@
       </header>
 
       <section class="card">
-
-
-        <iframe src="/dataFetch/tsla-yahoo/chart.html" name="tokenised-stock-info" title="Stock information module" loading="lazy"
-          style="width: 100%; min-height: 1200px; border: 0; border-radius: 24px; background: #0b1020;">
-        </iframe>
-
-
+        <iframe
+          id="page-frame"
+          src="/dataFetch/tsla-yahoo/chart.html"
+          name="tokenised-stock-info"
+          title="Stock information module"
+          loading="lazy"
+          style="width: 100%; min-height: 1200px; border: 0; border-radius: 24px; background: #0b1020;"
+        ></iframe>
       </section>
     </main>
   </div>
+  <script>
+    const walletStatus = document.getElementById("wallet-status");
+    const walletDot = document.getElementById("wallet-dot");
+    const walletAccount = document.getElementById("wallet-account");
+    const walletHint = document.getElementById("wallet-hint");
+    const pageFrame = document.getElementById("page-frame");
+    const navLinks = document.querySelectorAll(".nav-link");
+
+    function truncateAddress(address) {
+      return `${address.slice(0, 6)}...${address.slice(-4)}`;
+    }
+
+    function setWalletStatus(connected, account) {
+      if (connected) {
+        walletDot.classList.add("connected");
+        walletAccount.textContent = truncateAddress(account);
+        walletHint.textContent = "Connected";
+      } else {
+        walletDot.classList.remove("connected");
+        walletAccount.textContent = "Not connected";
+        walletHint.textContent = "Click to connect";
+      }
+    }
+
+    async function refreshWalletStatus() {
+      try {
+        const accounts = await window.ethereum.request(
+          {
+            method: "eth_accounts",
+          }
+        );
+        const account = accounts[0];
+        setWalletStatus(true, account);
+      } catch (err) {
+        setWalletStatus(false);
+      }
+    }
+
+    async function requestWalletConnection() {
+      try {
+        const accounts = await window.ethereum.request(
+          {
+            method: "eth_requestAccounts",
+          }
+        );
+        const account = accounts[0];
+        setWalletStatus(true, account);
+      } catch (err) {
+        setWalletStatus(false);
+      }
+    }
+
+    function setActiveNav(page) {
+      for (let i = 0; i < navLinks.length; i++) {
+        const link = navLinks[i];
+        link.classList.toggle("active", link.dataset.page === page);
+      }
+    }
+
+    function loadPage(page) {
+      if (page === "ttoken") {
+        pageFrame.src = "/ttoken.html";
+        pageFrame.title = "TToken airdrop";
+        setActiveNav("ttoken");
+        return;
+      }
+      if (page === "portfolio") {
+        pageFrame.src = "/portfolio.html";
+        pageFrame.title = "Portfolio";
+        setActiveNav("portfolio");
+        return;
+      }
+      if (page === "trade") {
+        pageFrame.src = "/trade.html";
+        pageFrame.title = "Trade";
+        setActiveNav("trade");
+        return;
+      }
+      if (page === "admin") {
+        pageFrame.src = "/admin.html";
+        pageFrame.title = "Admin";
+        setActiveNav("admin");
+        return;
+      }
+      pageFrame.src = "/dataFetch/tsla-yahoo/chart.html";
+      pageFrame.title = "Stock information module";
+      setActiveNav("markets");
+    }
+
+    for (let i = 0; i < navLinks.length; i++) {
+      const link = navLinks[i];
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        loadPage(link.dataset.page || "markets");
+      });
+    }
+
+    refreshWalletStatus();
+    if (window.ethereum) {
+      window.ethereum.on("accountsChanged", (accounts) => {
+        const account = accounts[0];
+        setWalletStatus(true, account);
+        pageFrame.contentWindow.location.reload();
+      });
+    }
+    walletStatus.addEventListener("click", requestWalletConnection);
+    loadPage("markets");
+  </script>
 </body>
 
 </html>

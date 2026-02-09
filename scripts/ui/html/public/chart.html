@@ -186,6 +186,29 @@
       color: var(--muted);
     }
 
+    .live-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .toggle-btn {
+      padding: 8px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      background: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    .toggle-btn.disabled {
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.7);
+    }
+
     .info-panel {
       margin-top: 24px;
     }
@@ -288,6 +311,9 @@
         <div class="live-open">Open: <span id="live-open">-</span></div>
         <div id="live-updated" class="live-updated change-neutral">Updated -</div>
       </div>
+      <div class="live-actions">
+        <button id="live-toggle" class="toggle-btn" type="button">Enabled</button>
+      </div>
     </div>
     <div id="status" class="badge"><span class="dot"></span><span>Ready.</span></div>
   </div>
@@ -333,6 +359,7 @@
     const liveChangeEl = document.getElementById("live-change");
     const liveOpenEl = document.getElementById("live-open");
     const liveUpdatedEl = document.getElementById("live-updated");
+    const liveToggleBtn = document.getElementById("live-toggle");
     const infoUpdatedEl = document.getElementById("info-updated");
     const infoPrevCloseEl = document.getElementById("info-prev-close");
     const infoOpenEl = document.getElementById("info-open");
@@ -349,72 +376,74 @@
 
     const CHANGE_CLASSES = ["change-positive", "change-negative", "change-neutral"];
     let liveSymbol = symbolInput.value.trim().toUpperCase() || "TSLA";
-    let liveOpenPrice = null;
-    let lastLiveUpdate = null;
-    let livePoller = null;
-    let liveTicker = null;
-    let latestStockInfo = null;
+    let liveOpenPrice;
+    let lastLiveUpdate;
+    let livePoller;
+    let liveTicker;
+    let livePollingEnabled = true;
+    let latestStockInfo;
 
     function setStatus(text, tone = "neutral") {
       statusText.textContent = text;
-      statusEl.querySelector(".dot").style.background =
-        tone === "error" ? "#e04c4c" : "#1b8b8b";
+      const dot = statusEl.querySelector(".dot");
+      if (tone === "error") {
+        dot.style.background = "#e04c4c";
+      } else {
+        dot.style.background = "#1b8b8b";
+      }
     }
 
     function applyChangeClass(el, direction) {
-      if (!el) return;
-      CHANGE_CLASSES.forEach((cls) => el.classList.remove(cls));
-      if (direction > 0) el.classList.add("change-positive");
-      else if (direction < 0) el.classList.add("change-negative");
-      else el.classList.add("change-neutral");
+      for (let i = 0; i < CHANGE_CLASSES.length; i++) {
+        const cls = CHANGE_CLASSES[i];
+        el.classList.remove(cls);
+      }
+      if (direction > 0) {
+        el.classList.add("change-positive");
+      } else if (direction < 0) {
+        el.classList.add("change-negative");
+      } else {
+        el.classList.add("change-neutral");
+      }
     }
 
     function formatPrice(value) {
-      return value == null || Number.isNaN(value) ? "-" : `$${value.toFixed(2)}`;
+      return `$${value.toFixed(2)}`;
     }
 
     function formatNumber(value, digits = 2) {
-      if (value == null || Number.isNaN(value)) return "-";
       return Number(value).toFixed(digits);
     }
 
     function formatInt(value) {
-      if (value == null || Number.isNaN(value)) return "-";
       return Math.round(Number(value)).toLocaleString("en-US");
     }
 
     function formatRange(low, high) {
-      if (low == null || high == null) return "-";
       return `${formatPrice(Number(low))} - ${formatPrice(Number(high))}`;
     }
 
     function formatChangePercent(percent) {
-      if (percent == null || Number.isNaN(percent)) return "-";
       const pctValue = percent * 100;
-      return `${pctValue > 0 ? "+" : ""}${pctValue.toFixed(2)}%`;
+      if (pctValue > 0) {
+        return `+${pctValue.toFixed(2)}%`;
+      }
+      return `${pctValue.toFixed(2)}%`;
     }
 
     function renderLiveUpdated() {
-      if (!liveUpdatedEl) return;
-      if (!lastLiveUpdate) {
-        liveUpdatedEl.textContent = "Updated -";
-        applyChangeClass(liveUpdatedEl, 0);
-        return;
-      }
       const seconds = Math.max(0, Math.floor((Date.now() - lastLiveUpdate) / 1000));
       liveUpdatedEl.textContent = `Updated ${seconds}s ago`;
     }
 
     function setInfoText(el, value) {
-      if (!el) return;
-      el.textContent = value == null ? "-" : value;
+      el.textContent = value;
     }
 
     function updateStockInfo(data) {
-      if (!data) return;
       latestStockInfo = data;
-      setInfoText(infoPrevCloseEl, data.previousClose != null ? formatPrice(Number(data.previousClose)) : "-");
-      setInfoText(infoOpenEl, data.open != null ? formatPrice(Number(data.open)) : "-");
+      setInfoText(infoPrevCloseEl, formatPrice(Number(data.previousClose)));
+      setInfoText(infoOpenEl, formatPrice(Number(data.open)));
       setInfoText(infoDayRangeEl, formatRange(data.dayLow, data.dayHigh));
       setInfoText(infoYearRangeEl, formatRange(data.yearLow, data.yearHigh));
       setInfoText(infoVolumeEl, formatInt(data.volume));
@@ -424,36 +453,26 @@
       setInfoText(infoPeEl, formatNumber(data.peTTM, 2));
       setInfoText(infoEpsEl, formatNumber(data.epsTTM, 2));
 
-      const bidText =
-        data.bid != null
-          ? `${formatPrice(Number(data.bid))}${data.bidSize ? ` x ${formatInt(data.bidSize)}` : ""}`
-          : "-";
-      const askText =
-        data.ask != null
-          ? `${formatPrice(Number(data.ask))}${data.askSize ? ` x ${formatInt(data.askSize)}` : ""}`
-          : "-";
+      const bidText = `${formatPrice(Number(data.bid))} x ${formatInt(data.bidSize)}`;
+      const askText = `${formatPrice(Number(data.ask))} x ${formatInt(data.askSize)}`;
       setInfoText(infoBidEl, bidText);
       setInfoText(infoAskEl, askText);
-      if (infoUpdatedEl) {
-        infoUpdatedEl.textContent = data.stale ? "Snapshot (stale)" : "Snapshot";
-      }
+      infoUpdatedEl.textContent = data.stale ? "Snapshot (stale)" : "Snapshot";
     }
 
     async function loadStockInfo() {
       const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
       try {
-        const res = await fetch(`/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`);
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error || "Failed to load stock info");
-        }
+        const res = await fetch(
+          `/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`
+        );
+        const data = await res.json(
+        );
         updateStockInfo(data);
-        if (liveOpenPrice == null && data.open != null) {
-          liveOpenPrice = Number(data.open);
-          if (liveOpenEl) liveOpenEl.textContent = formatPrice(liveOpenPrice);
-        }
+        liveOpenPrice = Number(data.open);
+        liveOpenEl.textContent = formatPrice(liveOpenPrice);
       } catch (err) {
-        if (infoUpdatedEl) infoUpdatedEl.textContent = "Updated -";
+        infoUpdatedEl.textContent = "Updated -";
       }
     }
 
@@ -477,7 +496,13 @@
     }
 
     function isTradingDay(ymd) {
-      return !isWeekend(ymd) && !HOLIDAYS_ET.includes(ymd);
+      if (isWeekend(ymd)) {
+        return false;
+      }
+      if (HOLIDAYS_ET.includes(ymd)) {
+        return false;
+      }
+      return true;
     }
 
     function previousTradingDay(ymd) {
@@ -499,15 +524,14 @@
       defaultDate: lastValidDate,
       maxDate: getETDateString(),
       disable: [
-        (date) => date.getDay() === 0 || date.getDay() === 6,
+        (date) => {
+          const day = date.getDay();
+          const isWeekend = day === 0 || day === 6;
+          return isWeekend;
+        },
         ...HOLIDAYS_ET,
       ],
       onChange: (selectedDates, dateStr) => {
-        if (!dateStr) return;
-        if (!isTradingDay(dateStr)) {
-          setStatus("Market closed on weekends/holidays. Pick a trading day.", "error");
-          return;
-        }
         lastValidDate = dateStr;
         setStatus("Ready.");
         loadCandles();
@@ -534,14 +558,22 @@
         hour12: false,
       }).formatToParts(new Date(unixSec * 1000));
 
-      const get = (t) => parts.find(p => p.type === t)?.value;
+      function getPartValue(type) {
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          if (part.type === type) {
+            return part.value;
+          }
+        }
+        return "";
+      }
       return Date.UTC(
-        Number(get("year")),
-        Number(get("month")) - 1,
-        Number(get("day")),
-        Number(get("hour")),
-        Number(get("minute")),
-        Number(get("second"))
+        Number(getPartValue("year")),
+        Number(getPartValue("month")) - 1,
+        Number(getPartValue("day")),
+        Number(getPartValue("hour")),
+        Number(getPartValue("minute")),
+        Number(getPartValue("second"))
       );
     }
 
@@ -562,10 +594,14 @@
         borderVisible: false,
         timeVisible: true,
         secondsVisible: false,
-        tickMarkFormatter: (time) => etFormatter.format(new Date(time * 1000)),
+        tickMarkFormatter: (time) => {
+          return etFormatter.format(new Date(time * 1000));
+        },
       },
       localization: {
-        timeFormatter: (time) => etFormatter.format(new Date(time * 1000)),
+        timeFormatter: (time) => {
+          return etFormatter.format(new Date(time * 1000));
+        },
       },
     });
 
@@ -589,7 +625,6 @@
     //     start: 0,
     //     end: 100,
     //   },
-    // }) : null;
 
     window.addEventListener("resize", () => {
       chart.applyOptions({ width: chartEl.clientWidth });
@@ -597,12 +632,12 @@
 
     function resetLivePriceState(symbol) {
       liveSymbol = symbol;
-      liveOpenPrice = null;
-      lastLiveUpdate = null;
-      latestStockInfo = null;
-      if (livePriceEl) livePriceEl.textContent = "-";
-      if (liveChangeEl) liveChangeEl.textContent = "-";
-      if (liveOpenEl) liveOpenEl.textContent = "-";
+      liveOpenPrice = 0;
+      lastLiveUpdate = 0;
+      latestStockInfo = {};
+      livePriceEl.textContent = "-";
+      liveChangeEl.textContent = "-";
+      liveOpenEl.textContent = "-";
       renderLiveUpdated();
     }
 
@@ -612,105 +647,124 @@
         resetLivePriceState(symbol);
       }
 
-      if (liveSymbolLabel) {
-        liveSymbolLabel.textContent = `${symbol} live price`;
-      }
+      liveSymbolLabel.textContent = `${symbol} live price`;
 
       try {
-        const res = await fetch(`/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`);
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error || "Failed to load quote");
-        }
+        const res = await fetch(
+          `/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`
+        );
+        const data = await res.json(
+        );
+        const currentPrice = data.price;
+        const previousClose = latestStockInfo.previousClose;
+        const changeValue = Number((currentPrice - previousClose).toFixed(2));
+        const changePct = (currentPrice - previousClose) / previousClose;
 
-        const currentPrice = data.price ?? null;
-        const previousClose = latestStockInfo?.previousClose ?? null;
-        const changeValue =
-          previousClose != null && currentPrice != null
-            ? Number((currentPrice - previousClose).toFixed(2))
-            : null;
-        const changePct =
-          previousClose != null && currentPrice != null
-            ? (currentPrice - previousClose) / previousClose
-            : null;
+        livePriceEl.textContent = formatPrice(currentPrice);
+        liveChangeEl.textContent = formatChangePercent(changePct);
+        liveOpenEl.textContent = formatPrice(liveOpenPrice);
 
-        if (livePriceEl) livePriceEl.textContent = formatPrice(currentPrice);
-        if (liveChangeEl) liveChangeEl.textContent = formatChangePercent(changePct);
-        if (liveOpenEl) liveOpenEl.textContent = formatPrice(liveOpenPrice);
-
-        const direction = changeValue ?? (changePct != null ? changePct : 0);
+        const direction = changeValue;
         applyChangeClass(liveChangeEl, direction);
         applyChangeClass(liveUpdatedEl, direction);
 
         lastLiveUpdate = Date.now();
         renderLiveUpdated();
       } catch (err) {
-        if (liveChangeEl) applyChangeClass(liveChangeEl, 0);
-        if (liveUpdatedEl) applyChangeClass(liveUpdatedEl, 0);
+        applyChangeClass(liveChangeEl, 0);
+        applyChangeClass(liveUpdatedEl, 0);
       }
     }
 
     function startLivePricePolling() {
-      if (livePoller) clearInterval(livePoller);
-      if (liveTicker) clearInterval(liveTicker);
-      livePoller = setInterval(loadLivePrice, 5000);
+      clearInterval(livePoller);
+      clearInterval(liveTicker);
+      if (!livePollingEnabled) {
+        return;
+      }
+      livePoller = setInterval(loadLivePrice, 10000);
       liveTicker = setInterval(renderLiveUpdated, 1000);
+    }
+
+    function setLiveToggleState(enabled) {
+      livePollingEnabled = enabled;
+      if (enabled) {
+        liveToggleBtn.textContent = "Enabled";
+      } else {
+        liveToggleBtn.textContent = "Disabled";
+      }
+      const isDisabled = !enabled;
+      liveToggleBtn.classList.toggle("disabled", isDisabled);
+      if (enabled) {
+        loadLivePrice();
+        startLivePricePolling();
+      } else {
+        clearInterval(livePoller);
+        clearInterval(liveTicker);
+      }
     }
 
     async function loadCandles() {
       const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
       const date = dateInput.value;
       const range = rangeInput.value;
-      const interval =
-        range === "1d" ? "5" :
-        range === "5d" ? "360" :
-        range === "1m" ? "1440" :
-        range === "3m" ? "1440" :
-        range === "6m" ? "17280" :
-        "5";
-
-      if (!date) {
-        setStatus("Pick a date first.", "error");
-        return;
+      let interval = "5";
+      if (range === "1d") {
+        interval = "5";
+      } else if (range === "5d") {
+        interval = "360";
+      } else if (range === "1m") {
+        interval = "1440";
+      } else if (range === "3m") {
+        interval = "1440";
+      } else if (range === "6m") {
+        interval = "17280";
       }
 
       setStatus("Loading candles...");
 
       try {
-        const res = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}&date=${date}&interval=${interval}&range=${range}`);
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error || "Failed to load candles");
-        }
-
-        const candleData = data.candles.map(c => ({
-          time: c.timeSec,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        }));
+        const res = await fetch(
+          `/api/candles?symbol=${encodeURIComponent(symbol)}&date=${date}&interval=${interval}&range=${range}`
+        );
+        const data = await res.json(
+        );
+        const candleData = data.candles.map((c) => {
+          return {
+            time: c.timeSec,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          };
+        });
 
         candleSeries.setData(candleData);
         chart.timeScale().fitContent();
 
-        const qfData = data.candles.map(c => ({
-          time: toETTimestampMs(c.timeSec),
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: c.volume ?? 0,
-        }));
+        const qfData = data.candles.map((c) => {
+          return {
+            time: toETTimestampMs(c.timeSec),
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+          };
+        });
         // if (qfChart) {
         //   qfChart.setMarketData(qfData);
         // }
-        const rangeLabel =
-          data.range === "5d" ? "5 trading days" :
-          data.range === "1m" ? "1 month (trading days)" :
-          data.range === "3m" ? "3 months (trading days)" :
-          data.range === "6m" ? "6 months (trading days)" :
-          "1 trading day";
+        let rangeLabel = "1 trading day";
+        if (data.range === "5d") {
+          rangeLabel = "5 trading days";
+        } else if (data.range === "1m") {
+          rangeLabel = "1 month (trading days)";
+        } else if (data.range === "3m") {
+          rangeLabel = "3 months (trading days)";
+        } else if (data.range === "6m") {
+          rangeLabel = "6 months (trading days)";
+        }
         setStatus(`Loaded ${data.candles.length} candles for ${data.symbol} (${rangeLabel} ending ${data.date}).`);
       } catch (err) {
         setStatus(err.message, "error");
@@ -738,6 +792,12 @@
     loadLivePrice();
     loadStockInfo();
     startLivePricePolling();
+    if (liveToggleBtn) {
+      liveToggleBtn.addEventListener("click", () => {
+        const nextState = !livePollingEnabled;
+        setLiveToggleState(nextState);
+      });
+    }
   </script>
 </body>
 </html>

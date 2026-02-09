@@ -866,7 +866,13 @@
           "alltime-range",
           `${sd.allTimeLow ?? "-"} / ${sd.allTimeHigh ?? "-"}`
         );
-        setText("tradeable", sd.tradeable === false ? "No" : sd.tradeable === true ? "Yes" : "-");
+        let tradeableLabel = "-";
+        if (sd.tradeable === true) {
+          tradeableLabel = "Yes";
+        } else if (sd.tradeable === false) {
+          tradeableLabel = "No";
+        }
+        setText("tradeable", tradeableLabel);
 
         currentSymbol = symbol;
         markPriceUpdated();

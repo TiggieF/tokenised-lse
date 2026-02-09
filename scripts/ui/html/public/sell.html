@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sell</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --accent: #e04c4c;
+      --accent-2: #1b8b8b;
+      --panel: rgba(255, 255, 255, 0.88);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 32px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 24px;
+      backdrop-filter: blur(8px);
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .title {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    .mode-tabs {
+      display: inline-flex;
+      gap: 8px;
+      background: rgba(16, 20, 24, 0.08);
+      padding: 4px;
+      border-radius: 999px;
+    }
+
+    .mode-tab {
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .mode-tab.active {
+      background: #fff;
+      color: var(--ink);
+      box-shadow: 0 6px 16px rgba(16, 20, 24, 0.12);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.85);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 10px 25px rgba(16, 20, 24, 0.12);
+      border: 1px solid rgba(16, 20, 24, 0.08);
+    }
+
+    .card-title {
+      font-size: 14px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 12px;
+      font-weight: 600;
+    }
+
+    .stat-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px dashed rgba(16, 20, 24, 0.12);
+      font-size: 14px;
+    }
+
+    .stat-row:last-child {
+      border-bottom: none;
+    }
+
+    .qty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      font-size: 2.2rem;
+      font-weight: 600;
+      margin: 16px 0;
+    }
+
+    .qty button {
+      width: 42px;
+      height: 42px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 20, 24, 0.2);
+      background: #fff;
+      font-size: 1.4rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .btn {
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: none;
+      font-weight: 700;
+      color: #fff;
+      cursor: pointer;
+      font-size: 1rem;
+    }
+
+    .btn-sell { background: var(--accent); }
+    .btn-auto { background: var(--accent-2); }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .input-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .input-row label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .input-row input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      font-family: inherit;
+      font-size: 14px;
+      background: #fff;
+    }
+
+    .muted-note {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    .panel-hidden {
+      display: none;
+    }
+
+    .wallet-line {
+      font-size: 12px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="header">
+      <h1 class="title">Sell <span id="symbol-title"></span></h1>
+      <div class="mode-tabs">
+        <button class="mode-tab active" id="mode-sell" type="button">Sell</button>
+        <button class="mode-tab" id="mode-auto" type="button">Auto Sell</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card" id="sell-panel">
+        <h2 class="card-title">STOCK</h2>
+        <div class="wallet-line">Wallet: <span id="sell-wallet">-</span></div>
+        <div class="stat-row">
+          <span class="muted">Symbol</span>
+          <strong id="symbol-label">AAPL</strong>
+        </div>
+        <div class="stat-row">
+          <span class="muted">Owned</span>
+          <strong>1000.00</strong>
+        </div>
+        <div class="stat-row">
+          <span class="muted">Live price</span>
+          <strong>$412.50</strong>
+        </div>
+        <div class="stat-row">
+          <span class="muted">Estimated value</span>
+          <strong>$412,500.00</strong>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Sell now</h2>
+        <div class="input-row">
+          <label>Limit price (USD)</label>
+          <input type="text" id="sell-price" value="$420.00" />
+        </div>
+        <div class="qty">
+          <button type="button">-</button>
+          <div>1000</div>
+          <button type="button">+</button>
+        </div>
+        <div class="stat-row">
+          <span class="muted">Estimated proceeds</span>
+          <strong>$412,500.00</strong>
+        </div>
+        <div class="actions">
+          <button class="btn btn-sell" id="sell-btn" type="button">Sell</button>
+        </div>
+        <div class="muted-note" id="sell-status">Ready.</div>
+      </div>
+
+      <div class="card panel-hidden" id="auto-panel">
+        <h2 class="card-title">Auto sell setup</h2>
+        <div class="input-row">
+          <label>Target sell price</label>
+          <input type="text" id="auto-price" value="$420.00" />
+        </div>
+        <div class="input-row">
+          <label>Order size</label>
+          <input type="text" id="auto-qty" value="1000" />
+        </div>
+        <div class="actions">
+          <button class="btn btn-auto" id="auto-sell-btn" type="button">Set Auto Sell</button>
+        </div>
+        <div class="muted-note" id="auto-status">Ready.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const sellWallet = document.getElementById("sell-wallet");
+    const sellPriceInput = document.getElementById("sell-price");
+    const sellButton = document.getElementById("sell-btn");
+    const sellStatus = document.getElementById("sell-status");
+    const autoPriceInput = document.getElementById("auto-price");
+    const autoQtyInput = document.getElementById("auto-qty");
+    const autoButton = document.getElementById("auto-sell-btn");
+    const autoStatus = document.getElementById("auto-status");
+    let currentAccount = "";
+
+    function setWalletAddress(address) {
+      currentAccount = address;
+      sellWallet.textContent = address;
+    }
+
+    async function connectWallet() {
+      const accounts = await window.ethereum.request(
+        {
+          method: "eth_requestAccounts",
+        }
+      );
+      setWalletAddress(accounts[0]);
+    }
+
+    const modeSell = document.getElementById("mode-sell");
+    const modeAuto = document.getElementById("mode-auto");
+    const sellPanel = document.getElementById("sell-panel");
+    const autoPanel = document.getElementById("auto-panel");
+
+    function setMode(mode) {
+      if (mode === "sell") {
+        modeSell.classList.add("active");
+        modeAuto.classList.remove("active");
+        sellPanel.classList.remove("panel-hidden");
+        autoPanel.classList.add("panel-hidden");
+        return;
+      }
+      modeSell.classList.remove("active");
+      modeAuto.classList.add("active");
+      sellPanel.classList.add("panel-hidden");
+      autoPanel.classList.remove("panel-hidden");
+    }
+
+    modeSell.addEventListener("click", () => {
+      setMode("sell");
+    });
+
+    modeAuto.addEventListener("click", () => {
+      setMode("auto");
+    });
+
+    connectWallet();
+    window.ethereum.on("accountsChanged", (accounts) => {
+      setWalletAddress(accounts[0]);
+    });
+
+    const symbolTitle = document.getElementById("symbol-title");
+    const symbolLabel = document.getElementById("symbol-label");
+    const params = new URLSearchParams(window.location.search);
+    const symbol = params.get("symbol");
+
+    if (symbol) {
+      symbolTitle.textContent = `(${symbol})`;
+      symbolLabel.textContent = symbol;
+    } else {
+      symbolTitle.textContent = "(AAPL)";
+      symbolLabel.textContent = "AAPL";
+    }
+
+    function parsePriceToCents(text) {
+      const cleaned = text.replace("$", "").replace(",", "");
+      const value = Number(cleaned);
+      const cents = Math.round(value * 100);
+      return cents;
+    }
+
+    async function placeLimitOrder(side, priceCents, qty) {
+      const payload = {
+        symbol: symbolLabel.textContent,
+        side: side,
+        priceCents: priceCents,
+        qty: qty,
+        from: currentAccount,
+      };
+      const res = await fetch(
+        "/api/orderbook/limit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = await res.json(
+      );
+      return data.txHash;
+    }
+
+    async function submitSell() {
+      const priceCents = parsePriceToCents(sellPriceInput.value);
+      const qtyText = document.querySelector("#sell-panel + .card .qty div").textContent;
+      const qty = Number(qtyText);
+      sellStatus.textContent = "Submitting...";
+      const hash = await placeLimitOrder("SELL", priceCents, qty);
+      sellStatus.textContent = `Order placed: ${String(hash).slice(0, 10)}...`;
+    }
+
+    async function submitAutoSell() {
+      const priceCents = parsePriceToCents(autoPriceInput.value);
+      const qty = Number(autoQtyInput.value);
+      autoStatus.textContent = "Submitting...";
+      const hash = await placeLimitOrder("SELL", priceCents, qty);
+      autoStatus.textContent = `Auto sell set: ${String(hash).slice(0, 10)}...`;
+    }
+
+    sellButton.addEventListener("click", () => {
+      submitSell();
+    });
+
+    autoButton.addEventListener("click", () => {
+      submitAutoSell();
+    });
+  </script>
+</body>
+</html>

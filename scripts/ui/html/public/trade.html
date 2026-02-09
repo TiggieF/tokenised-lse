@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trade</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --accent: #e04c4c;
+      --accent-2: #1b8b8b;
+      --panel: rgba(255, 255, 255, 0.88);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+      --buy: #2f9e75;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 32px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 24px;
+      backdrop-filter: blur(8px);
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .title {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.85);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 10px 25px rgba(16, 20, 24, 0.12);
+      border: 1px solid rgba(16, 20, 24, 0.08);
+    }
+
+    .card-title {
+      font-size: 14px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 12px;
+      font-weight: 600;
+    }
+
+    .select {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      background: #fff;
+      font-family: inherit;
+      font-size: 14px;
+    }
+
+    .stat-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px dashed rgba(16, 20, 24, 0.12);
+      font-size: 14px;
+    }
+
+    .stat-row:last-child {
+      border-bottom: none;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .qty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      font-size: 2.2rem;
+      font-weight: 600;
+      margin: 16px 0;
+    }
+
+    .qty button {
+      width: 42px;
+      height: 42px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 20, 24, 0.2);
+      background: #fff;
+      font-size: 1.4rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .btn {
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: none;
+      font-weight: 700;
+      color: #fff;
+      cursor: pointer;
+      font-size: 1rem;
+    }
+
+    .btn-sell { background: var(--accent); }
+    .btn-buy { background: var(--buy); }
+
+    .muted-note {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    .panel-hidden {
+      display: none;
+    }
+
+    .wallet-line {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .mode-tabs {
+      display: inline-flex;
+      gap: 8px;
+      background: rgba(16, 20, 24, 0.08);
+      padding: 4px;
+      border-radius: 999px;
+    }
+
+    .mode-tab {
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .mode-tab.active {
+      background: #fff;
+      color: var(--ink);
+      box-shadow: 0 6px 16px rgba(16, 20, 24, 0.12);
+    }
+
+    .input-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .input-row label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .input-row input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      font-family: inherit;
+      font-size: 14px;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="header">
+      <h1 class="title">Trade</h1>
+      <div class="mode-tabs">
+        <button class="mode-tab active" id="mode-buy" type="button">Buy</button>
+        <button class="mode-tab" id="mode-auto" type="button">Auto Buy</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2 class="card-title">Stock</h2>
+        <div class="wallet-line">Wallet: <span id="trade-wallet">-</span></div>
+        <select class="select" id="trade-symbol">
+          <option>Apple (AAPL)</option>
+          <option>Tesla (TSLA)</option>
+          <option>Amazon (AMZN)</option>
+          <option>Alphabet (GOOGL)</option>
+          <option>Nvidia (NVDA)</option>
+          <option>Meta (META)</option>
+          <option>Visa (V)</option>
+        </select>
+        <div class="stat-row">
+          <span class="muted">Live price</span>
+          <strong>$412.50</strong>
+        </div>
+        <div class="stat-row">
+          <span class="muted">Available TToken</span>
+          <strong>10,000.00</strong>
+        </div>
+      </div>
+
+      <div class="card" id="buy-panel">
+        <h2 class="card-title">Order size</h2>
+        <div class="input-row">
+          <label>Limit price (USD)</label>
+          <input type="text" id="buy-price" value="$395.00" />
+        </div>
+        <div class="qty">
+          <button type="button">-</button>
+          <div>1000</div>
+          <button type="button">+</button>
+        </div>
+        <div class="stat-row">
+          <span class="muted">Estimated cost</span>
+          <strong>1,000 TToken</strong>
+        </div>
+        <div class="actions">
+          <button class="btn btn-buy" id="buy-btn" type="button">Buy</button>
+        </div>
+        <div class="muted-note" id="buy-status">Ready.</div>
+      </div>
+
+      <div class="card panel-hidden" id="auto-panel">
+        <h2 class="card-title">Auto buy setup</h2>
+        <div class="input-row">
+          <label>Target buy price</label>
+          <input type="text" id="auto-price" value="$395.00" />
+        </div>
+        <div class="input-row">
+          <label>Order size</label>
+          <input type="text" id="auto-qty" value="1000" />
+        </div>
+        <div class="actions">
+          <button class="btn btn-buy" id="auto-buy-btn" type="button">Set Auto Buy</button>
+        </div>
+        <div class="muted-note" id="auto-status">Ready.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const tradeWallet = document.getElementById("trade-wallet");
+    const tradeSymbol = document.getElementById("trade-symbol");
+    const buyPriceInput = document.getElementById("buy-price");
+    const buyStatus = document.getElementById("buy-status");
+    const buyButton = document.getElementById("buy-btn");
+    const autoPriceInput = document.getElementById("auto-price");
+    const autoQtyInput = document.getElementById("auto-qty");
+    const autoStatus = document.getElementById("auto-status");
+    const autoButton = document.getElementById("auto-buy-btn");
+    let currentAccount = "";
+
+    function setWalletAddress(address) {
+      currentAccount = address;
+      tradeWallet.textContent = address;
+    }
+
+    async function connectWallet() {
+      const accounts = await window.ethereum.request(
+        {
+          method: "eth_requestAccounts",
+        }
+      );
+      setWalletAddress(accounts[0]);
+    }
+
+    function getSymbolFromSelect() {
+      const text = tradeSymbol.value;
+      const parts = text.split("(");
+      const symbolPart = parts[1];
+      const symbol = symbolPart.replace(")", "");
+      return symbol;
+    }
+
+    function parsePriceToCents(text) {
+      const cleaned = text.replace("$", "").replace(",", "");
+      const value = Number(cleaned);
+      const cents = Math.round(value * 100);
+      return cents;
+    }
+
+    async function placeLimitOrder(symbol, side, priceCents, qty) {
+      const payload = {
+        symbol: symbol,
+        side: side,
+        priceCents: priceCents,
+        qty: qty,
+        from: currentAccount,
+      };
+      const res = await fetch(
+        "/api/orderbook/limit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = await res.json(
+      );
+      return data.txHash;
+    }
+
+    async function submitBuy() {
+      const symbol = getSymbolFromSelect();
+      const priceCents = parsePriceToCents(buyPriceInput.value);
+      const qtyText = document.querySelector("#buy-panel .qty div").textContent;
+      const qty = Number(qtyText);
+      buyStatus.textContent = "Submitting...";
+      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      buyStatus.textContent = `Order placed: ${String(hash).slice(0, 10)}...`;
+    }
+
+    async function submitAutoBuy() {
+      const symbol = getSymbolFromSelect();
+      const priceCents = parsePriceToCents(autoPriceInput.value);
+      const qty = Number(autoQtyInput.value);
+      autoStatus.textContent = "Submitting...";
+      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      autoStatus.textContent = `Auto buy set: ${String(hash).slice(0, 10)}...`;
+    }
+
+    const modeBuy = document.getElementById("mode-buy");
+    const modeAuto = document.getElementById("mode-auto");
+    const buyPanel = document.getElementById("buy-panel");
+    const autoPanel = document.getElementById("auto-panel");
+
+    function setMode(mode) {
+      if (mode === "buy") {
+        modeBuy.classList.add("active");
+        modeAuto.classList.remove("active");
+        buyPanel.classList.remove("panel-hidden");
+        autoPanel.classList.add("panel-hidden");
+        return;
+      }
+      modeBuy.classList.remove("active");
+      modeAuto.classList.add("active");
+      buyPanel.classList.add("panel-hidden");
+      autoPanel.classList.remove("panel-hidden");
+    }
+
+    modeBuy.addEventListener("click", () => {
+      setMode("buy");
+    });
+
+    modeAuto.addEventListener("click", () => {
+      setMode("auto");
+    });
+
+    buyButton.addEventListener("click", () => {
+      submitBuy();
+    });
+
+    autoButton.addEventListener("click", () => {
+      submitAutoBuy();
+    });
+
+    connectWallet();
+    window.ethereum.on("accountsChanged", (accounts) => {
+      setWalletAddress(accounts[0]);
+    });
+  </script>
+</body>
+</html>

@@ -6,7 +6,8 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "coverage": "hardhat coverage"
+    "coverage": "hardhat coverage",
+    "dev:chain": "sh -c 'npx hardhat node > logs/hardhat.log 2>&1 & sleep 1 && npx hardhat run scripts/stage1/deploy.js --network localhost && npx hardhat run scripts/deployStage2.js --network localhost && npx hardhat run scripts/stage4/deploy.js --network localhost && npx hardhat run scripts/stage5/deploy.js --network localhost'"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
