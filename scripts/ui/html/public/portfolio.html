@@ -55,22 +55,6 @@
       margin: 0;
     }
 
-    .toggle-btn {
-      padding: 8px 14px;
-      border-radius: 999px;
-      border: 1px solid rgba(16, 20, 24, 0.12);
-      background: #fff;
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--ink);
-      cursor: pointer;
-    }
-
-    .toggle-btn.disabled {
-      color: var(--muted);
-      background: rgba(255, 255, 255, 0.7);
-    }
-
     table {
       width: 100%;
       border-collapse: collapse;
@@ -131,11 +115,11 @@
   <div class="panel">
     <div class="header">
       <h1 class="title">Portfolio</h1>
-      <button id="portfolio-toggle" class="toggle-btn">Enabled</button>
     </div>
     <table>
       <thead>
         <tr>
+          <!-- stock equity token display -->
           <th>Symbol</th>
           <th>Quantity</th>
           <th>Cost Price</th>
@@ -154,6 +138,7 @@
         <tr>
           <th>Symbol</th>
           <th>Quantity</th>
+          <!-- ttoken display -->
         </tr>
       </thead>
       <tbody id="cash-body"></tbody>
@@ -166,106 +151,77 @@
 
     const body = document.getElementById("portfolio-body");
     const cashBody = document.getElementById("cash-body");
-    const toggleBtn = document.getElementById("portfolio-toggle");
 
-    let pollingEnabled = true;
+    let pollingEnabled = false;
     let poller;
     const basePrices = new Map();
     let currentAccount;
 
-    function formatMoney(value) {
-      return `$${value.toFixed(2)}`;
-    }
-
-    function formatPct(value) {
-      let sign = "";
-      if (value > 0) {
-        sign = "+";
-      }
-      return `${sign}${value.toFixed(2)}%`;
-    }
-
-    function getGainClass(value) {
-      if (value > 0) {
-        return "positive";
-      }
-      if (value < 0) {
-        return "negative";
-      }
-      return "neutral";
-    }
-
-    async function fetchQuote(symbol) {
-      const res = await fetch(
-        `/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`
-      );
-      const data = await res.json(
-      );
-      const requestFailed = !res.ok || data.error;
-      if (requestFailed) {
-        const message = data.error || "Quote failed";
-        throw new Error(message);
-      }
-      return data.price;
-    }
-
-    async function loadTTokenBalance() {
-      const res = await fetch(
-        `/api/ttoken/balance?address=${encodeURIComponent(currentAccount)}`
-      );
-      const data = await res.json(
-      );
-      const balanceWei = Number(data.balanceWei);
-      ttokenBalance = balanceWei / 1e18;
-      renderCash();
-    }
-
-    async function loadBalances() {
-      const res = await fetch(
+    async function refreshPortfolio() {
+      // refreshs portfolio by fetching and render
+      const balancesRes = await fetch(
         `/api/equity/balances?address=${encodeURIComponent(currentAccount)}`
       );
-      const data = await res.json(
+      const balancesData = await balancesRes.json(
       );
-      const requestFailed = !res.ok || data.error;
-      if (requestFailed) {
+      const balancesFailed = !balancesRes.ok || balancesData.error;
+      if (balancesFailed) {
         rows = [];
+        renderTable();
+      } else {
+        const nextRows = [];
+        for (const item of balancesData.balances) {
+          const qty = Number(item.balanceWei) / 1e18;
+          if (qty > 0) {
+            nextRows.push({ symbol: item.symbol, qty });
+          }
+        }
+        rows = nextRows;
+        renderTable();
+      }
+
+      const ttokenRes = await fetch(
+        `/api/ttoken/balance?address=${encodeURIComponent(currentAccount)}`
+      );
+      const ttokenData = await ttokenRes.json(
+      );
+      const balanceWei = Number(ttokenData.balanceWei);
+      ttokenBalance = balanceWei / 1e18;
+      renderCash();
+
+      if (!pollingEnabled) {
         renderTable();
         return;
       }
-      const nextRows = [];
-      for (const item of data.balances) {
-        const qty = Number(item.balanceWei) / 1e18;
-        if (qty > 0) {
-          nextRows.push({ symbol: item.symbol, qty });
-        }
-      }
-      rows = nextRows;
-      renderTable();
-    }
 
-    async function refreshPortfolio() {
-      await loadBalances(
-      );
-      await loadTTokenBalance(
-      );
       for (const row of rows) {
         try {
-          const price = await fetchQuote(
-            row.symbol
+          const quoteRes = await fetch(
+            `/api/fmp/quote-short?symbol=${encodeURIComponent(row.symbol)}`
           );
+          const quoteData = await quoteRes.json(
+          );
+          const quoteFailed = !quoteRes.ok || quoteData.error;
+          if (quoteFailed) {
+            const message = quoteData.error || "Quote failed";
+            throw new Error(message);
+          }
+          const price = quoteData.price;
           const hasBasePrice = basePrices.has(row.symbol);
           if (!hasBasePrice) {
             basePrices.set(row.symbol, price);
           }
           row.price = price;
         } catch (err) {
-          // ignore per-row errors
+          
         }
       }
       renderTable();
     }
 
     function renderTable() {
+      // write table for equity token
+      // and in the order of the equity token's order
       body.innerHTML = "";
       if (rows.length === 0) {
         const tr = document.createElement("tr");
@@ -279,8 +235,9 @@
         const base = basePrices.get(row.symbol);
         let price = base;
         price = row.price;
-        const marketValue = row.qty * price;
-        const marketValueDisplay = formatMoney(marketValue);
+        const hasPrice = Number.isFinite(price);
+        const marketValue = hasPrice ? row.qty * price : null;
+        const marketValueDisplay = hasPrice ? `$${marketValue.toFixed(2)}` : "-";
 
         const tr = document.createElement("tr");
         tr.innerHTML = `
@@ -299,6 +256,7 @@
     }
 
     function renderCash() {
+      // write cash table for ttoken
       cashBody.innerHTML = "";
       const tr = document.createElement("tr");
       tr.innerHTML = `
@@ -310,52 +268,49 @@
 
     function setPolling(enabled) {
       pollingEnabled = enabled;
-      if (enabled) {
-        toggleBtn.textContent = "Enabled";
-      } else {
-        toggleBtn.textContent = "Disabled";
-      }
-      const isDisabled = !enabled;
-      toggleBtn.classList.toggle("disabled", isDisabled);
       if (poller) {
         clearInterval(poller);
       }
       if (enabled) {
         refreshPortfolio();
         poller = setInterval(refreshPortfolio, 10000);
+        // portfolio auto refresh every 10s
       }
     }
-
-    toggleBtn.addEventListener("click", () => {
-      const nextState = !pollingEnabled;
-      setPolling(nextState);
-    });
-    async function connectWallet() {
-      const accounts = await window.ethereum.request(
-        {
-          method: "eth_requestAccounts",
-        }
-      );
-      currentAccount = accounts[0];
-      await refreshPortfolio(
-      );
-    }
-
     if (window.ethereum) {
       window.ethereum.on("accountsChanged", (accounts) => {
         currentAccount = accounts[0];
         refreshPortfolio();
       });
+      // listens to wallet change and refresh
     }
 
-    async function initPortfolio() {
+    (async function () {
       renderTable();
       renderCash();
-      await connectWallet();
-      setPolling(true);
-    }
+      // write table for token and equity token
 
-    initPortfolio();
+      const accounts = await window.ethereum.request(
+        {
+          method: "eth_requestAccounts",
+        }
+        // request wallet connection
+      );
+      currentAccount = accounts[0];
+      await refreshPortfolio(
+        // intiial load
+      );
+
+      setPolling(pollingEnabled);
+    })();
+
+    window.addEventListener("message", (event) => {
+      const payload = event.data;
+      if (payload.type === "LIVE_UPDATES") {
+        setPolling(payload.enabled);
+        // live update for portfolio valuation
+      }
+    });
   </script>
 </body>
 </html>

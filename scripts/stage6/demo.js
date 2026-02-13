@@ -1,15 +1,15 @@
-// scripts/stage6/demo.js
-// -----------------------------------------------------------------------------
-// Demo Stage 6 Award with wallets #5, #6, #7.
-// Wallet #5 will trade the most volume and should receive the reward.
-// -----------------------------------------------------------------------------
+
+
+
+
+
 
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("hardhat");
 
 const ONE_SHARE = 10n ** 18n;
-const PRICE = 10_000n; // $100.00 in cents
+const PRICE = 10_000n; 
 
 function quoteAmount(qty, priceCents) {
   return (qty * priceCents) / 100n;
@@ -70,7 +70,7 @@ async function main() {
 
   const epoch = await award.currentEpoch();
 
-  // Trader5 does 3 trades (highest volume)
+  
   await dex.connect(trader5).placeLimitOrder(equityAddr, 1, PRICE, qty);
   await dex.connect(trader6).placeLimitOrder(equityAddr, 0, PRICE, qty);
 
@@ -80,7 +80,7 @@ async function main() {
   await dex.connect(trader5).placeLimitOrder(equityAddr, 1, PRICE, qty);
   await dex.connect(trader6).placeLimitOrder(equityAddr, 0, PRICE, qty);
 
-  // Wait for epoch to finish
+  
   await ethers.provider.send("evm_increaseTime", [11]);
   await ethers.provider.send("evm_mine", []);
 

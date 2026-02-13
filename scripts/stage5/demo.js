@@ -1,10 +1,10 @@
-// scripts/stage5/demo.js
-// -----------------------------------------------------------------------------
-// Demo for Stage 5 Dividends:
-// - Deploy TToken, ListingsRegistry, EquityToken, Dividends
-// - Grant SNAPSHOT_ROLE + MINTER_ROLE
-// - Mint equity to holders, declare dividend, claim
-// -----------------------------------------------------------------------------
+
+
+
+
+
+
+
 
 const { ethers } = require("hardhat");
 

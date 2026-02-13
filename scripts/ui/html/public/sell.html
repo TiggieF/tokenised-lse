@@ -208,6 +208,7 @@
       <div class="mode-tabs">
         <button class="mode-tab active" id="mode-sell" type="button">Sell</button>
         <button class="mode-tab" id="mode-auto" type="button">Auto Sell</button>
+        <!-- auto sell placeholder -->
       </div>
     </div>
 
@@ -215,6 +216,7 @@
       <div class="card" id="sell-panel">
         <h2 class="card-title">STOCK</h2>
         <div class="wallet-line">Wallet: <span id="sell-wallet">-</span></div>
+        <!-- wallet info -->
         <div class="stat-row">
           <span class="muted">Symbol</span>
           <strong id="symbol-label">AAPL</strong>
@@ -246,7 +248,8 @@
         </div>
         <div class="stat-row">
           <span class="muted">Estimated proceeds</span>
-          <strong>$412,500.00</strong>
+          <strong id="estimated-proceeds">$412,500.00</strong>
+          <!-- estimated cost -->
         </div>
         <div class="actions">
           <button class="btn btn-sell" id="sell-btn" type="button">Sell</button>
@@ -273,10 +276,17 @@
   </div>
 
   <script>
+    // DOM elements together for reference
     const sellWallet = document.getElementById("sell-wallet");
     const sellPriceInput = document.getElementById("sell-price");
     const sellButton = document.getElementById("sell-btn");
     const sellStatus = document.getElementById("sell-status");
+    const sellQtyContainer = document.querySelector("#sell-panel + .card .qty");
+    const sellQtyValue = sellQtyContainer.querySelector("div");
+    const sellQtyButtons = sellQtyContainer.querySelectorAll("button");
+    const sellMinusButton = sellQtyButtons[0];
+    const sellPlusButton = sellQtyButtons[1];
+    const estimatedProceedsEl = document.getElementById("estimated-proceeds");
     const autoPriceInput = document.getElementById("auto-price");
     const autoQtyInput = document.getElementById("auto-qty");
     const autoButton = document.getElementById("auto-sell-btn");
@@ -286,15 +296,7 @@
     function setWalletAddress(address) {
       currentAccount = address;
       sellWallet.textContent = address;
-    }
-
-    async function connectWallet() {
-      const accounts = await window.ethereum.request(
-        {
-          method: "eth_requestAccounts",
-        }
-      );
-      setWalletAddress(accounts[0]);
+      // wallet address dis
     }
 
     const modeSell = document.getElementById("mode-sell");
@@ -324,7 +326,55 @@
       setMode("auto");
     });
 
-    connectWallet();
+    function updateSellQty(nextValue) {
+      let value = Number(nextValue);
+      if (Number.isNaN(value)) {
+        value = 1000;
+      }
+      if (value < 1000) {
+        value = 1000;
+      }
+      sellQtyValue.textContent = String(value);
+      updateEstimatedProceeds(value);
+    }
+
+    function updateEstimatedProceeds(qty) {
+      const priceText = sellPriceInput.value;
+      const priceCents = parsePriceToCents(priceText);
+      const priceDollars = priceCents / 100;
+      const total = priceDollars * qty;
+      const proceedsText = total.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+      estimatedProceedsEl.textContent = `$${proceedsText}`;
+    }
+
+    sellMinusButton.addEventListener("click", () => {
+      const currentValue = Number(sellQtyValue.textContent);
+      const nextValue = currentValue - 1000;
+      updateSellQty(nextValue);
+    });
+
+    sellPlusButton.addEventListener("click", () => {
+      const currentValue = Number(sellQtyValue.textContent);
+      const nextValue = currentValue + 1000;
+      updateSellQty(nextValue);
+    });
+
+    sellPriceInput.addEventListener("input", () => {
+      const currentValue = Number(sellQtyValue.textContent);
+      updateEstimatedProceeds(currentValue);
+    });
+
+    (async function () {
+      const accounts = await window.ethereum.request(
+        {
+          method: "eth_requestAccounts",
+        }
+      );
+      setWalletAddress(accounts[0]);
+    })();
     window.ethereum.on("accountsChanged", (accounts) => {
       setWalletAddress(accounts[0]);
     });
@@ -370,29 +420,21 @@
       return data.txHash;
     }
 
-    async function submitSell() {
+    sellButton.addEventListener("click", async () => {
       const priceCents = parsePriceToCents(sellPriceInput.value);
       const qtyText = document.querySelector("#sell-panel + .card .qty div").textContent;
       const qty = Number(qtyText);
       sellStatus.textContent = "Submitting...";
       const hash = await placeLimitOrder("SELL", priceCents, qty);
-      sellStatus.textContent = `Order placed: ${String(hash).slice(0, 10)}...`;
-    }
+      sellStatus.textContent = `Order placed: ${String(hash)}`;
+    });
 
-    async function submitAutoSell() {
+    autoButton.addEventListener("click", async () => {
       const priceCents = parsePriceToCents(autoPriceInput.value);
       const qty = Number(autoQtyInput.value);
       autoStatus.textContent = "Submitting...";
       const hash = await placeLimitOrder("SELL", priceCents, qty);
-      autoStatus.textContent = `Auto sell set: ${String(hash).slice(0, 10)}...`;
-    }
-
-    sellButton.addEventListener("click", () => {
-      submitSell();
-    });
-
-    autoButton.addEventListener("click", () => {
-      submitAutoSell();
+      autoStatus.textContent = `Auto sell set: ${String(hash)}`;
     });
   </script>
 </body>

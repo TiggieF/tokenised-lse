@@ -1,8 +1,8 @@
-// scripts/stage5_6/demo.js
-// -----------------------------------------------------------------------------
-// Stage 5.6 demo: oracle-assisted buyExactQuoteAtOracle with detailed balances
-// and gas usage.
-// -----------------------------------------------------------------------------
+
+
+
+
+
 
 const { ethers } = require("hardhat");
 
@@ -52,7 +52,7 @@ async function main() {
   await dex.waitForDeployment();
 
   const price = 10_000n;
-  const maxSlippageBps = 100n; // 1%
+  const maxSlippageBps = 100n; 
   const makerQty = 2n * ONE_SHARE;
   const budget = quoteAmount(ONE_SHARE, price);
 

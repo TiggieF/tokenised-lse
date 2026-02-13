@@ -2,7 +2,7 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
-const PRICE = 10_000n; // $100.00 in cents
+const PRICE = 10_000n; 
 const ONE_SHARE = 10n ** 18n;
 
 function quoteAmount(qty, price) {
@@ -55,8 +55,8 @@ describe("Stage 4 — OrderBookDEX", function () {
     await equity.connect(alice).approve(await dex.getAddress(), sellQty);
     await ttoken.connect(bob).approve(await dex.getAddress(), ethers.MaxUint256);
 
-    await dex.connect(alice).placeLimitOrder(await equity.getAddress(), 1, PRICE, sellQty); // SELL
-    await dex.connect(bob).placeLimitOrder(await equity.getAddress(), 0, PRICE, buyQty); // BUY
+    await dex.connect(alice).placeLimitOrder(await equity.getAddress(), 1, PRICE, sellQty); 
+    await dex.connect(bob).placeLimitOrder(await equity.getAddress(), 0, PRICE, buyQty); 
 
     const sellOrders = await dex.getSellOrders(await equity.getAddress());
     const buyOrders = await dex.getBuyOrders(await equity.getAddress());
@@ -87,14 +87,14 @@ describe("Stage 4 — OrderBookDEX", function () {
     await equity.connect(carol).approve(await dex.getAddress(), sellQty);
     await ttoken.connect(dave).approve(await dex.getAddress(), ethers.MaxUint256);
 
-    await dex.connect(alice).placeLimitOrder(await equity.getAddress(), 1, 10_100n, sellQty); // worse price
-    await dex.connect(bob).placeLimitOrder(await equity.getAddress(), 1, 10_000n, sellQty); // best price first
-    await dex.connect(carol).placeLimitOrder(await equity.getAddress(), 1, 10_000n, sellQty); // same price later
+    await dex.connect(alice).placeLimitOrder(await equity.getAddress(), 1, 10_100n, sellQty); 
+    await dex.connect(bob).placeLimitOrder(await equity.getAddress(), 1, 10_000n, sellQty); 
+    await dex.connect(carol).placeLimitOrder(await equity.getAddress(), 1, 10_000n, sellQty); 
 
     await dex.connect(dave).placeLimitOrder(await equity.getAddress(), 0, 10_100n, 2n * sellQty);
 
     const sellOrders = await dex.getSellOrders(await equity.getAddress());
-    expect(sellOrders[0].remaining).to.equal(sellQty); // alice untouched
+    expect(sellOrders[0].remaining).to.equal(sellQty); 
     expect(sellOrders[1].remaining).to.equal(0);
     expect(sellOrders[1].active).to.equal(false);
     expect(sellOrders[2].remaining).to.equal(0);

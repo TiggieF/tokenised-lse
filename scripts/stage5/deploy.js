@@ -1,8 +1,8 @@
-// scripts/stage5/deploy.js
-// -----------------------------------------------------------------------------
-// Deploys Dividends using existing TToken + ListingsRegistry from deployments.
-// Updates deployments/localhost.json with dividends address.
-// -----------------------------------------------------------------------------
+
+
+
+
+
 
 const fs = require("fs");
 const path = require("path");

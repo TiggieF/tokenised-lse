@@ -1,15 +1,16 @@
-// scripts/stage3/updatePriceFromFinnhub.js
-// -----------------------------------------------------------------------------
-// Fetches a live quote from Finnhub and pushes it to the on-chain PriceFeed.
-// Intended for local testing and backend wiring.
-// -----------------------------------------------------------------------------
 
 const { ethers } = require("hardhat");
+const fs = require("fs");
+const path = require("path");
 
-const DEFAULT_PRICE_FEED_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 const DEFAULT_FINNHUB_API_KEY = "d4699t1r01qj716fvnmgd4699t1r01qj716fvnn0";
 const DEFAULT_ORACLE_ADDRESS = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
 
+function loadDeployments(networkName) {
+  const deploymentsPath = path.join(__dirname, "..", "..", "deployments", `${networkName}.json`);
+  const raw = fs.readFileSync(deploymentsPath, "utf8");
+  return JSON.parse(raw);
+}
 async function fetchFinnhubQuote(symbol, apiKey) {
   const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(
     symbol
@@ -34,22 +35,24 @@ async function fetchFinnhubQuote(symbol, apiKey) {
 
 function toCents(quote) {
   const price = quote.c;
-  if (price === undefined || price === null) {
-    throw new Error("Finnhub response missing current price");
-  }
-
   return Math.round(price * 100);
+  // price to cent
 }
 
 async function main() {
-  const priceFeedAddress = process.env.PRICE_FEED_ADDRESS || DEFAULT_PRICE_FEED_ADDRESS;
+  const deployments = loadDeployments("localhost");
+  const priceFeedAddress = process.env.PRICE_FEED_ADDRESS || deployments.priceFeed;
+  // get price feed address from env or deployments
   const symbol = process.env.SYMBOL;
+  // get symbol
   const finnhubSymbol = process.env.FINNHUB_SYMBOL || symbol;
   const apiKey = process.env.FINNHUB_API_KEY || DEFAULT_FINNHUB_API_KEY;
   const signerIndex = Number.parseInt(process.env.ORACLE_SIGNER_INDEX || "2", 10);
+  
 
   if (!symbol) {
     throw new Error("Set SYMBOL env var (A-Z/0-9)");
+    // check for symbol
   }
 
   const signers = await ethers.getSigners();
@@ -77,6 +80,7 @@ async function main() {
   const [storedPrice, timestamp] = await feed.getPrice(symbol);
   console.log("Stored price:", storedPrice.toString(), "cents");
   console.log("Timestamp:", timestamp.toString());
+  // fetch price and set on chain and double check
 }
 
 main().catch((error) => {

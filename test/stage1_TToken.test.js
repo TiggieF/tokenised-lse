@@ -2,19 +2,11 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
-/**
- * Helper constants matching the Solidity definitions so that the assertions use
- * precisely the same values as the contract.  BigInt is used to maintain full
- * precision when dealing with the large cap (3 × 10^50).
- */
+
 const MAX_SUPPLY = 3n * 10n ** 50n;
 const AIRDROP_AMOUNT = ethers.parseEther("1000000");
 
-/**
- * Deploys a new TToken instance and returns common test fixtures.  Using
- * `loadFixture` in the tests ensures each case starts from a clean chain
- * snapshot while keeping the suite performant.
- */
+
 async function deployTTokenFixture() {
   const [admin, otherUser, anotherUser] = await ethers.getSigners();
   const TToken = await ethers.getContractFactory("TToken");

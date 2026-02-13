@@ -1,17 +1,21 @@
-// SPDX-License-Identifier: MIT
+
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IPriceFeed {
+    // get price and time
     function getPrice(string memory symbol)
-        external
+// called outside the contract
+        external 
+        
         view
+        // read only
         returns (
             uint256 priceCents,
             uint256 timestamp
         );
-
+    // check whether fresh or not
     function isFresh(string memory symbol)
         external
         view
@@ -25,6 +29,7 @@ interface IListingsRegistry {
         returns (string[] memory);
 
     function getSymbols(uint256 offset, uint256 limit)
+    // load limited number of symbols
         external
         view
         returns (string[] memory);
@@ -35,10 +40,7 @@ interface IListingsRegistry {
         returns (address);
 }
 
-/**
- * @title PortfolioAggregator
- * @notice Read-only helper to aggregate balances and valuations in TToken.
- */
+
 contract PortfolioAggregator {
     struct Holding {
         address token;
@@ -46,6 +48,7 @@ contract PortfolioAggregator {
         uint256 balanceWei;
         uint256 priceCents;
         uint256 valueWei;
+        // actual balance
     }
 
     IERC20 public immutable ttoken;
@@ -56,6 +59,7 @@ contract PortfolioAggregator {
         require(ttokenAddress != address(0), "aggregator: ttoken is zero");
         require(registryAddress != address(0), "aggregator: registry is zero");
         require(priceFeedAddress != address(0), "aggregator: pricefeed is zero");
+        // checks for all address
         ttoken = IERC20(ttokenAddress);
         registry = IListingsRegistry(registryAddress);
         priceFeed = IPriceFeed(priceFeedAddress);
@@ -63,11 +67,13 @@ contract PortfolioAggregator {
 
     function getTTokenBalance(address user) external view returns (uint256) {
         return ttoken.balanceOf(user);
+        // getter ttoken balance
     }
 
     function getHoldings(address user) external view returns (Holding[] memory) {
         string[] memory symbols = registry.getAllSymbols();
         return buildHoldings(user, symbols);
+        // getter for all holdings in the wallet
     }
 
     function getHoldingsSlice(address user, uint256 offset, uint256 limit)
@@ -80,6 +86,7 @@ contract PortfolioAggregator {
     }
 
     function getTotalValue(address user) external view returns (uint256 totalWei) {
+        // total value
         totalWei = ttoken.balanceOf(user);
         string[] memory symbols = registry.getAllSymbols();
         for (uint256 i = 0; i < symbols.length; i++) {
@@ -123,7 +130,9 @@ contract PortfolioAggregator {
             stockValueWei += (balance * priceCents) / 100;
         }
         totalValueWei = cashValueWei + stockValueWei;
+        // total value
     }
+    // construct portfolio summary + cash + stock value
 
     function buildHoldings(address user, string[] memory symbols)
         internal

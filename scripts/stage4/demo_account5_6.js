@@ -1,15 +1,15 @@
-// scripts/stage4/demo_account5_6.js
-// -----------------------------------------------------------------------------
-// Demo: mint TToken + AAPL to accounts #5 and #6, trade via OrderBookDEX,
-// and display balances before/after.
-// -----------------------------------------------------------------------------
+
+
+
+
+
 
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("hardhat");
 
 const ONE_SHARE = 10n ** 18n;
-const PRICE = 10_000n; // $100.00 in cents
+const PRICE = 10_000n; 
 
 function quoteAmount(qty, priceCents) {
   return (qty * priceCents) / 100n;

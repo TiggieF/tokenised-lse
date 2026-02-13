@@ -186,29 +186,6 @@
       color: var(--muted);
     }
 
-    .live-actions {
-      margin-left: auto;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .toggle-btn {
-      padding: 8px 14px;
-      border-radius: 999px;
-      border: 1px solid rgba(16, 20, 24, 0.12);
-      background: #fff;
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--ink);
-      cursor: pointer;
-    }
-
-    .toggle-btn.disabled {
-      color: var(--muted);
-      background: rgba(255, 255, 255, 0.7);
-    }
-
     .info-panel {
       margin-top: 24px;
     }
@@ -299,6 +276,7 @@
       <div>
         <label>&nbsp;</label>
         <button id="loadBtn" type="submit">Load Candles</button>
+        <!-- button to manually load candles to avoid abusing api limits -->
       </div>
     </form>
     <div class="live-price">
@@ -311,9 +289,6 @@
         <div class="live-open">Open: <span id="live-open">-</span></div>
         <div id="live-updated" class="live-updated change-neutral">Updated -</div>
       </div>
-      <div class="live-actions">
-        <button id="live-toggle" class="toggle-btn" type="button">Enabled</button>
-      </div>
     </div>
     <div id="status" class="badge"><span class="dot"></span><span>Ready.</span></div>
   </div>
@@ -325,26 +300,21 @@
       <div id="info-updated" class="info-updated">Updated -</div>
     </div>
     <div class="info-grid">
+      <!-- information provided -->
       <div class="info-item"><span>Previous close</span><strong id="info-prev-close">-</strong></div>
       <div class="info-item"><span>Open</span><strong id="info-open">-</strong></div>
       <div class="info-item"><span>Day range</span><strong id="info-day-range">-</strong></div>
       <div class="info-item"><span>52-week range</span><strong id="info-year-range">-</strong></div>
       <div class="info-item"><span>Volume</span><strong id="info-volume">-</strong></div>
-      <div class="info-item"><span>Avg. volume</span><strong id="info-avg-volume">-</strong></div>
       <div class="info-item"><span>Market cap</span><strong id="info-market-cap">-</strong></div>
-      <div class="info-item"><span>Beta (5Y)</span><strong id="info-beta">-</strong></div>
-      <div class="info-item"><span>PE ratio (TTM)</span><strong id="info-pe">-</strong></div>
-      <div class="info-item"><span>EPS (TTM)</span><strong id="info-eps">-</strong></div>
-      <div class="info-item"><span>Bid</span><strong id="info-bid">-</strong></div>
-      <div class="info-item"><span>Ask</span><strong id="info-ask">-</strong></div>
     </div>
   </div>
-  <!-- <div id="qfchart" class="panel" style="margin-top: 24px; height: 520px;"></div> -->
+  
 
   <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
   <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
-  <!-- <script src="/qfchart/qfchart.dev.browser.js"></script> -->
+  
   <script>
     const statusEl = document.getElementById("status");
     const statusText = statusEl.querySelector("span:last-child");
@@ -353,26 +323,19 @@
     const dateInput = document.getElementById("date");
     const rangeInput = document.getElementById("range");
     const chartEl = document.getElementById("chart");
-    // const qfChartEl = document.getElementById("qfchart");
+    // JSDOM
     const liveSymbolLabel = document.getElementById("live-symbol-label");
     const livePriceEl = document.getElementById("live-price");
     const liveChangeEl = document.getElementById("live-change");
     const liveOpenEl = document.getElementById("live-open");
     const liveUpdatedEl = document.getElementById("live-updated");
-    const liveToggleBtn = document.getElementById("live-toggle");
     const infoUpdatedEl = document.getElementById("info-updated");
     const infoPrevCloseEl = document.getElementById("info-prev-close");
     const infoOpenEl = document.getElementById("info-open");
     const infoDayRangeEl = document.getElementById("info-day-range");
     const infoYearRangeEl = document.getElementById("info-year-range");
     const infoVolumeEl = document.getElementById("info-volume");
-    const infoAvgVolumeEl = document.getElementById("info-avg-volume");
     const infoMarketCapEl = document.getElementById("info-market-cap");
-    const infoBetaEl = document.getElementById("info-beta");
-    const infoPeEl = document.getElementById("info-pe");
-    const infoEpsEl = document.getElementById("info-eps");
-    const infoBidEl = document.getElementById("info-bid");
-    const infoAskEl = document.getElementById("info-ask");
 
     const CHANGE_CLASSES = ["change-positive", "change-negative", "change-neutral"];
     let liveSymbol = symbolInput.value.trim().toUpperCase() || "TSLA";
@@ -380,7 +343,7 @@
     let lastLiveUpdate;
     let livePoller;
     let liveTicker;
-    let livePollingEnabled = true;
+    let livePollingEnabled = false;
     let latestStockInfo;
 
     function setStatus(text, tone = "neutral") {
@@ -423,14 +386,6 @@
       return `${formatPrice(Number(low))} - ${formatPrice(Number(high))}`;
     }
 
-    function formatChangePercent(percent) {
-      const pctValue = percent * 100;
-      if (pctValue > 0) {
-        return `+${pctValue.toFixed(2)}%`;
-      }
-      return `${pctValue.toFixed(2)}%`;
-    }
-
     function renderLiveUpdated() {
       const seconds = Math.max(0, Math.floor((Date.now() - lastLiveUpdate) / 1000));
       liveUpdatedEl.textContent = `Updated ${seconds}s ago`;
@@ -438,26 +393,6 @@
 
     function setInfoText(el, value) {
       el.textContent = value;
-    }
-
-    function updateStockInfo(data) {
-      latestStockInfo = data;
-      setInfoText(infoPrevCloseEl, formatPrice(Number(data.previousClose)));
-      setInfoText(infoOpenEl, formatPrice(Number(data.open)));
-      setInfoText(infoDayRangeEl, formatRange(data.dayLow, data.dayHigh));
-      setInfoText(infoYearRangeEl, formatRange(data.yearLow, data.yearHigh));
-      setInfoText(infoVolumeEl, formatInt(data.volume));
-      setInfoText(infoAvgVolumeEl, formatInt(data.avgVolume));
-      setInfoText(infoMarketCapEl, formatInt(data.marketCap));
-      setInfoText(infoBetaEl, formatNumber(data.beta, 2));
-      setInfoText(infoPeEl, formatNumber(data.peTTM, 2));
-      setInfoText(infoEpsEl, formatNumber(data.epsTTM, 2));
-
-      const bidText = `${formatPrice(Number(data.bid))} x ${formatInt(data.bidSize)}`;
-      const askText = `${formatPrice(Number(data.ask))} x ${formatInt(data.askSize)}`;
-      setInfoText(infoBidEl, bidText);
-      setInfoText(infoAskEl, askText);
-      infoUpdatedEl.textContent = data.stale ? "Snapshot (stale)" : "Snapshot";
     }
 
     async function loadStockInfo() {
@@ -468,7 +403,14 @@
         );
         const data = await res.json(
         );
-        updateStockInfo(data);
+        latestStockInfo = data;
+        setInfoText(infoPrevCloseEl, formatPrice(Number(data.previousClose)));
+        setInfoText(infoOpenEl, formatPrice(Number(data.open)));
+        setInfoText(infoDayRangeEl, formatRange(data.dayLow, data.dayHigh));
+        setInfoText(infoYearRangeEl, formatRange(data.yearLow, data.yearHigh));
+        setInfoText(infoVolumeEl, formatInt(data.volume));
+        setInfoText(infoMarketCapEl, formatInt(data.marketCap));
+        infoUpdatedEl.textContent = data.stale ? "Snapshot (stale)" : "Snapshot";
         liveOpenPrice = Number(data.open);
         liveOpenEl.textContent = formatPrice(liveOpenPrice);
       } catch (err) {
@@ -489,34 +431,21 @@
       "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
     ];
 
-    function isWeekend(ymd) {
-      const [y, m, d] = ymd.split("-").map(Number);
+    let lastValidDate = getETDateString();
+    let [startY, startM, startD] = lastValidDate.split("-").map(Number);
+    let dt = new Date(Date.UTC(startY, startM - 1, startD));
+    for (let i = 0; i < 10; i++) {
+      dt.setUTCDate(dt.getUTCDate() - 1);
+      const cur = dt.toISOString().slice(0, 10);
+      const [y, m, d] = cur.split("-").map(Number);
       const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-      return weekday === 0 || weekday === 6;
-    }
-
-    function isTradingDay(ymd) {
-      if (isWeekend(ymd)) {
-        return false;
+      const weekend = weekday === 0 || weekday === 6;
+      const holiday = HOLIDAYS_ET.includes(cur);
+      if (!weekend && !holiday) {
+        lastValidDate = cur;
+        break;
       }
-      if (HOLIDAYS_ET.includes(ymd)) {
-        return false;
-      }
-      return true;
     }
-
-    function previousTradingDay(ymd) {
-      let [y, m, d] = ymd.split("-").map(Number);
-      let dt = new Date(Date.UTC(y, m - 1, d));
-      for (let i = 0; i < 10; i++) {
-        dt.setUTCDate(dt.getUTCDate() - 1);
-        const cur = dt.toISOString().slice(0, 10);
-        if (isTradingDay(cur)) return cur;
-      }
-      return ymd;
-    }
-
-    const lastValidDate = previousTradingDay(getETDateString());
     dateInput.value = lastValidDate;
 
     flatpickr(dateInput, {
@@ -545,37 +474,6 @@
       month: "2-digit",
       day: "2-digit",
     });
-
-    function toETTimestampMs(unixSec) {
-      const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/New_York",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-      }).formatToParts(new Date(unixSec * 1000));
-
-      function getPartValue(type) {
-        for (let i = 0; i < parts.length; i++) {
-          const part = parts[i];
-          if (part.type === type) {
-            return part.value;
-          }
-        }
-        return "";
-      }
-      return Date.UTC(
-        Number(getPartValue("year")),
-        Number(getPartValue("month")) - 1,
-        Number(getPartValue("day")),
-        Number(getPartValue("hour")),
-        Number(getPartValue("minute")),
-        Number(getPartValue("second"))
-      );
-    }
 
     const chart = LightweightCharts.createChart(chartEl, {
       layout: {
@@ -613,18 +511,7 @@
       wickDownColor: "#e04c4c",
     });
 
-    // const { QFChart } = window.QFChart || {};
-    // const qfChart = QFChart ? new QFChart(qfChartEl, {
-    //   title: symbolInput.value,
-    //   height: "520px",
-    //   databox: { position: "right" },
-    //   dataZoom: {
-    //     visible: true,
-    //     position: "bottom",
-    //     height: 6,
-    //     start: 0,
-    //     end: 100,
-    //   },
+    
 
     window.addEventListener("resize", () => {
       chart.applyOptions({ width: chartEl.clientWidth });
@@ -661,7 +548,12 @@
         const changePct = (currentPrice - previousClose) / previousClose;
 
         livePriceEl.textContent = formatPrice(currentPrice);
-        liveChangeEl.textContent = formatChangePercent(changePct);
+        const pctValue = changePct * 100;
+        if (pctValue > 0) {
+          liveChangeEl.textContent = `+${pctValue.toFixed(2)}%`;
+        } else {
+          liveChangeEl.textContent = `${pctValue.toFixed(2)}%`;
+        }
         liveOpenEl.textContent = formatPrice(liveOpenPrice);
 
         const direction = changeValue;
@@ -686,24 +578,6 @@
       liveTicker = setInterval(renderLiveUpdated, 1000);
     }
 
-    function setLiveToggleState(enabled) {
-      livePollingEnabled = enabled;
-      if (enabled) {
-        liveToggleBtn.textContent = "Enabled";
-      } else {
-        liveToggleBtn.textContent = "Disabled";
-      }
-      const isDisabled = !enabled;
-      liveToggleBtn.classList.toggle("disabled", isDisabled);
-      if (enabled) {
-        loadLivePrice();
-        startLivePricePolling();
-      } else {
-        clearInterval(livePoller);
-        clearInterval(liveTicker);
-      }
-    }
-
     async function loadCandles() {
       const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
       const date = dateInput.value;
@@ -721,7 +595,7 @@
         interval = "17280";
       }
 
-      setStatus("Loading candles...");
+      setStatus("loading candles");
 
       try {
         const res = await fetch(
@@ -743,8 +617,38 @@
         chart.timeScale().fitContent();
 
         const qfData = data.candles.map((c) => {
+          const parts = new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+          }).formatToParts(new Date(c.timeSec * 1000));
+
+          function getPartValue(type) {
+            for (let i = 0; i < parts.length; i++) {
+              const part = parts[i];
+              if (part.type === type) {
+                return part.value;
+              }
+            }
+            return "";
+          }
+
+          const time = Date.UTC(
+            Number(getPartValue("year")),
+            Number(getPartValue("month")) - 1,
+            Number(getPartValue("day")),
+            Number(getPartValue("hour")),
+            Number(getPartValue("minute")),
+            Number(getPartValue("second"))
+          );
+
           return {
-            time: toETTimestampMs(c.timeSec),
+            time: time,
             open: c.open,
             high: c.high,
             low: c.low,
@@ -752,9 +656,8 @@
             volume: c.volume,
           };
         });
-        // if (qfChart) {
-        //   qfChart.setMarketData(qfData);
-        // }
+        
+        
         let rangeLabel = "1 trading day";
         if (data.range === "5d") {
           rangeLabel = "5 trading days";
@@ -789,15 +692,26 @@
     });
 
     loadCandles();
-    loadLivePrice();
-    loadStockInfo();
-    startLivePricePolling();
-    if (liveToggleBtn) {
-      liveToggleBtn.addEventListener("click", () => {
-        const nextState = !livePollingEnabled;
-        setLiveToggleState(nextState);
-      });
+    applyLiveUpdatesState(false);
+    
+    function applyLiveUpdatesState(enabled) {
+      livePollingEnabled = enabled;
+      if (enabled) {
+        loadLivePrice();
+        startLivePricePolling();
+        return;
+      }
+      clearInterval(livePoller);
+      clearInterval(liveTicker);
     }
+
+    window.addEventListener("message", (event) => {
+      const payload = event.data;
+      if (payload.type === "LIVE_UPDATES") {
+        applyLiveUpdatesState(payload.enabled);
+      }
+    });
+    
   </script>
 </body>
 </html>

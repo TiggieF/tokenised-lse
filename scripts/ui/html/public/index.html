@@ -90,6 +90,8 @@
     .wallet-account {
       font-weight: 600;
       color: #e2e8f0;
+      font-size: 0.75rem;
+      word-break: break-all;
     }
 
     .wallet-hint {
@@ -122,6 +124,34 @@
       background: rgba(148, 163, 184, 0.18);
     }
 
+    .nav-toggle-btn {
+      margin-top: 6px;
+      padding: 10px 14px;
+      border-radius: 14px;
+      border: 1px solid transparent;
+      color: #e2e8f0;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.2s ease, border-color 0.2s ease;
+    }
+
+    .nav-toggle-btn.enabled {
+      background: rgba(22, 163, 74, 0.22);
+      border-color: rgba(22, 163, 74, 0.5);
+      color: #86efac;
+    }
+
+    .nav-toggle-btn.disabled {
+      background: rgba(220, 38, 38, 0.22);
+      border-color: rgba(220, 38, 38, 0.45);
+      color: #fca5a5;
+    }
+
+    .nav-toggle-btn:hover {
+      filter: brightness(1.05);
+    }
     .sidebar footer {
       margin-top: auto;
       border: 1px dashed rgba(148, 163, 184, 0.4);
@@ -239,9 +269,11 @@
       <nav class="nav">
         <a class="nav-link active" href="#" data-page="markets">Markets</a>
         <a class="nav-link" href="#" data-page="portfolio">Portfolio</a>
+        <a class="nav-link" href="#" data-page="transactions">Transactions</a>
         <a class="nav-link" href="#" data-page="ttoken">TToken</a>
         <a class="nav-link" href="#" data-page="trade">Trade</a>
         <a class="nav-link" href="#" data-page="admin">Admin</a>
+        <button id="live-updates-toggle" class="nav-toggle-btn disabled" type="button">Live updates: Disabled</button>
       </nav>
     </aside>
 
@@ -270,48 +302,18 @@
     const walletHint = document.getElementById("wallet-hint");
     const pageFrame = document.getElementById("page-frame");
     const navLinks = document.querySelectorAll(".nav-link");
-
-    function truncateAddress(address) {
-      return `${address.slice(0, 6)}...${address.slice(-4)}`;
-    }
+    const liveUpdatesToggle = document.getElementById("live-updates-toggle");
+    let liveUpdatesEnabled = false;
 
     function setWalletStatus(connected, account) {
       if (connected) {
         walletDot.classList.add("connected");
-        walletAccount.textContent = truncateAddress(account);
+        walletAccount.textContent = account;
         walletHint.textContent = "Connected";
       } else {
         walletDot.classList.remove("connected");
         walletAccount.textContent = "Not connected";
         walletHint.textContent = "Click to connect";
-      }
-    }
-
-    async function refreshWalletStatus() {
-      try {
-        const accounts = await window.ethereum.request(
-          {
-            method: "eth_accounts",
-          }
-        );
-        const account = accounts[0];
-        setWalletStatus(true, account);
-      } catch (err) {
-        setWalletStatus(false);
-      }
-    }
-
-    async function requestWalletConnection() {
-      try {
-        const accounts = await window.ethereum.request(
-          {
-            method: "eth_requestAccounts",
-          }
-        );
-        const account = accounts[0];
-        setWalletStatus(true, account);
-      } catch (err) {
-        setWalletStatus(false);
       }
     }
 
@@ -323,6 +325,7 @@
     }
 
     function loadPage(page) {
+      // iframe scr switch
       if (page === "ttoken") {
         pageFrame.src = "/ttoken.html";
         pageFrame.title = "TToken airdrop";
@@ -333,6 +336,12 @@
         pageFrame.src = "/portfolio.html";
         pageFrame.title = "Portfolio";
         setActiveNav("portfolio");
+        return;
+      }
+      if (page === "transactions") {
+        pageFrame.src = "/transactions.html";
+        pageFrame.title = "Transactions";
+        setActiveNav("transactions");
         return;
       }
       if (page === "trade") {
@@ -352,6 +361,24 @@
       setActiveNav("markets");
     }
 
+    function setLiveUpdatesEnabled(enabled) {
+      liveUpdatesEnabled = enabled;
+      if (enabled) {
+        liveUpdatesToggle.textContent = "Live updates: Enabled";
+      } else {
+        liveUpdatesToggle.textContent = "Live updates: Disabled";
+      }
+      liveUpdatesToggle.classList.toggle("enabled", enabled);
+      liveUpdatesToggle.classList.toggle("disabled", !enabled);
+      pageFrame.contentWindow.postMessage(
+        {
+          type: "LIVE_UPDATES",
+          enabled: enabled,
+        },
+        "*"
+      );
+    }
+
     for (let i = 0; i < navLinks.length; i++) {
       const link = navLinks[i];
       link.addEventListener("click", (event) => {
@@ -360,7 +387,20 @@
       });
     }
 
-    refreshWalletStatus();
+    (async function () {
+      try {
+        // connction to wallet and listens for changes
+        const accounts = await window.ethereum.request(
+          {
+            method: "eth_accounts",
+          }
+        );
+        const account = accounts[0];
+        setWalletStatus(true, account);
+      } catch (err) {
+        setWalletStatus(false);
+      }
+    })();
     if (window.ethereum) {
       window.ethereum.on("accountsChanged", (accounts) => {
         const account = accounts[0];
@@ -368,8 +408,31 @@
         pageFrame.contentWindow.location.reload();
       });
     }
-    walletStatus.addEventListener("click", requestWalletConnection);
+    walletStatus.addEventListener("click", async () => {
+      try {
+        // listener for wallet connection
+        const accounts = await window.ethereum.request(
+          {
+            method: "eth_requestAccounts",
+          }
+        );
+        const account = accounts[0];
+        setWalletStatus(true, account);
+      } catch (err) {
+        setWalletStatus(false);
+      }
+    });
     loadPage("markets");
+
+    liveUpdatesToggle.addEventListener("click", () => {
+      const nextState = !liveUpdatesEnabled;
+      setLiveUpdatesEnabled(nextState);
+      // event listener for live update
+    });
+
+    pageFrame.addEventListener("load", () => {
+      setLiveUpdatesEnabled(liveUpdatesEnabled);
+    });
   </script>
 </body>
 

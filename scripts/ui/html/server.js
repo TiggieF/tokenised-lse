@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { ethers } = require('ethers');
 const YahooFinance = require('yahoo-finance2').default;
 const { fetchIntradayCandles, aggregateCandles, fetchQuote } = require('../dataFetch/tsla-yahoo/yahoo');
@@ -19,9 +20,13 @@ const fmpQuoteCache = new Map();
 const FMP_QUOTE_TTL_MS = 5000;
 const fmpInfoCache = new Map();
 const FMP_INFO_TTL_MS = 60000;
+const INDEXER_SYNC_INTERVAL_MS = 5000;
+// fmp caches
 const FMP_API_KEY = process.env.FMP_API_KEY || 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
 const HARDHAT_RPC_URL = process.env.HARDHAT_RPC_URL || 'http://127.0.0.1:8545';
+// link to hardhat
 
+// connect to yahoo
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(
   '/dataFetch/tsla-yahoo',
@@ -34,59 +39,11 @@ const HOLIDAYS_ET = new Set([
   '2025-01-01','2025-01-20','2025-02-17','2025-04-18','2025-05-26','2025-06-19','2025-07-04','2025-09-01','2025-11-27','2025-12-25',
   '2026-01-01','2026-01-19','2026-02-16','2026-04-03','2026-05-25','2026-06-19','2026-07-03','2026-09-07','2026-11-26','2026-12-25',
 ]);
-
+// hard coded holidays
 const TZ = 'America/New_York';
 
-function fmtET(unixSec) {
-  return new Date(unixSec * 1000).toLocaleString('en-US', { timeZone: TZ });
-}
-
-function etParts(unixSec) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date(unixSec * 1000));
-
-  const get = (t) => {
-    const part = parts.find((p) => p.type === t);
-    return part.value;
-  };
-  return {
-    ymd: `${get("year")}-${get("month")}-${get("day")}`,
-    hm: `${get("hour")}:${get("minute")}`,
-  };
-}
-
-function etToUnixSec(ymd, hh, mm) {
-  const [Y, M, D] = ymd.split('-').map(Number);
-  let guess = Date.UTC(Y, M - 1, D, hh, mm) / 1000;
-
-  for (let i = 0; i < 4; i++) {
-    const p = etParts(guess);
-    const cur = Date.UTC(
-      Number(p.ymd.slice(0, 4)),
-      Number(p.ymd.slice(5, 7)) - 1,
-      Number(p.ymd.slice(8, 10)),
-      Number(p.hm.slice(0, 2)),
-      Number(p.hm.slice(3, 5))
-    ) / 1000;
-
-    const tgt = Date.UTC(Y, M - 1, D, hh, mm) / 1000;
-    guess += (tgt - cur);
-  }
-  return guess;
-}
-
-function round2(x) {
-  return Number(x.toFixed(2));
-}
-
 function pick(obj, keys) {
+  // pick first existing key from keys in obj
   for (const k of keys) {
     return obj[k];
   }
@@ -96,6 +53,7 @@ function pick(obj, keys) {
 function asNumber(value) {
   return Number(value);
 }
+// getter for number fields with possible different keys
 
 async function fetchFmpJson(url) {
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
@@ -109,14 +67,21 @@ async function fetchFmpJson(url) {
     throw new Error(`FMP non-JSON response: ${text.slice(0, 200)}...`);
   }
 }
+// connec to fmp
 
 function getFmpUrl(pathname, params) {
   const url = new URL(`https://financialmodelingprep.com/stable/${pathname}`);
-  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+  const entries = Object.entries(params);
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const key = entry[0];
+    const value = entry[1];
+    url.searchParams.set(key, value);
+  }
   url.searchParams.set('apikey', FMP_API_KEY);
   return url.toString();
 }
-
+// connect to contracts
 const equityFactoryInterface = new ethers.Interface([
   'function createEquityToken(string symbol, string name) returns (address)',
 ]);
@@ -129,21 +94,39 @@ const equityTokenInterface = new ethers.Interface([
   'function balanceOf(address account) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
 ]);
+const erc20Interface = new ethers.Interface([
+  'event Transfer(address indexed from,address indexed to,uint256 value)',
+]);
 const registryListInterface = new ethers.Interface([
   'function getAllSymbols() view returns (string[])',
 ]);
 const orderBookInterface = new ethers.Interface([
   'function placeLimitOrder(address equityToken, uint8 side, uint256 price, uint256 qty) returns (uint256)',
+  'function cancelOrder(uint256 orderId)',
   'function getBuyOrders(address equityToken) view returns (tuple(uint256 id,address trader,uint8 side,uint256 price,uint256 qty,uint256 remaining,bool active)[])',
   'function getSellOrders(address equityToken) view returns (tuple(uint256 id,address trader,uint8 side,uint256 price,uint256 qty,uint256 remaining,bool active)[])',
+  'event OrderPlaced(uint256 indexed id,address indexed trader,address indexed equityToken,uint8 side,uint256 price,uint256 qty)',
   'event OrderFilled(uint256 indexed makerId,uint256 indexed takerId,address indexed equityToken,uint256 price,uint256 qty)',
+  'event OrderCancelled(uint256 indexed id,address indexed trader,uint256 remainingRefunded)',
 ]);
+
+const INDEXER_DIR = path.join(__dirname, '../../..', 'cache', 'indexer');
+const INDEXER_STATE_FILE = path.join(INDEXER_DIR, 'state.json');
+const INDEXER_ORDERS_FILE = path.join(INDEXER_DIR, 'orders.json');
+const INDEXER_FILLS_FILE = path.join(INDEXER_DIR, 'fills.json');
+const INDEXER_CANCELLATIONS_FILE = path.join(INDEXER_DIR, 'cancellations.json');
+const INDEXER_CASHFLOWS_FILE = path.join(INDEXER_DIR, 'cashflows.json');
+const INDEXER_TRANSFERS_FILE = path.join(INDEXER_DIR, 'transfers.json');
+
+let indexerSyncPromise = null;
+const symbolByTokenCache = new Map();
 
 async function ensureContract(address) {
   const code = await hardhatRpc('eth_getCode', [address, 'latest']);
   return code !== '0x';
 }
 
+// load deployment and get token addresses from local file
 function loadDeployments() {
   const deploymentsPath = path.join(__dirname, '../../..', 'deployments', 'localhost.json');
   const raw = fs.readFileSync(deploymentsPath, 'utf8');
@@ -166,8 +149,10 @@ function getTTokenAddressFromDeployments() {
 
 function isValidAddress(address) {
   return /^0x[a-fA-F0-9]{40}$/.test(address);
+  // check valid address
 }
 
+// connect to hardhat and contracts
 async function hardhatRpc(method, params = []) {
   const res = await fetch(HARDHAT_RPC_URL, {
     method: 'POST',
@@ -184,14 +169,478 @@ async function hardhatRpc(method, params = []) {
   }
   return payload.result;
 }
-function isWeekend(ymd) {
-  const [y, m, d] = ymd.split('-').map(Number);
-  const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-  return weekday === 0 || weekday === 6;
+
+function ensureIndexerDir() {
+  if (!fs.existsSync(INDEXER_DIR)) {
+    fs.mkdirSync(INDEXER_DIR, { recursive: true });
+  }
 }
 
+function readJsonFile(filePath, fallbackValue) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return fallbackValue;
+  }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function normalizeAddress(address) {
+  try {
+    return ethers.getAddress(address);
+  } catch {
+    return '';
+  }
+}
+
+function orderStatus(order) {
+  if (!order.active && order.remainingWei === '0') {
+    if (order.cancelledAtBlock !== null) {
+      return 'CANCELLED';
+    }
+    return 'FILLED';
+  }
+  if (order.remainingWei !== order.qtyWei) {
+    return 'PARTIAL';
+  }
+  return 'OPEN';
+}
+
+function addCashflow(cashflows, input) {
+  cashflows.push({
+    id: `${input.txHash}:${input.logIndex}:${input.wallet}:${input.reason}`,
+    wallet: input.wallet,
+    assetType: input.assetType,
+    assetSymbol: input.assetSymbol,
+    direction: input.direction,
+    amountWei: input.amountWei,
+    reason: input.reason,
+    txHash: input.txHash,
+    blockNumber: input.blockNumber,
+    timestampMs: input.timestampMs,
+  });
+}
+
+async function lookupSymbolByToken(registryAddr, tokenAddr) {
+  const normalized = normalizeAddress(tokenAddr);
+  if (symbolByTokenCache.has(normalized)) {
+    return symbolByTokenCache.get(normalized);
+  }
+  try {
+    const symbolData = listingsRegistryInterface.encodeFunctionData('getSymbolByToken', [normalized]);
+    const symbolResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: symbolData }, 'latest']);
+    const [symbol] = listingsRegistryInterface.decodeFunctionResult('getSymbolByToken', symbolResult);
+    symbolByTokenCache.set(normalized, symbol);
+    return symbol;
+  } catch {
+    symbolByTokenCache.set(normalized, '');
+    return '';
+  }
+}
+
+async function fetchOrderBookEvents(orderBookAddr, fromBlock, toBlock) {
+  const topics = [
+    ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)'),
+    ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)'),
+    ethers.id('OrderCancelled(uint256,address,uint256)'),
+  ];
+  const logs = await hardhatRpc('eth_getLogs', [{
+    fromBlock,
+    toBlock,
+    address: orderBookAddr,
+    topics: [topics],
+  }]);
+  logs.sort((a, b) => {
+    const blockA = Number(a.blockNumber);
+    const blockB = Number(b.blockNumber);
+    if (blockA !== blockB) {
+      return blockA - blockB;
+    }
+    return Number(a.logIndex) - Number(b.logIndex);
+  });
+  return logs;
+}
+
+async function getIndexedTokenAddresses(deployments, registryAddr) {
+  const addresses = new Set();
+  const ttoken = normalizeAddress(deployments.ttoken || deployments.ttokenAddress || deployments.TTOKEN_ADDRESS || '');
+  if (ttoken) {
+    addresses.add(ttoken);
+    symbolByTokenCache.set(ttoken, 'TTOKEN');
+  }
+
+  const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
+  const listResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']);
+  const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
+  for (const symbol of symbols) {
+    const lookupData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
+    const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
+    const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
+    const normalized = normalizeAddress(tokenAddr);
+    if (!normalized || normalized === ethers.ZeroAddress) {
+      continue;
+    }
+    addresses.add(normalized);
+    symbolByTokenCache.set(normalized, symbol);
+  }
+  return Array.from(addresses);
+}
+
+async function fetchTransferEvents(tokenAddresses, fromBlock, toBlock) {
+  if (!tokenAddresses.length) {
+    return [];
+  }
+  const transferTopic = ethers.id('Transfer(address,address,uint256)');
+  const logs = [];
+  for (const token of tokenAddresses) {
+    const part = await hardhatRpc('eth_getLogs', [{
+      fromBlock,
+      toBlock,
+      address: token,
+      topics: [transferTopic],
+    }]);
+    logs.push(...part);
+  }
+  logs.sort((a, b) => {
+    const blockA = Number(a.blockNumber);
+    const blockB = Number(b.blockNumber);
+    if (blockA !== blockB) {
+      return blockA - blockB;
+    }
+    return Number(a.logIndex) - Number(b.logIndex);
+  });
+  return logs;
+}
+
+function buildIndexerChecksum(snapshot) {
+  const payload = {
+    state: {
+      lastIndexedBlock: snapshot.state.lastIndexedBlock,
+      latestKnownBlock: snapshot.state.latestKnownBlock,
+    },
+    orderCount: Object.keys(snapshot.orders).length,
+    fillCount: snapshot.fills.length,
+    cancellationCount: snapshot.cancellations.length,
+    cashflowCount: snapshot.cashflows.length,
+    transferCount: snapshot.transfers.length,
+    lastOrderIds: Object.values(snapshot.orders)
+      .map((order) => Number(order.id))
+      .sort((a, b) => a - b)
+      .slice(-20),
+    lastTransferIds: snapshot.transfers
+      .map((t) => t.id)
+      .sort()
+      .slice(-20),
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+function resetIndexerFiles() {
+  ensureIndexerDir();
+  writeJsonFile(INDEXER_STATE_FILE, { lastIndexedBlock: -1, latestKnownBlock: -1, lastSyncAtMs: 0 });
+  writeJsonFile(INDEXER_ORDERS_FILE, {});
+  writeJsonFile(INDEXER_FILLS_FILE, []);
+  writeJsonFile(INDEXER_CANCELLATIONS_FILE, []);
+  writeJsonFile(INDEXER_CASHFLOWS_FILE, []);
+  writeJsonFile(INDEXER_TRANSFERS_FILE, []);
+}
+
+async function syncIndexer() {
+  ensureIndexerDir();
+  const deployments = loadDeployments();
+  const orderBookAddr = deployments.orderBookDex;
+  const registryAddr = deployments.listingsRegistry;
+  if (!orderBookAddr || !registryAddr) {
+    return {
+      synced: false,
+      reason: 'missing deployments',
+    };
+  }
+
+  const latestHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = Number(latestHex);
+  const state = readJsonFile(INDEXER_STATE_FILE, { lastIndexedBlock: -1, latestKnownBlock: -1, lastSyncAtMs: 0 });
+  const orders = readJsonFile(INDEXER_ORDERS_FILE, {});
+  const fills = readJsonFile(INDEXER_FILLS_FILE, []);
+  const cancellations = readJsonFile(INDEXER_CANCELLATIONS_FILE, []);
+  const cashflows = readJsonFile(INDEXER_CASHFLOWS_FILE, []);
+  const transfers = readJsonFile(INDEXER_TRANSFERS_FILE, []);
+
+  const startBlock = Math.max(0, Number(state.lastIndexedBlock) + 1);
+  if (startBlock > latestBlock) {
+    state.latestKnownBlock = latestBlock;
+    state.lastSyncAtMs = Date.now();
+    writeJsonFile(INDEXER_STATE_FILE, state);
+    return {
+      synced: true,
+      startBlock,
+      latestBlock,
+      processedLogs: 0,
+    };
+  }
+
+  const fromHex = ethers.toQuantity(startBlock);
+  const toHex = ethers.toQuantity(latestBlock);
+  const logs = await fetchOrderBookEvents(orderBookAddr, fromHex, toHex);
+  const tokenAddresses = await getIndexedTokenAddresses(deployments, registryAddr);
+  const transferLogs = await fetchTransferEvents(tokenAddresses, fromHex, toHex);
+
+  const blocksNeeded = new Set();
+  for (const log of logs) {
+    blocksNeeded.add(log.blockNumber);
+  }
+  for (const log of transferLogs) {
+    blocksNeeded.add(log.blockNumber);
+  }
+
+  const blockTimestampsMs = new Map();
+  for (const blockHex of blocksNeeded) {
+    const block = await hardhatRpc('eth_getBlockByNumber', [blockHex, false]);
+    blockTimestampsMs.set(blockHex, Number(block.timestamp) * 1000);
+  }
+
+  const existingTransferIds = new Set(transfers.map((entry) => entry.id));
+  for (const log of transferLogs) {
+    const txHash = log.transactionHash;
+    const blockNumber = Number(log.blockNumber);
+    const logIndex = Number(log.logIndex);
+    const id = `${txHash}:${logIndex}`;
+    if (existingTransferIds.has(id)) {
+      continue;
+    }
+
+    const parsed = erc20Interface.parseLog(log);
+    const tokenAddress = normalizeAddress(log.address);
+    let symbol = symbolByTokenCache.get(tokenAddress) || '';
+    if (!symbol || symbol === '') {
+      symbol = await lookupSymbolByToken(registryAddr, tokenAddress);
+      if (!symbol && deployments.ttoken && normalizeAddress(deployments.ttoken) === tokenAddress) {
+        symbol = 'TTOKEN';
+      }
+    }
+    const timestampMs = blockTimestampsMs.get(log.blockNumber) || Date.now();
+    const transfer = {
+      id,
+      tokenAddress,
+      symbol,
+      from: normalizeAddress(parsed.args.from),
+      to: normalizeAddress(parsed.args.to),
+      amountWei: parsed.args.value.toString(),
+      txHash,
+      blockNumber,
+      logIndex,
+      timestampMs,
+    };
+    transfers.push(transfer);
+    existingTransferIds.add(id);
+  }
+
+  for (const log of logs) {
+    const parsed = orderBookInterface.parseLog(log);
+    const eventName = parsed.name;
+    const txHash = log.transactionHash;
+    const blockNumber = Number(log.blockNumber);
+    const logIndex = Number(log.logIndex);
+    const timestampMs = blockTimestampsMs.get(log.blockNumber) || Date.now();
+
+    if (eventName === 'OrderPlaced') {
+      const id = Number(parsed.args.id);
+      const equityToken = normalizeAddress(parsed.args.equityToken);
+      const symbol = await lookupSymbolByToken(registryAddr, equityToken);
+      const side = Number(parsed.args.side) === 1 ? 'SELL' : 'BUY';
+      const qtyWei = parsed.args.qty.toString();
+      orders[String(id)] = {
+        id,
+        trader: normalizeAddress(parsed.args.trader),
+        side,
+        symbol,
+        equityToken,
+        priceCents: Number(parsed.args.price),
+        qtyWei,
+        remainingWei: qtyWei,
+        active: true,
+        status: 'OPEN',
+        placedTxHash: txHash,
+        placedBlock: blockNumber,
+        placedAtMs: timestampMs,
+        updatedAtMs: timestampMs,
+        cancelledAtBlock: null,
+      };
+      continue;
+    }
+
+    if (eventName === 'OrderFilled') {
+      const makerId = Number(parsed.args.makerId);
+      const takerId = Number(parsed.args.takerId);
+      const priceCents = Number(parsed.args.price);
+      const qtyWei = parsed.args.qty.toString();
+      const equityToken = normalizeAddress(parsed.args.equityToken);
+      const symbol = await lookupSymbolByToken(registryAddr, equityToken);
+      const makerOrder = orders[String(makerId)];
+      const takerOrder = takerId > 0 ? orders[String(takerId)] : null;
+
+      if (makerOrder) {
+        const nextRemaining = BigInt(makerOrder.remainingWei) - BigInt(qtyWei);
+        makerOrder.remainingWei = nextRemaining > 0n ? nextRemaining.toString() : '0';
+        makerOrder.active = nextRemaining > 0n;
+        makerOrder.status = orderStatus(makerOrder);
+        makerOrder.updatedAtMs = timestampMs;
+      }
+      if (takerOrder) {
+        const nextRemaining = BigInt(takerOrder.remainingWei) - BigInt(qtyWei);
+        takerOrder.remainingWei = nextRemaining > 0n ? nextRemaining.toString() : '0';
+        takerOrder.active = nextRemaining > 0n;
+        takerOrder.status = orderStatus(takerOrder);
+        takerOrder.updatedAtMs = timestampMs;
+      }
+
+      fills.push({
+        id: `${txHash}:${logIndex}`,
+        makerId,
+        takerId,
+        makerTrader: makerOrder ? makerOrder.trader : '',
+        takerTrader: takerOrder ? takerOrder.trader : '',
+        symbol,
+        equityToken,
+        priceCents,
+        qtyWei,
+        blockNumber,
+        txHash,
+        logIndex,
+        timestampMs,
+      });
+
+      const quoteWei = ((BigInt(qtyWei) * BigInt(priceCents)) / 100n).toString();
+      let buyerWallet = '';
+      let sellerWallet = '';
+      if (makerOrder && makerOrder.side === 'BUY') buyerWallet = makerOrder.trader;
+      if (makerOrder && makerOrder.side === 'SELL') sellerWallet = makerOrder.trader;
+      if (takerOrder && takerOrder.side === 'BUY') buyerWallet = takerOrder.trader;
+      if (takerOrder && takerOrder.side === 'SELL') sellerWallet = takerOrder.trader;
+
+      if (buyerWallet) {
+        addCashflow(cashflows, {
+          wallet: buyerWallet,
+          assetType: 'TTOKEN',
+          assetSymbol: 'TTOKEN',
+          direction: 'OUT',
+          amountWei: quoteWei,
+          reason: 'TRADE_BUY',
+          txHash,
+          logIndex,
+          blockNumber,
+          timestampMs,
+        });
+      }
+      if (sellerWallet) {
+        addCashflow(cashflows, {
+          wallet: sellerWallet,
+          assetType: 'TTOKEN',
+          assetSymbol: 'TTOKEN',
+          direction: 'IN',
+          amountWei: quoteWei,
+          reason: 'TRADE_SELL',
+          txHash,
+          logIndex,
+          blockNumber,
+          timestampMs,
+        });
+      }
+      continue;
+    }
+
+    if (eventName === 'OrderCancelled') {
+      const id = Number(parsed.args.id);
+      const refundWei = parsed.args.remainingRefunded.toString();
+      const order = orders[String(id)];
+      if (order) {
+        order.active = false;
+        order.remainingWei = '0';
+        order.cancelledAtBlock = blockNumber;
+        order.status = 'CANCELLED';
+        order.updatedAtMs = timestampMs;
+      }
+      const trader = normalizeAddress(parsed.args.trader);
+      cancellations.push({
+        id: `${txHash}:${id}`,
+        orderId: id,
+        trader,
+        refundWei,
+        blockNumber,
+        txHash,
+        logIndex,
+        timestampMs,
+      });
+      if (order && order.side === 'BUY') {
+        addCashflow(cashflows, {
+          wallet: trader,
+          assetType: 'TTOKEN',
+          assetSymbol: 'TTOKEN',
+          direction: 'IN',
+          amountWei: refundWei,
+          reason: 'ORDER_CANCEL_REFUND',
+          txHash,
+          logIndex,
+          blockNumber,
+          timestampMs,
+        });
+      }
+    }
+  }
+
+  state.lastIndexedBlock = latestBlock;
+  state.latestKnownBlock = latestBlock;
+  state.lastSyncAtMs = Date.now();
+
+  writeJsonFile(INDEXER_STATE_FILE, state);
+  writeJsonFile(INDEXER_ORDERS_FILE, orders);
+  writeJsonFile(INDEXER_FILLS_FILE, fills);
+  writeJsonFile(INDEXER_CANCELLATIONS_FILE, cancellations);
+  writeJsonFile(INDEXER_CASHFLOWS_FILE, cashflows);
+  writeJsonFile(INDEXER_TRANSFERS_FILE, transfers);
+
+  return {
+    synced: true,
+    startBlock,
+    latestBlock,
+    processedLogs: logs.length,
+    processedTransfers: transferLogs.length,
+  };
+}
+
+async function ensureIndexerSynced() {
+  if (indexerSyncPromise) {
+    return indexerSyncPromise;
+  }
+  indexerSyncPromise = syncIndexer()
+    .catch((error) => ({ synced: false, error: error.message || '' }))
+    .finally(() => {
+      indexerSyncPromise = null;
+    });
+  return indexerSyncPromise;
+}
+
+function readIndexerSnapshot() {
+  ensureIndexerDir();
+  return {
+    state: readJsonFile(INDEXER_STATE_FILE, { lastIndexedBlock: -1, latestKnownBlock: -1, lastSyncAtMs: 0 }),
+    orders: readJsonFile(INDEXER_ORDERS_FILE, {}),
+    fills: readJsonFile(INDEXER_FILLS_FILE, []),
+    cancellations: readJsonFile(INDEXER_CANCELLATIONS_FILE, []),
+    cashflows: readJsonFile(INDEXER_CASHFLOWS_FILE, []),
+    transfers: readJsonFile(INDEXER_TRANSFERS_FILE, []),
+  };
+}
+// check trading day for candle
 function isTradingDay(ymd) {
-  if (isWeekend(ymd)) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const weekend = weekday === 0 || weekday === 6;
+  if (weekend) {
     return false;
   }
   if (HOLIDAYS_ET.has(ymd)) {
@@ -200,6 +649,7 @@ function isTradingDay(ymd) {
   return true;
 }
 
+// get current date
 function getETDateString() {
   const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: TZ }));
   const y = etNow.getFullYear();
@@ -208,6 +658,7 @@ function getETDateString() {
   return `${y}-${m}-${d}`;
 }
 
+// compute previosu trading day just in case for fallback
 function previousTradingDay(ymd) {
   let [y, m, d] = ymd.split('-').map(Number);
   let dt = new Date(Date.UTC(y, m - 1, d));
@@ -217,22 +668,6 @@ function previousTradingDay(ymd) {
     dt.setUTCDate(dt.getUTCDate() - 1);
   }
   return ymd;
-}
-
-function previousTradingDays(endYmd, count) {
-  const [y, m, d] = endYmd.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  const days = [];
-
-  while (days.length < count) {
-    const cur = dt.toISOString().slice(0, 10);
-    if (isTradingDay(cur)) {
-      days.push(cur);
-    }
-    dt.setUTCDate(dt.getUTCDate() - 1);
-  }
-
-  return days.reverse();
 }
 
 async function buildCandleFallback(symbol) {
@@ -271,25 +706,7 @@ async function buildCandleFallback(symbol) {
     dateEt,
   };
 }
-
-function tradingDaysInLastMonth(endYmd) {
-  const [y, m, d] = endYmd.split('-').map(Number);
-  const end = new Date(Date.UTC(y, m - 1, d));
-  const start = new Date(end);
-  start.setUTCDate(start.getUTCDate() - 30);
-
-  const days = [];
-  const cur = new Date(start);
-  while (cur <= end) {
-    const ymd = cur.toISOString().slice(0, 10);
-    if (isTradingDay(ymd)) {
-      days.push(ymd);
-    }
-    cur.setUTCDate(cur.getUTCDate() + 1);
-  }
-  return days;
-}
-
+// trading days in a range for fallback
 function tradingDaysInLastNDays(endYmd, n) {
   const [y, m, d] = endYmd.split('-').map(Number);
   const end = new Date(Date.UTC(y, m - 1, d));
@@ -307,14 +724,9 @@ function tradingDaysInLastNDays(endYmd, n) {
   }
   return days;
 }
-
-async function fetchIntradayCandlesYF(symbol, interval, dateET) {
-  return await fetchIntradayCandles(symbol, interval, dateET);
-}
-
 app.get('/api/stock/:symbol', async (req, res) => {
   const symbol = req.params.symbol || 'AAPL';
-
+  // try to fetch stock data
   try {
     const data = await yahooFinance.quoteSummary(symbol, {
       modules: [
@@ -336,7 +748,7 @@ app.get('/api/stock/:symbol', async (req, res) => {
       const quote = await fetchQuote(String(symbol).toUpperCase());
       return res.json({ price: quote, stale: true });
     } catch (fallbackErr) {
-      res.status(500).json({ error: 'Failed to fetch data' });
+      res.status(500).json({ error: '' });
     }
   }
 });
@@ -344,8 +756,10 @@ app.get('/api/stock/:symbol', async (req, res) => {
 app.get('/api/quote', async (req, res) => {
   const symbol = String(req.query.symbol || 'TSLA').toUpperCase();
   const cached = quoteCache.get(symbol);
+  // default tsla
 
   try {
+    // try to fetch quote with fallbacks
     if (cached && (Date.now() - cached.timestamp) < QUOTE_TTL_MS) {
       return res.json(cached.data);
     }
@@ -386,14 +800,14 @@ app.get('/api/quote', async (req, res) => {
         return res.json(fallbackQuote);
       }
     } catch (fallbackErr) {
-      // fall through to 502
+      
     }
 
-    const msg = err.message || 'Failed to fetch quote';
+    const msg = err.message || '';
     res.status(502).json({ error: msg });
   }
 });
-
+// quote short with fmp's stock price
 app.get('/api/fmp/quote-short', async (req, res) => {
   const symbol = String(req.query.symbol || 'TSLA').toUpperCase();
   const cached = fmpQuoteCache.get(symbol);
@@ -445,18 +859,19 @@ app.get('/api/fmp/quote-short', async (req, res) => {
           return res.json(fallbackData);
         }
       } catch (candleErr) {
-        // fall through
+        
       }
 
       if (cached) {
         return res.json({ ...cached.data, stale: true });
       }
-      const msg = err.message || 'Failed to fetch FMP quote';
+      const msg = err.message || '';
       res.status(502).json({ error: msg });
     }
   }
 });
 
+// get stock info with fmp
 app.get('/api/fmp/stock-info', async (req, res) => {
   const symbol = String(req.query.symbol || 'TSLA').toUpperCase();
   const cached = fmpInfoCache.get(symbol);
@@ -484,6 +899,7 @@ app.get('/api/fmp/stock-info', async (req, res) => {
     const currency = quote.currency;
     const stale = false;
 
+    // maps fields for info from fmp
     const data = {
       symbol,
       currency,
@@ -510,6 +926,7 @@ app.get('/api/fmp/stock-info', async (req, res) => {
     res.json(data);
   } catch (err) {
     try {
+      // try to fetch from yahoo for info but failed
       const summary = await yahooFinance.quoteSummary(symbol, {
         modules: ['summaryDetail', 'price', 'defaultKeyStatistics'],
       });
@@ -568,27 +985,27 @@ app.get('/api/fmp/stock-info', async (req, res) => {
           return res.json(fallbackData);
         }
       } catch (candleErr) {
-        // fall through
+        
       }
 
       if (cached) {
         return res.json({ ...cached.data, stale: true });
       }
-      const msg = err.message || 'Failed to fetch FMP stock info';
+      const msg = err.message || '';
       res.status(502).json({ error: msg });
     }
   }
 });
-
+// rest api to get hardhat accounts
 app.get('/api/hardhat/accounts', async (_req, res) => {
   try {
     const accounts = await hardhatRpc('eth_accounts');
     res.json({ accounts });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Hardhat RPC failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
-
+// rest api to get token address
 app.get('/api/ttoken-address', (_req, res) => {
   const envAddress = process.env.TTOKEN_ADDRESS;
   if (envAddress) {
@@ -600,6 +1017,7 @@ app.get('/api/ttoken-address', (_req, res) => {
   res.json({ address });
 });
 
+// rest api to get balances with fallback if none fetched
 app.get('/api/ttoken/balance', async (req, res) => {
   const address = String(req.query.address || '');
   try {
@@ -609,21 +1027,22 @@ app.get('/api/ttoken/balance', async (req, res) => {
     const [balanceWei] = equityTokenInterface.decodeFunctionResult('balanceOf', result);
     res.json({ address, ttokenAddress, balanceWei: balanceWei.toString() });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'TTOKEN balance lookup failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
 
+// mint api with validation and fallback
 app.post('/api/ttoken/mint', async (req, res) => {
   const body = req.body || {};
   const to = String(body.to || '');
   const amount = Number(body.amount || 0);
   const recipientValid = isValidAddress(to);
   if (!recipientValid) {
-    return res.status(400).json({ error: 'Invalid recipient address' });
+    return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
   if (!amountIsNumber || amount < 1000) {
-    return res.status(400).json({ error: 'Invalid amount' });
+    return res.status(400).json({ error: '' });
   }
 
   const ttokenAddress = process.env.TTOKEN_ADDRESS || getTTokenAddressFromDeployments();
@@ -645,10 +1064,11 @@ app.post('/api/ttoken/mint', async (req, res) => {
     }]);
     res.json({ txHash });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Mint failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
 
+// api for orderbook and matching engine
 app.post('/api/orderbook/limit', async (req, res) => {
   try {
     const body = req.body || {};
@@ -672,6 +1092,7 @@ app.post('/api/orderbook/limit', async (req, res) => {
     }
 
     const qtyWei = BigInt(Math.round(qty)) * 10n ** 18n;
+    // decimal of 18 for tokens
 
     if (side === 0) {
       const quoteWei = (qtyWei * BigInt(priceCents)) / 100n;
@@ -705,10 +1126,10 @@ app.post('/api/orderbook/limit', async (req, res) => {
 
     res.json({ txHash: txHash });
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Order failed' });
+    res.status(500).json({ error: err.message || '' });
   }
 });
-
+// get orders that's no filled
 app.get('/api/orderbook/open', async (_req, res) => {
   try {
     const deployments = loadDeployments();
@@ -760,13 +1181,16 @@ app.get('/api/orderbook/open', async (_req, res) => {
       }
     }
 
-    orders.sort((a, b) => a.id - b.id);
+    orders.sort((a, b) => {
+      return a.id - b.id;
+    });
     res.json({ orders: orders });
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Orderbook open failed' });
+    res.status(500).json({ error: err.message || '' });
   }
 });
 
+// rest api to get all the filled orders
 app.get('/api/orderbook/fills', async (_req, res) => {
   try {
     const deployments = loadDeployments();
@@ -840,16 +1264,284 @@ app.get('/api/orderbook/fills', async (_req, res) => {
     }
     res.json({ fills: fills });
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Orderbook fills failed' });
+    res.status(500).json({ error: err.message || '' });
   }
 });
 
+app.get('/api/indexer/status', async (_req, res) => {
+  try {
+    const sync = await ensureIndexerSynced();
+    const snapshot = readIndexerSnapshot();
+    const checksum = buildIndexerChecksum(snapshot);
+    res.json({
+      sync,
+      state: snapshot.state,
+      checksum,
+      totals: {
+        orders: Object.keys(snapshot.orders).length,
+        fills: snapshot.fills.length,
+        cancellations: snapshot.cancellations.length,
+        cashflows: snapshot.cashflows.length,
+        transfers: snapshot.transfers.length,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || '' });
+  }
+});
+
+app.post('/api/indexer/rebuild', async (_req, res) => {
+  try {
+    resetIndexerFiles();
+    const sync = await ensureIndexerSynced();
+    const snapshot = readIndexerSnapshot();
+    const checksum = buildIndexerChecksum(snapshot);
+    res.json({
+      rebuild: true,
+      sync,
+      state: snapshot.state,
+      checksum,
+      totals: {
+        orders: Object.keys(snapshot.orders).length,
+        fills: snapshot.fills.length,
+        cancellations: snapshot.cancellations.length,
+        cashflows: snapshot.cashflows.length,
+        transfers: snapshot.transfers.length,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || '' });
+  }
+});
+
+app.get('/api/orders/open', async (req, res) => {
+  const wallet = normalizeAddress(String(req.query.wallet || ''));
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  try {
+    await ensureIndexerSynced();
+    const { orders } = readIndexerSnapshot();
+    const items = Object.values(orders)
+      .filter((order) => order.trader === wallet && (order.status === 'OPEN' || order.status === 'PARTIAL'))
+      .sort((a, b) => b.updatedAtMs - a.updatedAtMs)
+      .map((order) => ({
+        ...order,
+        cancellable: true,
+      }));
+    res.json({ wallet, orders: items });
+  } catch (err) {
+    res.status(500).json({ error: err.message || '' });
+  }
+});
+
+app.get('/api/orders/:orderId', async (req, res) => {
+  const wallet = normalizeAddress(String(req.query.wallet || ''));
+  const orderId = Number(req.params.orderId);
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  if (!Number.isFinite(orderId) || orderId <= 0) {
+    return res.status(400).json({ error: 'invalid order id' });
+  }
+
+  try {
+    await ensureIndexerSynced();
+    const { orders } = readIndexerSnapshot();
+    const order = orders[String(orderId)];
+    if (!order || order.trader !== wallet) {
+      return res.status(404).json({ error: 'order not found' });
+    }
+    res.json({ order });
+  } catch (err) {
+    res.status(500).json({ error: err.message || '' });
+  }
+});
+
+app.post('/api/orders/cancel', async (req, res) => {
+  const body = req.body || {};
+  const wallet = normalizeAddress(String(body.wallet || ''));
+  const orderId = Number(body.orderId);
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  if (!Number.isFinite(orderId) || orderId <= 0) {
+    return res.status(400).json({ error: 'invalid order id' });
+  }
+
+  try {
+    await ensureIndexerSynced();
+    const { orders } = readIndexerSnapshot();
+    const order = orders[String(orderId)];
+    if (!order) {
+      return res.status(404).json({ error: 'order not found' });
+    }
+    if (order.trader !== wallet) {
+      return res.status(403).json({ error: 'cannot cancel another wallet order' });
+    }
+    if (!(order.status === 'OPEN' || order.status === 'PARTIAL')) {
+      return res.status(400).json({ error: 'order is not cancellable' });
+    }
+
+    const deployments = loadDeployments();
+    const orderBookAddr = deployments.orderBookDex;
+    const data = orderBookInterface.encodeFunctionData('cancelOrder', [BigInt(orderId)]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: orderBookAddr,
+      data,
+    }]);
+
+    await ensureIndexerSynced();
+    const { orders: nextOrders } = readIndexerSnapshot();
+    res.json({ txHash, order: nextOrders[String(orderId)] || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message || '' });
+  }
+});
+
+app.get('/api/txs', async (req, res) => {
+  const wallet = normalizeAddress(String(req.query.wallet || ''));
+  const type = String(req.query.type || 'ALL').toUpperCase();
+  const parsedCursor = Number(req.query.cursor || 0);
+  const cursor = Number.isFinite(parsedCursor) && parsedCursor >= 0 ? parsedCursor : 0;
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+
+  try {
+    await ensureIndexerSynced();
+    const snapshot = readIndexerSnapshot();
+    const { orders, fills, cancellations, cashflows, transfers } = snapshot;
+    const items = [];
+
+    if (type === 'ALL' || type === 'ORDERS') {
+      for (const order of Object.values(orders)) {
+        if (order.trader !== wallet) continue;
+        items.push({
+          kind: 'ORDER_PLACED',
+          wallet,
+          symbol: order.symbol,
+          side: order.side,
+          orderId: order.id,
+          priceCents: order.priceCents,
+          qtyWei: order.qtyWei,
+          remainingWei: order.remainingWei,
+          status: order.status,
+          txHash: order.placedTxHash,
+          blockNumber: order.placedBlock,
+          timestampMs: order.placedAtMs,
+        });
+      }
+      for (const cancel of cancellations) {
+        if (cancel.trader !== wallet) continue;
+        const order = orders[String(cancel.orderId)];
+        items.push({
+          kind: 'ORDER_CANCELLED',
+          wallet,
+          symbol: order ? order.symbol : '',
+          side: order ? order.side : '',
+          orderId: cancel.orderId,
+          refundWei: cancel.refundWei,
+          txHash: cancel.txHash,
+          blockNumber: cancel.blockNumber,
+          timestampMs: cancel.timestampMs,
+        });
+      }
+    }
+
+    if (type === 'ALL' || type === 'FILLS') {
+      for (const fill of fills) {
+        let side = '';
+        if (fill.makerTrader === wallet) {
+          const makerOrder = orders[String(fill.makerId)];
+          side = makerOrder ? makerOrder.side : '';
+        } else if (fill.takerTrader === wallet) {
+          const takerOrder = orders[String(fill.takerId)];
+          side = takerOrder ? takerOrder.side : '';
+        } else {
+          continue;
+        }
+        items.push({
+          kind: 'ORDER_FILLED',
+          wallet,
+          symbol: fill.symbol,
+          side,
+          makerId: fill.makerId,
+          takerId: fill.takerId,
+          priceCents: fill.priceCents,
+          qtyWei: fill.qtyWei,
+          txHash: fill.txHash,
+          blockNumber: fill.blockNumber,
+          timestampMs: fill.timestampMs,
+        });
+      }
+    }
+
+    if (type === 'ALL' || type === 'CASHFLOW') {
+      for (const cashflow of cashflows) {
+        if (cashflow.wallet !== wallet) continue;
+        items.push({
+          kind: 'CASHFLOW',
+          wallet,
+          assetType: cashflow.assetType,
+          assetSymbol: cashflow.assetSymbol,
+          direction: cashflow.direction,
+          amountWei: cashflow.amountWei,
+          reason: cashflow.reason,
+          txHash: cashflow.txHash,
+          blockNumber: cashflow.blockNumber,
+          timestampMs: cashflow.timestampMs,
+        });
+      }
+    }
+
+    if (type === 'ALL' || type === 'TRANSFERS') {
+      for (const transfer of transfers) {
+        if (transfer.from !== wallet && transfer.to !== wallet) continue;
+        const direction = transfer.to === wallet ? 'IN' : 'OUT';
+        items.push({
+          kind: 'TRANSFER',
+          wallet,
+          symbol: transfer.symbol || '',
+          tokenAddress: transfer.tokenAddress,
+          direction,
+          from: transfer.from,
+          to: transfer.to,
+          amountWei: transfer.amountWei,
+          txHash: transfer.txHash,
+          blockNumber: transfer.blockNumber,
+          timestampMs: transfer.timestampMs,
+        });
+      }
+    }
+
+    items.sort((a, b) => b.timestampMs - a.timestampMs || b.blockNumber - a.blockNumber);
+    const offset = Math.max(0, cursor);
+    const paged = items.slice(offset, offset + limit);
+    const nextCursor = offset + paged.length < items.length ? offset + paged.length : null;
+
+    res.json({
+      wallet,
+      type,
+      items: paged,
+      nextCursor,
+      total: items.length,
+      indexerState: snapshot.state,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || '' });
+  }
+});
+// create equity token
 app.post('/api/equity/create', async (req, res) => {
   const body = req.body || {};
   const symbol = String(body.symbol || '').toUpperCase();
   const name = String(body.name || '').trim();
   if (symbol.length === 0 || name.length === 0) {
-    return res.status(400).json({ error: 'Symbol and name required' });
+    return res.status(400).json({ error: '' });
   }
 
   try {
@@ -858,7 +1550,7 @@ app.post('/api/equity/create', async (req, res) => {
     const admin = deployments.admin;
     const factoryDeployed = await ensureContract(factoryAddr);
     if (!factoryDeployed) {
-      return res.status(500).json({ error: 'EquityTokenFactory not deployed on this chain. Re-deploy stage2/5 and update deployments/localhost.json.' });
+      return res.status(500).json({ error: '' });
     }
 
     const data = equityFactoryInterface.encodeFunctionData('createEquityToken', [symbol, name]);
@@ -869,25 +1561,25 @@ app.post('/api/equity/create', async (req, res) => {
     }]);
     res.json({ txHash });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Create token failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
-
+// mint equity token
 app.post('/api/equity/mint', async (req, res) => {
   const body = req.body || {};
   const symbol = String(body.symbol || '').toUpperCase();
   const to = String(body.to || '');
   const amount = Number(body.amount || 0);
   if (symbol.length === 0) {
-    return res.status(400).json({ error: 'Symbol required' });
+    return res.status(400).json({ error: '' });
   }
   const recipientValid = isValidAddress(to);
   if (!recipientValid) {
-    return res.status(400).json({ error: 'Invalid recipient address' });
+    return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
   if (!amountIsNumber || amount < 1000) {
-    return res.status(400).json({ error: 'Invalid amount' });
+    return res.status(400).json({ error: '' });
   }
 
   try {
@@ -896,14 +1588,14 @@ app.post('/api/equity/mint', async (req, res) => {
     const minter = deployments.defaultMinter || deployments.admin;
     const registryDeployed = await ensureContract(registryAddr);
     if (!registryDeployed) {
-      return res.status(500).json({ error: 'ListingsRegistry not deployed on this chain. Re-deploy stage2/5 and update deployments/localhost.json.' });
+      return res.status(500).json({ error: '' });
     }
 
     const data = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
     const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
     const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', result);
     if (tokenAddr === ethers.ZeroAddress) {
-      return res.status(404).json({ error: `Symbol ${symbol} not listed` });
+      return res.status(404).json({ error: `` });
     }
 
     const amountWei = BigInt(Math.round(amount)) * 10n ** 18n;
@@ -915,10 +1607,10 @@ app.post('/api/equity/mint', async (req, res) => {
     }]);
     res.json({ txHash, tokenAddress: tokenAddr });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Mint failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
-
+// create and mint for equity tokens that was not deployed
 app.post('/api/equity/create-mint', async (req, res) => {
   const body = req.body || {};
   const symbol = String(body.symbol || '').toUpperCase();
@@ -926,15 +1618,15 @@ app.post('/api/equity/create-mint', async (req, res) => {
   const to = String(body.to || '');
   const amount = Number(body.amount || 0);
   if (symbol.length === 0 || name.length === 0) {
-    return res.status(400).json({ error: 'Symbol and name required' });
+    return res.status(400).json({ error: '' });
   }
   const recipientValid = isValidAddress(to);
   if (!recipientValid) {
-    return res.status(400).json({ error: 'Invalid recipient address' });
+    return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
   if (!amountIsNumber || amount < 1000) {
-    return res.status(400).json({ error: 'Invalid amount' });
+    return res.status(400).json({ error: '' });
   }
 
   try {
@@ -946,14 +1638,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
     const factoryDeployed = await ensureContract(factoryAddr);
     const registryDeployed = await ensureContract(registryAddr);
     if (!factoryDeployed || !registryDeployed) {
-      return res.status(500).json({ error: 'Factory/registry not deployed on this chain. Re-deploy stage2/5 and update deployments/localhost.json.' });
+      return res.status(500).json({ error: '' });
     }
 
     const lookupData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
     let lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
     let [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
 
-    let createTx = null;
+    let createTx;
     if (tokenAddr === ethers.ZeroAddress) {
       const createData = equityFactoryInterface.encodeFunctionData('createEquityToken', [symbol, name]);
       createTx = await hardhatRpc('eth_sendTransaction', [{
@@ -976,7 +1668,7 @@ app.post('/api/equity/create-mint', async (req, res) => {
       [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
     }
     if (tokenAddr === ethers.ZeroAddress) {
-      return res.status(404).json({ error: `Symbol ${symbol} not listed after create` });
+      return res.status(404).json({ error: `` });
     }
 
     const amountWei = BigInt(Math.round(amount)) * 10n ** 18n;
@@ -988,17 +1680,18 @@ app.post('/api/equity/create-mint', async (req, res) => {
     }]);
     res.json({ createTx, mintTx, tokenAddress: tokenAddr });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Create+mint failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
 
+// rest api to get all the listings and addresses
 app.get('/api/registry/listings', async (_req, res) => {
   try {
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
     const registryDeployed = await ensureContract(registryAddr);
     if (!registryDeployed) {
-      return res.status(500).json({ error: 'ListingsRegistry not deployed on this chain.' });
+      return res.status(500).json({ error: '' });
     }
     const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
     const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
@@ -1015,10 +1708,11 @@ app.get('/api/registry/listings', async (_req, res) => {
     }
     res.json({ listings });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Lookup failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
 
+// check the balance of all equity tokens
 app.get('/api/equity/balances', async (req, res) => {
   const address = String(req.query.address || '');
   try {
@@ -1026,7 +1720,7 @@ app.get('/api/equity/balances', async (req, res) => {
     const registryAddr = deployments.listingsRegistry;
     const registryDeployed = await ensureContract(registryAddr);
     if (!registryDeployed) {
-      return res.status(500).json({ error: 'ListingsRegistry not deployed on this chain.' });
+      return res.status(500).json({ error: '' });
     }
 
     const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
@@ -1049,21 +1743,22 @@ app.get('/api/equity/balances', async (req, res) => {
     }
     res.json({ balances });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Balance lookup failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
 
+// get equity token address by symbol
 app.get('/api/equity/address', async (req, res) => {
   const symbol = String(req.query.symbol || '').toUpperCase();
   if (symbol.length === 0) {
-    return res.status(400).json({ error: 'Symbol required' });
+    return res.status(400).json({ error: '' });
   }
   try {
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
     const registryDeployed = await ensureContract(registryAddr);
     if (!registryDeployed) {
-      return res.status(500).json({ error: 'ListingsRegistry not deployed on this chain.' });
+      return res.status(500).json({ error: '' });
     }
     const data = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
     const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
@@ -1073,10 +1768,11 @@ app.get('/api/equity/address', async (req, res) => {
     }
     res.json({ tokenAddress: tokenAddr });
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Lookup failed' });
+    res.status(502).json({ error: err.message || '' });
   }
 });
 
+// get candle info
 app.get('/api/candles', async (req, res) => {
   const symbol = String(req.query.symbol || 'TSLA').toUpperCase();
   const date = String(req.query.date || '');
@@ -1087,13 +1783,13 @@ app.get('/api/candles', async (req, res) => {
 
   const dateValid = /^\d{4}-\d{2}-\d{2}$/.test(date);
   if (!dateValid) {
-    return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
+    return res.status(400).json({ error: '' });
   }
 
   const intervalValid = Number.isFinite(interval);
   if (!intervalValid || interval < 5 || interval % 5 !== 0) {
     return res.status(400).json({
-      error: 'interval must be a positive multiple of 5 minutes',
+      error: '',
     });
   }
 
@@ -1103,40 +1799,82 @@ app.get('/api/candles', async (req, res) => {
     }
 
     const endDate = date;
-    const dates =
-      range === '5d' ? previousTradingDays(endDate, 5) :
-      range === '1m' ? tradingDaysInLastMonth(endDate) :
-      range === '3m' ? tradingDaysInLastNDays(endDate, 90) :
-      range === '6m' ? tradingDaysInLastNDays(endDate, 180) :
-      [endDate];
+    let dates = [endDate];
+
+    if (range === '5d') {
+      const [y, m, d] = endDate.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      const days = [];
+
+      while (days.length < 5) {
+        const cur = dt.toISOString().slice(0, 10);
+        if (isTradingDay(cur)) {
+          days.push(cur);
+        }
+        dt.setUTCDate(dt.getUTCDate() - 1);
+      }
+
+      dates = days.reverse();
+    }
+
+    if (range === '1m') {
+      const [y, m, d] = endDate.split('-').map(Number);
+      const end = new Date(Date.UTC(y, m - 1, d));
+      const start = new Date(end);
+      start.setUTCDate(start.getUTCDate() - 30);
+
+      const days = [];
+      const cur = new Date(start);
+      while (cur <= end) {
+        const ymd = cur.toISOString().slice(0, 10);
+        if (isTradingDay(ymd)) {
+          days.push(ymd);
+        }
+        cur.setUTCDate(cur.getUTCDate() + 1);
+      }
+      dates = days;
+    }
+
+    if (range === '3m') {
+      dates = tradingDaysInLastNDays(endDate, 90);
+    }
+    if (range === '6m') {
+      dates = tradingDaysInLastNDays(endDate, 180);
+    }
+
     const baseCandles = [];
 
     for (const day of dates) {
-      const dayCandles = await fetchIntradayCandlesYF(symbol, '5m', day);
+      const dayCandles = await fetchIntradayCandles(symbol, '5m', day);
       baseCandles.push(...dayCandles);
     }
 
     if (baseCandles.length === 0) {
       return res.status(404).json({
-        error: 'No candles for selected date/range (market closed or future date).',
+        error: 'No candles',
       });
     }
 
-    const candles = aggregateCandles(baseCandles, interval).map(c => ({
-      timeSec: c.timeSec,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      volume: c.volume,
-      timeET: c.timeET,
-    }));
+    const aggregated = aggregateCandles(baseCandles, interval);
+    const candles = [];
+    for (let i = 0; i < aggregated.length; i++) {
+      const c = aggregated[i];
+      candles.push({
+        timeSec: c.timeSec,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume,
+        timeET: c.timeET,
+      });
+    }
 
     const payload = { symbol, date: endDate, interval, range, dates, candles };
     candleCache.set(cacheKey, { data: payload, timestamp: Date.now() });
     res.json(payload);
   } catch (err) {
-    const msg = err.message || 'Unknown error';
+    const msg = err.message || '';
     const status = /future|No chart data|No quote data/i.test(msg) ? 400 : 502;
     if (cached) {
       return res.json({ ...cached.data, stale: true });
@@ -1145,9 +1883,23 @@ app.get('/api/candles', async (req, res) => {
   }
 });
 
+ensureIndexerDir();
+ensureIndexerSynced();
+setInterval(() => {
+  ensureIndexerSynced();
+}, INDEXER_SYNC_INTERVAL_MS);
+
 app.use((_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-const PORT = process.env.STAGE0_PORT ? Number(process.env.STAGE0_PORT) : 3000;
-app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
+const DEFAULT_PORT = 3000;
+
+let PORT = DEFAULT_PORT;
+if (process.env.STAGE0_PORT) {
+  PORT = Number(process.env.STAGE0_PORT);
+}
+
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IPriceFeed {
+    // declares pricefeed interface
     function getPrice(string memory symbol)
         external
         view
@@ -34,26 +35,23 @@ interface IAward {
         external;
 }
 
-/**
- * @title OrderBookDEX
- * @notice On-chain order book DEX with full escrow on placement, 18dp tokens,
- *         and 2dp price quotes. Stage 4 uses no trading fee.
- */
+
 contract OrderBookDEX is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     enum Side {
         BUY,
         SELL
+        // custom type for buy and sell order
     }
 
     struct Order {
         uint256 id;
         address trader;
         Side side;
-        uint256 price; // cents per 1.00 share (2dp)
-        uint256 qty; // equity qty (18dp)
-        uint256 remaining; // equity qty (18dp)
+        uint256 price; 
+        uint256 qty; 
+        uint256 remaining; 
         bool active;
     }
 
@@ -61,6 +59,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         address equityToken;
         Side side;
         uint256 index;
+        // order refernce
     }
 
     IERC20 public immutable ttoken;
@@ -70,8 +69,10 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
     IAward public award;
 
     mapping(address => Order[]) public buyOrders;
+    // order book for buy and sell
     mapping(address => Order[]) public sellOrders;
     mapping(uint256 => OrderRef) public orderRefById;
+    // mapping order
 
     event OrderPlaced(
         uint256 indexed id,
@@ -97,6 +98,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         uint256 maxPriceCents
     );
     event OracleQuoteBuyExecuted(
+        // event for oracle buy which calls the oracle with and set as max price
         address indexed taker,
         address indexed equityToken,
         string symbol,
@@ -114,7 +116,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         require(ttokenAddress != address(0), "orderbook: ttoken is zero");
         require(registryAddress != address(0), "orderbook: registry is zero");
         require(priceFeedAddress != address(0), "orderbook: pricefeed is zero");
-
+        // checks all address
         ttoken = IERC20(ttokenAddress);
         registry = IListingsRegistry(registryAddress);
         priceFeed = IPriceFeed(priceFeedAddress);
@@ -324,20 +326,27 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
     }
 
     function matchBuy(address equityToken, Order storage taker) internal {
+        // matching engine
         while (taker.remaining > 0) {
+            // while not fulling filled
             (bool found, uint256 index) = findBestSell(equityToken, taker.price);
+            // find the best sell
             if (!found) {
                 break;
+                // not found break
             }
             Order storage maker = sellOrders[equityToken][index];
             uint256 fillQty = taker.remaining;
             if (maker.remaining < fillQty) {
                 fillQty = maker.remaining;
+                // fill as much as possible
             }
             uint256 tradeValue = quoteAmount(fillQty, maker.price);
-
+            // calculate trade value
             uint256 escrowQuote = quoteAmount(fillQty, taker.price);
+            // max quote to be taken from the taker
             uint256 refund = escrowQuote - tradeValue;
+            // refund difference
 
             IERC20(equityToken).safeTransfer(taker.trader, fillQty);
             ttoken.safeTransfer(maker.trader, tradeValue);
@@ -345,6 +354,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
             recordTrade(taker.trader, tradeValue);
             if (refund > 0) {
                 ttoken.safeTransfer(taker.trader, refund);
+                // refund the difference if the price is better than the taker expected
             }
 
             taker.remaining -= fillQty;
@@ -361,6 +371,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
     }
 
     function matchSell(address equityToken, Order storage taker) internal {
+        // similar to match
         while (taker.remaining > 0) {
             (bool found, uint256 index) = findBestBuy(equityToken, taker.price);
             if (!found) {
@@ -392,7 +403,9 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
     }
 
     function findBestSell(address equityToken, uint256 maxPrice) internal view returns (bool found, uint256 index) {
+        // loops through and find the best sell order within the price liimit
         Order[] storage orders = sellOrders[equityToken];
+        
         uint256 bestPrice = 0;
         uint256 bestIndex = 0;
 
@@ -432,6 +445,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
     }
 
     function getOrderStorage(OrderRef memory ref) internal view returns (Order storage order) {
+        // get order storage base on referencee
         if (ref.side == Side.BUY) {
             order = buyOrders[ref.equityToken][ref.index];
         } else {
@@ -441,9 +455,11 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
 
     function quoteAmount(uint256 qty, uint256 price) internal pure returns (uint256) {
         return (qty * price) / 100;
+        // returns quote amount based on qty and price
     }
 
     function recordTrade(address trader, uint256 quoteVolume) internal {
+        // record trade for award (trading competition)
         if (address(award) != address(0)) {
             award.recordTrade(trader, quoteVolume);
         }

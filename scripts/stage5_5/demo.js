@@ -1,7 +1,7 @@
-// scripts/stage5_5/demo.js
-// -----------------------------------------------------------------------------
-// Stage 5.5 demo: oracle-assisted buyExactQuoteAtOracle with detailed before/after balances + gas used.
-// -----------------------------------------------------------------------------
+
+
+
+
 
 const { ethers } = require("hardhat");
 
@@ -46,8 +46,8 @@ async function logBalances(label, equity, ttoken, dexAddr, maker, taker) {
 async function main() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
-  const maker = signers[5]; // account #5
-  const taker = signers[6]; // account #6
+  const maker = signers[5]; 
+  const taker = signers[6]; 
 
   const TToken = await ethers.getContractFactory("TToken");
   const ttoken = await TToken.deploy();
@@ -79,9 +79,9 @@ async function main() {
   const finnhubSymbol = "AAPL";
   const quote = await fetchFinnhubQuote(finnhubSymbol, apiKey);
   const price = BigInt(Math.round(quote.c * 100));
-  const maxSlippageBps = 100n; // 1%
+  const maxSlippageBps = 100n; 
   const makerQty = 2n * ONE_SHARE;
-  const budget = quoteAmount(ONE_SHARE, price); // budget to buy 1 share
+  const budget = quoteAmount(ONE_SHARE, price); 
 
   await priceFeed.connect(admin).setPrice("AAPL", Number(price));
 

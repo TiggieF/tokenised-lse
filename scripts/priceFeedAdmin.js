@@ -1,12 +1,12 @@
-// scripts/priceFeedAdmin.js
-// -----------------------------------------------------------------------------
-// Admin/oracle utilities for PriceFeed.
-// Usage examples:
-//  npx hardhat run scripts/priceFeedAdmin.js --network localhost -- grantOracle 0xOracle
-//  npx hardhat run scripts/priceFeedAdmin.js --network localhost -- revokeOracle 0xOracle
-//  npx hardhat run scripts/priceFeedAdmin.js --network localhost -- setFreshnessWindow 120
-//  npx hardhat run scripts/priceFeedAdmin.js --network localhost -- readPrice ACME1
-// -----------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
 
 const { ethers } = require("hardhat");
 

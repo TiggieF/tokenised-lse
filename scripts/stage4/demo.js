@@ -1,14 +1,14 @@
-// scripts/stage4/demo.js
-// -----------------------------------------------------------------------------
-// Demonstrates a basic trade on OrderBookDEX:
-// 1) Ensure EquityToken exists (deploy if needed)
-// 2) Mint equity to seller and TToken to buyer
-// 3) Place SELL then BUY to match
-// -----------------------------------------------------------------------------
+
+
+
+
+
+
+
 
 const { ethers } = require("hardhat");
 
-const DEFAULT_PRICE = 10_000n; // $100.00 in cents
+const DEFAULT_PRICE = 10_000n; 
 const ONE_SHARE = 10n ** 18n;
 
 async function main() {

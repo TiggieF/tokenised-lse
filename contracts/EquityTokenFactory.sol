@@ -1,16 +1,12 @@
-// SPDX-License-Identifier: MIT
+
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 import "./EquityToken.sol";
 import "./ListingsRegistry.sol";
+// import the equity token and listing registry
 
-/**
- * @title EquityTokenFactory
- * @notice Deploys per-company equity tokens and registers them in the
- *         ListingsRegistry. Only admins can create new listings.
- */
 contract EquityTokenFactory is AccessControl {
     ListingsRegistry public immutable registry;
     address public immutable defaultMinter;
@@ -19,15 +15,13 @@ contract EquityTokenFactory is AccessControl {
         require(admin != address(0), "EquityTokenFactory: admin is zero");
         require(registryAddress != address(0), "EquityTokenFactory: registry is zero");
         require(minter != address(0), "EquityTokenFactory: minter is zero");
-
+        // checks for minter admin and reg address
         registry = ListingsRegistry(registryAddress);
         defaultMinter = minter;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
-    /**
-     * @notice Deploy a new equity token and register it in the registry.
-     */
+    
     function createEquityToken(string memory symbol, string memory name)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
@@ -38,7 +32,9 @@ contract EquityTokenFactory is AccessControl {
 
         EquityToken token = new EquityToken(name, symbol, msg.sender, defaultMinter);
         tokenAddr = address(token);
+        // declares new token
 
         registry.registerListing(symbol, name, tokenAddr);
+        // register listings
     }
 }

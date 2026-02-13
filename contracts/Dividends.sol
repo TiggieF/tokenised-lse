@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
@@ -32,12 +32,9 @@ interface IListingsRegistry {
         returns (bool);
 }
 
-/**
- * @title Dividends
- * @notice Snapshot-based, per-share dividends paid in TToken.
- */
+
 contract Dividends is AccessControl, ReentrancyGuard {
-    uint256 public constant MIN_DIV_PER_SHARE = 1e16; // 0.01 TToken per share
+    uint256 public constant MIN_DIV_PER_SHARE = 1e16; 
     uint256 public constant SHARE_UNIT = 1e18;
 
     ITTokenMintable public immutable ttoken;

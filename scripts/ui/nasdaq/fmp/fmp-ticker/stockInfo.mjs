@@ -1,4 +1,4 @@
-// ❗ Hard-coded API key (demo / local use only)
+
 const API_KEY = "TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS";
 
 
@@ -58,7 +58,7 @@ function pick(obj, keys) {
   console.log("\n=== RAW: /stable/aftermarket-quote ===");
   console.log(JSON.stringify(afterPayload, null, 2));
 
-  // Field name fallbacks because providers vary slightly.
+  
   const previousClose = pick(quote, ["previousClose", "prevClose"]);
   const open = pick(quote, ["open", "priceOpen"]);
   const dayLow = pick(quote, ["dayLow", "low"]);
@@ -72,7 +72,7 @@ function pick(obj, keys) {
   const peTTM = pick(quote, ["pe", "peRatioTTM", "peTTM"]);
   const epsTTM = pick(quote, ["eps", "epsTTM"]);
 
-  // Bid/Ask: often only reliably present in aftermarket endpoint (if your plan/data includes it)
+  
   const bid = pick(after, ["bid", "bidPrice"]);
   const bidSize = pick(after, ["bidSize", "bidSizeShares"]);
   const ask = pick(after, ["ask", "askPrice"]);

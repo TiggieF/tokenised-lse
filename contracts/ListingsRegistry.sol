@@ -1,16 +1,11 @@
-// SPDX-License-Identifier: MIT
+
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
-/**
- * @title ListingsRegistry
- * @notice Registry mapping ticker symbols to deployed equity token addresses.
- *         A dedicated LISTING_ROLE is used so trusted factory contracts can
- *         register and unlist stock tokens.
- */
+
 contract ListingsRegistry is AccessControl {
-    /// @notice Role identifier used to manage listings.
+    
     bytes32 public constant LISTING_ROLE = keccak256("LISTING_ROLE");
 
     struct Listing {
@@ -21,8 +16,11 @@ contract ListingsRegistry is AccessControl {
 
     mapping(bytes32 => Listing) private listingsByKey;
     mapping(address => bool) public isTokenListed;
+    // for token adrress to check listed or not
     mapping(address => string) public tokenToSymbol;
+    // maps token address to symbol
     string[] private listedSymbols;
+    // stores all symbols
 
     event StockListed(string indexed symbol, address tokenAddr);
 
@@ -32,9 +30,7 @@ contract ListingsRegistry is AccessControl {
         _grantRole(LISTING_ROLE, admin);
     }
 
-    /**
-     * @notice Register a new equity token in the registry.
-     */
+    
     function registerListing(
         string memory symbol,
         string memory name,
@@ -42,6 +38,7 @@ contract ListingsRegistry is AccessControl {
     ) external onlyRole(LISTING_ROLE) {
         require(tokenAddr != address(0), "listingsregistry: token is zero");
         bytes32 key = symbolKey(symbol);
+        // get key for symbol
         require(listingsByKey[key].token == address(0), "listingsregistry: symbol already listed");
 
         listingsByKey[key] = Listing({
@@ -49,16 +46,17 @@ contract ListingsRegistry is AccessControl {
             symbol: symbol,
             name: name
         });
+        // store the listing
         isTokenListed[tokenAddr] = true;
+        // mark as listed
         tokenToSymbol[tokenAddr] = symbol;
         listedSymbols.push(symbol);
 
         emit StockListed(symbol, tokenAddr);
+        // emit for offchain monitor
     }
 
-    /**
-     * @notice Returns the token address for a ticker symbol or address(0).
-     */
+    
     function getListing(string memory symbol) external view returns (address) {
         Listing storage listing = listingsByKey[symbolKey(symbol)];
         return listing.token;
@@ -73,6 +71,7 @@ contract ListingsRegistry is AccessControl {
     }
 
     function getSymbols(uint256 offset, uint256 limit) external view returns (string[] memory) {
+        // return a slice of symbols
         uint256 total = listedSymbols.length;
         if (offset >= total) {
             return new string[](0);
@@ -88,9 +87,7 @@ contract ListingsRegistry is AccessControl {
         return slice;
     }
 
-    /**
-     * @notice Returns full listing info or empty values if missing.
-     */
+    
     function getListingFull(string memory symbol)
         external
         view
@@ -100,9 +97,7 @@ contract ListingsRegistry is AccessControl {
         return (listing.token, listing.symbol, listing.name);
     }
 
-    /**
-     * @notice Returns true when a symbol has been listed.
-     */
+    
     function isListed(string memory symbol) external view returns (bool) {
         return listingsByKey[symbolKey(symbol)].token != address(0);
     }
@@ -113,6 +108,7 @@ contract ListingsRegistry is AccessControl {
     }
 
     function validateSymbol(string memory symbol) internal pure {
+        // symbol validation, uupercase and numbered
         bytes memory raw = bytes(symbol);
         require(raw.length > 0, "listingsregistry: symbol required");
         for (uint256 i = 0; i < raw.length; i++) {

@@ -1,8 +1,8 @@
-// scripts/deployStage2.js
-// -----------------------------------------------------------------------------
-// Deploys ListingsRegistry + EquityTokenFactory, optionally creates a few
-// listings, and writes addresses to deployments/local.json.
-// -----------------------------------------------------------------------------
+
+
+
+
+
 
 const fs = require("fs");
 const path = require("path");

@@ -56,7 +56,7 @@ describe("Stage 7 — PortfolioAggregator", function () {
     expect(holdings).to.have.length(2);
 
     const total = await aggregator.getTotalValue(user.address);
-    // 5 TToken + (2 * 100) + (1 * 200) = 5 + 200 + 200 = 405 TToken
+    
     expect(total).to.equal(405n * ONE_SHARE);
   });
 

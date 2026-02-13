@@ -1,248 +1,464 @@
 # Tokenised LSE Manual
 
-This manual explains the core smart contracts, their key variables, and how the
-system works end-to-end. It also includes the original Stage 1 local setup for
-TToken.
+This manual documents the system as implemented. It is a precise handover intended for a developer who will continue the project.
 
----
+## 1) System Summary
 
-## 1. System Overview (How It Works)
+The system is a local Hardhat blockchain with a Node and Express API server and a multi page HTML frontend. The smart contracts implement a listings registry, equity tokens, a stable settlement token, and an on chain order book. The frontend uses the backend to read and write on chain data and to pull off chain market data.
 
-- **TToken (Stage 1)** is the stable settlement token (USD-pegged in your model).
-- **ListingsRegistry + EquityTokenFactory (Stage 2)** create and record a new
-  ERC-20 equity token for each company listing (symbols are A–Z/0–9 only).
-- **EquityToken (Stage 2)** represents a single company’s equity.
-- **PriceFeed (Stage 3)** stores the latest USD-cent price per symbol with a
-  timestamp, updated by a backend oracle wallet.
+## 2) Architecture
 
-Typical flow:
-1) Admin lists a company via the backend → `EquityTokenFactory.createEquityToken`.
-2) Factory deploys the company token and registers it in `ListingsRegistry`.
-3) Backend oracle pushes live prices to `PriceFeed`.
-4) Frontend reads registry + price feed to display balances and prices.
+### 2.1 On chain components
+- TToken: stable settlement token used for buys.
+- ListingsRegistry: registry from symbol to token address.
+- EquityTokenFactory: creates new equity tokens and registers them.
+- EquityToken: ERC20 equity token for each listed symbol.
+- PriceFeed: simple on chain price storage for a symbol.
+- OrderBookDEX: on chain order book with escrow and limit orders.
+- Dividends: dividend accounting contract, deployed but not wired to UI or API.
+- Award: trade reward tracking, deployed but not wired to UI or API.
+- PortfolioAggregator: portfolio summary helper, deployed but not wired to UI or API.
 
-Note: Price updates can also be triggered on demand (e.g. when a user clicks
-“Buy”), but the backend must still write the price on-chain before the trade.
+### 2.2 Off chain components
+- Express server at `scripts/ui/html/server.js`.
+- Market data aggregation with FMP as primary and Yahoo as fallback.
+- UI pages under `scripts/ui/html/public/` and markets chart under `scripts/ui/dataFetch/tsla-yahoo/chart.html`.
 
-## 2. Contract Variables and Roles
+### 2.3 Data flow
+- UI uses backend REST API for on chain reads and writes and for market data.
+- Backend uses Hardhat JSON RPC to call and send transactions to contracts.
+- Admin UI reads on chain order book and fills using RPC log scans.
 
-### TToken.sol
-- `MINTER_ROLE`: AccessControl role for minting.
-- `MAX_SUPPLY`: Hard cap for total supply.
-- `AIRDROP_AMOUNT`: One-time airdrop size per wallet.
-- `airdropClaimed`: Mapping of wallet → claimed status.
-- `AirdropClaimed`: Event emitted on successful airdrop.
+## 3) Frontend Modules
 
-### EquityToken.sol
-- `MINTER_ROLE`: AccessControl role for minting equity tokens.
-- `name`/`symbol` (ERC-20 metadata): Company name and ticker symbol.
+### 3.1 Shell
+**File**: `scripts/ui/html/public/index.html`
 
-### ListingsRegistry.sol
-- `LISTING_ROLE`: Role allowed to register listings (factory holds this).
-- `listingsByKey`: Mapping of symbol hash → `Listing` struct.
-- `Listing.token`: Equity token address.
-- `Listing.symbol`: Stored symbol string.
-- `Listing.name`: Stored company name.
-- `StockListed`: Event emitted when a new listing is registered.
+**Purpose**
+- App shell, navigation, and wallet status.
 
-### EquityTokenFactory.sol
-- `registry`: Registry contract used for symbol → token mapping.
-- `defaultMinter`: Backend wallet that receives `MINTER_ROLE` on new tokens.
+**Key DOM ids**
+- `wallet-status`, `wallet-dot`, `wallet-account`, `wallet-hint`.
+- `page-frame` for iframe navigation.
 
-### PriceFeed.sol
-- `ORACLE_ROLE`: Role allowed to update prices.
-- `pricesByKey`: Mapping of symbol hash → `PriceEntry`.
-- `PriceEntry.priceCents`: Latest price in USD cents.
-- `PriceEntry.timestamp`: Last update time (unix seconds).
-- `PriceUpdated`: Event emitted on each price update.
+**Wallet logic**
+- `eth_accounts` for read and `eth_requestAccounts` for connect.
+- `accountsChanged` reloads iframe to ensure page state refresh.
 
-## 3. Local Stage 1 (TToken) Walkthrough
+**Navigation**
+- `markets`, `portfolio`, `ttoken`, `trade`, `admin`.
+- Each page is loaded in the iframe with `page-frame.src`.
 
-### You need:
+### 3.2 Markets
+**File**: `scripts/ui/dataFetch/tsla-yahoo/chart.html`
 
-* Node.js installed
-* Hardhat installed (via your project)
-* MetaMask browser extension
-* Your Conda environment: `tokenised-lse`
+**Purpose**
+- Candle chart and stock info with live price polling.
 
-Your project folder:
+**Endpoints used**
+- `GET /api/candles?symbol=SYMBOL&date=YYYY-MM-DD&interval=5&range=1d`
+- `GET /api/fmp/quote-short?symbol=SYMBOL`
+- `GET /api/fmp/stock-info?symbol=SYMBOL`
 
+**Live price polling**
+- Live price refresh every 10 seconds.
+- Updated seconds refresh every 1 second.
+- Toggle button enables or disables polling.
+
+### 3.3 Portfolio
+**File**: `scripts/ui/html/public/portfolio.html`
+
+**Purpose**
+- Displays equity balances and cash balance (TToken).
+
+**Endpoints used**
+- `GET /api/equity/balances?address=WALLET`
+- `GET /api/ttoken/balance?address=WALLET`
+- `GET /api/fmp/quote-short?symbol=SYMBOL`
+
+**Notes**
+- Cost price and gain or loss are placeholders shown as `x`.
+- Clicking a row opens `sell.html?symbol=SYMBOL`.
+
+### 3.4 Trade
+**File**: `scripts/ui/html/public/trade.html`
+
+**Purpose**
+- Places buy orders on chain.
+
+**Endpoint used**
+- `POST /api/orderbook/limit`
+
+**Payload**
 ```
-~/Desktop/tokenised-lse
-```
-
----
-
-## 3.1 Start Hardhat Local Network
-
-Open Terminal:
-
-```bash
-cd ~/Desktop/tokenised-lse
-conda activate tokenised-lse
-npx hardhat node
-```
-
-You will see accounts printed:
-
-```
-Account #19: 0x8626f6940E2eb28930eFb4CeF49B2d1F2C9C1199
-Private Key: 0xdf57089febbacf7ba0bc227dafbffa9fc08a93fdc68e1e42411a14efcf23656e
-```
-
-➡️ **Keep this terminal open. It is your blockchain.**
-
----
-
-## 3.2 Deploy TToken Contract
-
-Open a new Terminal tab:
-
-```bash
-cd ~/Desktop/tokenised-lse
-conda activate tokenised-lse
-npx hardhat run --network localhost scripts/stage1/deploy.js
+{
+  "symbol": "AAPL",
+  "side": "BUY",
+  "priceCents": 39500,
+  "qty": 1000,
+  "from": "0xWALLET"
+}
 ```
 
-You will see:
+**Auto buy**
+- UI only. Uses the same endpoint with `auto-price` and `auto-qty` inputs.
 
+### 3.5 Sell
+**File**: `scripts/ui/html/public/sell.html`
+
+**Purpose**
+- Places sell orders on chain.
+
+**Endpoint used**
+- `POST /api/orderbook/limit`
+
+**Payload**
 ```
-TToken deployed to: 0x5FbDB2315678afecb367f032d93F642f64180aa3
-```
-
-➡️ **Copy this contract address.**
-
----
-
-## 3.3 Configure MetaMask (Local Hardhat Network)
-
-In MetaMask:
-
-1. Settings → Networks → Add Network → "Add network manually"
-2. Fill in:
-
-   * **Network Name:** Hardhat Localnet
-   * **RPC URL:** `http://127.0.0.1:8545`
-   * **Chain ID:** `31337`
-   * **Symbol:** `ETH`
-
-Save.
-
----
-
-## 3.4 Import Your Hardhat Test Wallet
-
-In MetaMask:
-
-* Click Account Icon → **Import Account**
-* Paste private key:
-
-```
-0xdf57089febbacf7ba0bc227dafbffa9fc08a93fdc68e1e42411a14efcf23656e
+{
+  "symbol": "AAPL",
+  "side": "SELL",
+  "priceCents": 42000,
+  "qty": 1000,
+  "from": "0xWALLET"
+}
 ```
 
-Your wallet address:
+### 3.6 TToken and Equity Mint
+**File**: `scripts/ui/html/public/ttoken.html`
 
+**Purpose**
+- Mint TToken to current wallet.
+- Create or mint equity tokens to current wallet.
+
+**Endpoints used**
+- `POST /api/ttoken/mint`
+- `POST /api/equity/create-mint`
+
+**Payloads**
 ```
-0x8626f6940E2eb28930eFb4CeF49B2d1F2C9C1199
+{
+  "to": "0xWALLET",
+  "amount": 1000
+}
 ```
-
-You will see **10,000 ETH (test)**.
-
----
-
-## 3.5 Add TToken Token to MetaMask
-
-In MetaMask → **Assets → Import Tokens → Custom Token**
-
-Enter:
-
-* **Token Contract Address:** *(your deployed address)*
-
 ```
-0x5FbDB2315678afecb367f032d93F642f64180aa3
-```
-
-* **Symbol:** `TToken`
-* **Decimals:** `18`
-
-Click **Add Token**.
-
-MetaMask will now track the TToken balance.
-
----
-
-## 3.6 Airdrop TToken to Your Wallet
-
-Open a new Terminal tab:
-
-```bash
-npx hardhat console --network localhost
+{
+  "symbol": "AAPL",
+  "name": "Apple",
+  "to": "0xWALLET",
+  "amount": 1000
+}
 ```
 
-Then paste the following:
+### 3.7 Admin
+**File**: `scripts/ui/html/public/admin.html`
 
-```js
-const TToken = await ethers.getContractAt(
-  "TToken",
-  "0x5FbDB2315678afecb367f032d93F642f64180aa3" 
-);
+**Purpose**
+- Displays open orders and completed fills.
 
-const wallet19 = new ethers.Wallet(
-  "0xdf57089febbacf7ba0bc227dafbffa9fc08a93fdc68e1e42411a14efcf23656e",
-  ethers.provider
-);
+**Endpoints used**
+- `GET /api/orderbook/open`
+- `GET /api/orderbook/fills`
 
-const me = await wallet19.getAddress();
-const TT19 = TToken.connect(wallet19);
+**Order filtering**
+- Only orders with `active === true` and `remaining > 0` are shown in open orders.
 
-await (await TT19.airdropOnce()).wait();
+## 4) Backend REST API
+
+**File**: `scripts/ui/html/server.js`
+
+### 4.1 Market data
+
+**GET /api/stock/:symbol**
+- Yahoo quoteSummary modules: price, summaryDetail, financialData, majorHoldersBreakdown, institutionOwnership, fundOwnership, insiderHolders, insiderTransactions.
+
+**GET /api/quote?symbol=SYMBOL**
+- Yahoo quote with candle fallback.
+
+**GET /api/fmp/quote-short?symbol=SYMBOL**
+- FMP primary, Yahoo and candle fallback.
+- Response:
+```
+{
+  "symbol": "TSLA",
+  "price": 400.5,
+  "volume": 12345678,
+  "stale": false,
+  "source": "fmp"
+}
 ```
 
-Expected output: a transaction receipt.
+**GET /api/fmp/stock-info?symbol=SYMBOL**
+- FMP `quote` and `aftermarket-quote` combined, Yahoo and candle fallback.
+- Response fields: previousClose, open, dayLow, dayHigh, yearLow, yearHigh, volume, avgVolume, marketCap, beta, peTTM, epsTTM, bid, bidSize, ask, askSize.
 
----
+### 4.2 Candles
 
-## 3.7 Verify Your Token Balance
-
-In the same console:
-
-```js
-ethers.formatUnits(await TToken.balanceOf(me), 18);
+**GET /api/candles?symbol=SYMBOL&date=YYYY-MM-DD&interval=5&range=1d**
+- Range mapping: 1d, 5d, 1m, 3m, 6m.
+- Response:
+```
+{
+  "symbol": "TSLA",
+  "date": "2026-02-06",
+  "interval": 5,
+  "range": "1d",
+  "dates": ["2026-02-06"],
+  "candles": [
+    {
+      "timeSec": 1707229800,
+      "open": 411.2,
+      "high": 412.1,
+      "low": 410.8,
+      "close": 411.1,
+      "volume": 10230,
+      "timeET": "02/06/2026, 09:30"
+    }
+  ]
+}
 ```
 
-Expected result:
+### 4.3 Hardhat accounts
 
+**GET /api/hardhat/accounts**
+- Response:
 ```
-'1000000.0'
-```
-
-Now check MetaMask → **You will see 1,000,000 TToken**.
-
----
-
-## 4. Notes
-
-### 1. Restarting Hardhat resets everything
-
-Whenever you run:
-
-```bash
-npx hardhat node
+{
+  "accounts": ["0xWALLET0", "0xWALLET1"]
+}
 ```
 
-The blockchain resets.
+### 4.4 TToken
 
-* You must redeploy the contract.
-* You must re-add the new contract address to MetaMask.
-* Airdrop again.
+**GET /api/ttoken-address**
+- Returns TToken address from deployments or environment.
 
-### 2. Local ETH is not real
+**GET /api/ttoken/balance?address=0xWALLET**
+- Response:
+```
+{
+  "address": "0xWALLET",
+  "ttokenAddress": "0xTTOKEN",
+  "balanceWei": "1000000000000000000000"
+}
+```
 
-The 10,000 ETH is test ETH only valid on localhost.
+**POST /api/ttoken/mint**
+- Body: `to`, `amount`.
+- Sender: `deployments.admin`.
+- Response: `{ "txHash": "0xTX" }`.
 
-### 3. Using multiple wallets
+### 4.5 Equity tokens
 
-You can import any Hardhat account into MetaMask using its private key.
+**GET /api/registry/listings**
+- Response:
+```
+{
+  "listings": [
+    { "symbol": "AAPL", "tokenAddress": "0xTOKEN" }
+  ]
+}
+```
 
----
+**GET /api/equity/address?symbol=SYMBOL**
+- Response: `{ "tokenAddress": "0xTOKEN" }`.
+
+**GET /api/equity/balances?address=0xWALLET**
+- Response:
+```
+{
+  "balances": [
+    { "symbol": "AAPL", "tokenAddress": "0xTOKEN", "balanceWei": "1000000000000000000000" }
+  ]
+}
+```
+
+**POST /api/equity/create**
+- Body: `symbol`, `name`.
+- Response: `{ "txHash": "0xTX" }`.
+
+**POST /api/equity/mint**
+- Body: `symbol`, `to`, `amount`.
+- Response: `{ "txHash": "0xTX", "tokenAddress": "0xTOKEN" }`.
+
+**POST /api/equity/create-mint**
+- Body: `symbol`, `name`, `to`, `amount`.
+- Response:
+```
+{
+  "createTx": "0xTX",
+  "mintTx": "0xTX",
+  "tokenAddress": "0xTOKEN"
+}
+```
+
+### 4.6 Order book
+
+**POST /api/orderbook/limit**
+- Body: `symbol`, `side`, `priceCents`, `qty`, `from`.
+- Behavior:
+  - Resolve token from registry.
+  - Convert `qty` to 18 decimal units.
+  - For BUY, compute `quoteWei = qtyWei * priceCents / 100`.
+  - Approve TToken for BUY or equity token for SELL.
+  - Call `OrderBookDEX.placeLimitOrder`.
+- Response: `{ "txHash": "0xTX" }`.
+
+**GET /api/orderbook/open**
+- Response:
+```
+{
+  "orders": [
+    {
+      "id": 1,
+      "side": "BUY",
+      "symbol": "AAPL",
+      "priceCents": 42000,
+      "qty": "1000000000000000000000",
+      "remaining": "500000000000000000000",
+      "trader": "0xWALLET",
+      "active": true
+    }
+  ]
+}
+```
+
+**GET /api/orderbook/fills**
+- Response:
+```
+{
+  "fills": [
+    {
+      "makerId": 1,
+      "takerId": 2,
+      "makerTrader": "0xWALLET",
+      "takerTrader": "0xWALLET",
+      "symbol": "AAPL",
+      "priceCents": 42000,
+      "qty": "1000000000000000000000",
+      "blockNumber": 50,
+      "txHash": "0xTX",
+      "timestampMs": 1700000000000
+    }
+  ]
+}
+```
+
+## 5) Contract Implementation Details
+
+### 5.1 TToken
+- ERC20 with 18 decimals.
+- Constants for max supply and airdrop amount.
+- `airdropOnce` checks and records claim in `airdropClaimed`.
+
+### 5.2 ListingsRegistry
+- Mapping from symbol key to Listing struct.
+- `LISTING_ROLE` controls registerListing.
+
+### 5.3 EquityToken
+- ERC20 with 18 decimals.
+- Includes snapshot functionality.
+
+### 5.4 EquityTokenFactory
+- Deploys EquityToken and registers listing.
+- Grants minter role to default minter.
+
+### 5.5 OrderBookDEX
+- Escrow based order book.
+- Orders stored in buyOrders and sellOrders arrays.
+- Matching logic inside `matchOrder` for cross fills.
+- Emits OrderPlaced and OrderFilled used by admin UI.
+
+### 5.6 PriceFeed
+- Stores price and timestamp per symbol.
+- `isFresh` checks timestamp window.
+
+### 5.7 Dividends
+- Deployed but not wired to API or UI.
+
+### 5.8 Award
+- Deployed but not wired to API or UI.
+
+### 5.9 PortfolioAggregator
+- Deployed but not wired to API or UI.
+
+## 6) Deployment
+
+### 6.1 Stage 1
+- `scripts/stage1/deploy.js` deploys TToken and writes deployments.
+
+### 6.2 Stage 2
+- `scripts/deployStage2.js` deploys ListingsRegistry, EquityTokenFactory, PriceFeed.
+- Creates default listings for AAPL, TSLA, LSE.
+
+### 6.3 Stage 4
+- `scripts/stage4/deploy.js` deploys OrderBookDEX.
+
+### 6.4 Stage 5
+- `scripts/stage5/deploy.js` deploys Dividends.
+
+## 7) Missing Components
+
+- Cost basis and profit calculations are placeholders.
+- Auto buy and auto sell are UI only.
+- Dividends not wired to UI or API.
+- No order cancel UI.
+- No pagination for order book or fills.
+- No authentication or admin access control in backend.
+- No off chain indexer.
+- No database persistence.
+- No monitoring dashboards.
+- No automated test coverage for UI or API.
+
+## 8) Demonstration Plan and Marking Criteria Alignment
+
+### 8.1 Demonstration objectives
+- Show concrete progress against deliverables.
+- Show adherence to plan and staged development.
+- Show problem solving and technical decisions.
+- Explain clearly with direct linkage to code and on chain behavior.
+
+### 8.2 Demo script and flow
+
+**Phase 1: Setup evidence**
+- Show `npm run dev:chain` output with deployments written to `deployments/localhost.json`.
+- Point to `ttoken`, `listingsRegistry`, `equityTokenFactory`, `priceFeed`, `orderBookDex` entries.
+
+**Phase 2: Core on chain functionality**
+- Open `ttoken.html` and mint 1000 TToken to the connected wallet.
+- Import TToken in MetaMask and show balance.
+- Use `equity` mint to create or mint AAPL equity to wallet.
+
+**Phase 3: Market data integration**
+- Open markets page, load TSLA candles.
+- Show live price update toggle and stock info snapshot.
+
+**Phase 4: Trading workflow**
+- Place a BUY order from trade page.
+- Place a SELL order from sell page for the same symbol.
+- Observe order matching in admin page.
+
+**Phase 5: Admin and on chain evidence**
+- Open admin page to show open orders and completed fills.
+- Explain that fills are read from OrderFilled logs.
+- Show block timestamp mapping to local time.
+
+### 8.3 Mapping to marking criteria
+
+**Progress towards deliverables**
+- Working deployment scripts and contract deployments.
+- Market data integration and live price polling.
+- Order book order placement and fill tracking.
+
+**Application of planning**
+- Stage based deploy scripts and contract separation.
+- UI modules aligned with staged contract features.
+
+**Problem solving ability**
+- Demonstrate fallback data flow for FMP and Yahoo.
+- Show on chain approval and order submission path.
+
+**Clarity of explication**
+- Use UI, API, and contract code to point to exact logic.
+- Explain each step and show the exact REST payloads.
+

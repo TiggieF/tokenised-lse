@@ -46,7 +46,7 @@ describe("Stage 5.5 — buyExactQuote", function () {
 
     const price = 10_000n;
     const makerQty = 2n * ONE_SHARE;
-    const budget = ONE_SHARE; // 1 TToken budget
+    const budget = ONE_SHARE; 
 
     await equity.connect(admin).mint(maker1.address, makerQty);
     await ttoken.connect(admin).mint(taker.address, budget);
@@ -89,15 +89,15 @@ describe("Stage 5.5 — buyExactQuote", function () {
     await dex.connect(taker).buyExactQuote(await equity.getAddress(), budget, 10_100n);
 
     const orders = await dex.getSellOrders(await equity.getAddress());
-    expect(orders[0].remaining).to.equal(ONE_SHARE); // higher price untouched
+    expect(orders[0].remaining).to.equal(ONE_SHARE); 
     expect(orders[1].remaining).to.equal(0);
   });
 
   it("stops when remaining quote too small to buy", async function () {
     const { admin, maker1, taker, ttoken, equity, dex } = await loadFixture(deployStage55Fixture);
 
-    const price = 99_999n; // very high price
-    const budget = 1n; // 1 wei of TToken
+    const price = 99_999n; 
+    const budget = 1n; 
 
     await equity.connect(admin).mint(maker1.address, ONE_SHARE);
     await ttoken.connect(admin).mint(taker.address, budget);

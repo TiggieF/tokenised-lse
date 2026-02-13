@@ -122,6 +122,12 @@
     .muted {
       color: var(--muted);
     }
+
+    .addr {
+      word-break: break-all;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
   </style>
 </head>
 <body>
@@ -132,6 +138,7 @@
 
     <div class="section">
       <h2 class="section-title">Order book (open)</h2>
+      <!-- ongoing order thats looking to be filled -->
       <table>
         <thead>
           <tr>
@@ -151,6 +158,7 @@
 
     <div class="section">
       <h2 class="section-title">Completed transactions</h2>
+      <!-- completed transaction here -->
       <table>
         <thead>
           <tr>
@@ -170,24 +178,30 @@
   <script>
     const openOrdersBody = document.getElementById("open-orders-body");
     const fillsBody = document.getElementById("fills-body");
+    // JSDOM
 
     function shortAddress(address) {
-      const first = address.slice(0, 6);
-      const last = address.slice(-4);
-      return `${first}...${last}`;
+      return String(address || "");
+      // keep full address for transparency
     }
 
     function formatQty(wei) {
       const value = Number(wei) / 1e18;
       return value.toFixed(2);
+      // to fixed 2 dc
     }
 
-    function renderOpenOrders(orders) {
+    (async function () {
+      const openRes = await fetch("/api/orderbook/open");
+      const openData = await openRes.json();
+      // rest api
+
       openOrdersBody.innerHTML = "";
       const activeOrders = [];
-      for (const order of orders) {
+      for (const order of openData.orders) {
         if (order.active === true && Number(order.remaining) > 0) {
           activeOrders.push(order);
+          // add to existing order if active
         }
       }
       for (const order of activeOrders) {
@@ -200,60 +214,42 @@
           <td>${order.priceCents}</td>
           <td>${formatQty(order.qty)}</td>
           <td>${formatQty(order.remaining)}</td>
-          <td class="muted">${shortAddress(order.trader)}</td>
+          <td class="muted addr">${shortAddress(order.trader)}</td>
           <td>${order.active}</td>
         `;
         openOrdersBody.appendChild(tr);
       }
-    }
 
-    function renderFills(fills) {
+
+
+      // satisfied order
+      const fillsRes = await fetch("/api/orderbook/fills");
+      const fillsData = await fillsRes.json();
+
       fillsBody.innerHTML = "";
-      for (const fill of fills) {
+      for (const fill of fillsData.fills) {
         const tr = document.createElement("tr");
+        const date = new Date(fill.timestampMs);
+        const formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        const formatted = formatter.format(date);
         tr.innerHTML = `
-          <td class="muted">${shortAddress(fill.makerTrader)}</td>
-          <td class="muted">${shortAddress(fill.takerTrader)}</td>
+          <td class="muted addr">${shortAddress(fill.makerTrader)}</td>
+          <td class="muted addr">${shortAddress(fill.takerTrader)}</td>
           <td>${fill.symbol}</td>
           <td>${fill.priceCents}</td>
           <td>${formatQty(fill.qty)}</td>
-          <td class="muted">${formatTime(fill.timestampMs)}</td>
+          <td class="muted">${formatted}</td>
         `;
         fillsBody.appendChild(tr);
       }
-    }
-
-    function formatTime(timestampMs) {
-      const date = new Date(timestampMs);
-      const formatter = new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/New_York",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-      return formatter.format(date);
-    }
-
-    async function loadOpenOrders() {
-      const res = await fetch("/api/orderbook/open");
-      const data = await res.json();
-      renderOpenOrders(data.orders);
-    }
-
-    async function loadFills() {
-      const res = await fetch("/api/orderbook/fills");
-      const data = await res.json();
-      renderFills(data.fills);
-    }
-
-    async function initAdmin() {
-      await loadOpenOrders();
-      await loadFills();
-    }
-
-    initAdmin();
+    })();
   </script>
 </body>
 </html>

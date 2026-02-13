@@ -153,6 +153,11 @@
       margin-top: 8px;
     }
 
+    .status-error {
+      color: #e04c4c;
+      font-weight: 600;
+    }
+
     .panel-hidden {
       display: none;
     }
@@ -219,6 +224,7 @@
       <div class="mode-tabs">
         <button class="mode-tab active" id="mode-buy" type="button">Buy</button>
         <button class="mode-tab" id="mode-auto" type="button">Auto Buy</button>
+        <!-- auto buy placeholder -->
       </div>
     </div>
 
@@ -227,6 +233,7 @@
         <h2 class="card-title">Stock</h2>
         <div class="wallet-line">Wallet: <span id="trade-wallet">-</span></div>
         <select class="select" id="trade-symbol">
+          <!-- selection of stocks -->
           <option>Apple (AAPL)</option>
           <option>Tesla (TSLA)</option>
           <option>Amazon (AMZN)</option>
@@ -241,7 +248,7 @@
         </div>
         <div class="stat-row">
           <span class="muted">Available TToken</span>
-          <strong>10,000.00</strong>
+          <strong id="ttoken-balance">0.00</strong>
         </div>
       </div>
 
@@ -258,7 +265,7 @@
         </div>
         <div class="stat-row">
           <span class="muted">Estimated cost</span>
-          <strong>1,000 TToken</strong>
+          <strong id="estimated-cost">1,000 TToken</strong>
         </div>
         <div class="actions">
           <button class="btn btn-buy" id="buy-btn" type="button">Buy</button>
@@ -285,29 +292,30 @@
   </div>
 
   <script>
+    // dom elements
     const tradeWallet = document.getElementById("trade-wallet");
     const tradeSymbol = document.getElementById("trade-symbol");
     const buyPriceInput = document.getElementById("buy-price");
     const buyStatus = document.getElementById("buy-status");
     const buyButton = document.getElementById("buy-btn");
+    const ttokenBalanceEl = document.getElementById("ttoken-balance");
+    const buyQtyContainer = document.querySelector("#buy-panel .qty");
+    const buyQtyValue = buyQtyContainer.querySelector("div");
+    const buyQtyButtons = buyQtyContainer.querySelectorAll("button");
+    const buyMinusButton = buyQtyButtons[0];
+    const buyPlusButton = buyQtyButtons[1];
+    const estimatedCostEl = document.getElementById("estimated-cost");
     const autoPriceInput = document.getElementById("auto-price");
     const autoQtyInput = document.getElementById("auto-qty");
     const autoStatus = document.getElementById("auto-status");
     const autoButton = document.getElementById("auto-buy-btn");
     let currentAccount = "";
+    let ttokenBalance = 0;
 
     function setWalletAddress(address) {
       currentAccount = address;
       tradeWallet.textContent = address;
-    }
-
-    async function connectWallet() {
-      const accounts = await window.ethereum.request(
-        {
-          method: "eth_requestAccounts",
-        }
-      );
-      setWalletAddress(accounts[0]);
+      // set wallet address for display
     }
 
     function getSymbolFromSelect() {
@@ -316,6 +324,7 @@
       const symbolPart = parts[1];
       const symbol = symbolPart.replace(")", "");
       return symbol;
+      // get symbol from selection
     }
 
     function parsePriceToCents(text) {
@@ -323,9 +332,36 @@
       const value = Number(cleaned);
       const cents = Math.round(value * 100);
       return cents;
+      // cent
+    }
+
+    function updateBuyQty(nextValue) {
+      let value = Number(nextValue);
+      if (Number.isNaN(value)) {
+        value = 1000;
+      }
+      if (value < 1000) {
+        value = 1000;
+      }
+      buyQtyValue.textContent = String(value);
+      updateEstimatedCost(value);
+    }
+
+    function updateEstimatedCost(qty) {
+      // estimated price update
+      const priceText = buyPriceInput.value;
+      const priceCents = parsePriceToCents(priceText);
+      const priceDollars = priceCents / 100;
+      const totalCost = priceDollars * qty;
+      const costText = totalCost.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+      estimatedCostEl.textContent = `${costText} TToken`;
     }
 
     async function placeLimitOrder(symbol, side, priceCents, qty) {
+      // limit order through api
       const payload = {
         symbol: symbol,
         side: side,
@@ -346,23 +382,29 @@
       return data.txHash;
     }
 
-    async function submitBuy() {
-      const symbol = getSymbolFromSelect();
-      const priceCents = parsePriceToCents(buyPriceInput.value);
-      const qtyText = document.querySelector("#buy-panel .qty div").textContent;
-      const qty = Number(qtyText);
-      buyStatus.textContent = "Submitting...";
-      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
-      buyStatus.textContent = `Order placed: ${String(hash).slice(0, 10)}...`;
+    async function loadTTokenBalance() {
+      const res = await fetch(
+        `/api/ttoken/balance?address=${encodeURIComponent(currentAccount)}`
+      );
+      const data = await res.json(
+      );
+      // rest api for balance
+      const balanceWei = Number(data.balanceWei);
+      const balance = balanceWei / 1e18;
+      ttokenBalance = balance;
+      ttokenBalanceEl.textContent = balance.toFixed(2);
     }
 
-    async function submitAutoBuy() {
-      const symbol = getSymbolFromSelect();
-      const priceCents = parsePriceToCents(autoPriceInput.value);
-      const qty = Number(autoQtyInput.value);
-      autoStatus.textContent = "Submitting...";
-      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
-      autoStatus.textContent = `Auto buy set: ${String(hash).slice(0, 10)}...`;
+    function showNoFunds(messageEl) {
+      messageEl.textContent = "no enough fund";
+      messageEl.classList.add("status-error");
+      // error for no fund
+    }
+
+    function showStatus(messageEl, message) {
+      messageEl.textContent = message;
+      messageEl.classList.remove("status-error");
+      // status for action
     }
 
     const modeBuy = document.getElementById("mode-buy");
@@ -371,6 +413,7 @@
     const autoPanel = document.getElementById("auto-panel");
 
     function setMode(mode) {
+      // switches between buy and auto panel
       if (mode === "buy") {
         modeBuy.classList.add("active");
         modeAuto.classList.remove("active");
@@ -392,17 +435,64 @@
       setMode("auto");
     });
 
-    buyButton.addEventListener("click", () => {
-      submitBuy();
+    buyMinusButton.addEventListener("click", () => {
+      const currentValue = Number(buyQtyValue.textContent);
+      const nextValue = currentValue - 1000;
+      updateBuyQty(nextValue);
     });
 
-    autoButton.addEventListener("click", () => {
-      submitAutoBuy();
+    buyPlusButton.addEventListener("click", () => {
+      const currentValue = Number(buyQtyValue.textContent);
+      const nextValue = currentValue + 1000;
+      updateBuyQty(nextValue);
     });
 
-    connectWallet();
+    buyPriceInput.addEventListener("input", () => {
+      const currentValue = Number(buyQtyValue.textContent);
+      updateEstimatedCost(currentValue);
+    });
+
+    buyButton.addEventListener("click", async () => {
+      const symbol = getSymbolFromSelect();
+      const priceCents = parsePriceToCents(buyPriceInput.value);
+      const qtyText = document.querySelector("#buy-panel .qty div").textContent;
+      const qty = Number(qtyText);
+      if (qty > ttokenBalance) {
+        showNoFunds(buyStatus);
+        return;
+      }
+      showStatus(buyStatus, "Submitting...");
+      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      showStatus(buyStatus, `Order placed: ${String(hash)}`);
+      await loadTTokenBalance();
+    });
+
+    autoButton.addEventListener("click", async () => {
+      const symbol = getSymbolFromSelect();
+      const priceCents = parsePriceToCents(autoPriceInput.value);
+      const qty = Number(autoQtyInput.value);
+      if (qty > ttokenBalance) {
+        showNoFunds(autoStatus);
+        return;
+      }
+      showStatus(autoStatus, "Submitting...");
+      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      showStatus(autoStatus, `Auto buy set: ${String(hash)}`);
+      await loadTTokenBalance();
+    });
+
+    (async function () {
+      const accounts = await window.ethereum.request(
+        {
+          method: "eth_requestAccounts",
+        }
+      );
+      setWalletAddress(accounts[0]);
+      await loadTTokenBalance();
+    })();
     window.ethereum.on("accountsChanged", (accounts) => {
       setWalletAddress(accounts[0]);
+      loadTTokenBalance();
     });
   </script>
 </body>

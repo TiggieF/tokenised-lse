@@ -1,22 +1,22 @@
-// scripts/stage1/sendAirdrop.js
-// -----------------------------------------------------------------------------
-// Claims the one-time TToken airdrop for the wallet whose private key is
-// supplied via AIRDROP_PRIVATE_KEY. Pass the deployed token address through
-// TTOKEN_ADDRESS. Designed for localhost/Hardhat, but works on any network.
-// -----------------------------------------------------------------------------
+
+
+
+
+
+
 
 const { ethers } = require("hardhat");
 
 async function main() {
   const tokenAddress = process.env.TTOKEN_ADDRESS;
   const privateKey = process.env.AIRDROP_PRIVATE_KEY;
-
+  // get token address and pri key fro env
   if (!tokenAddress) {
-    throw new Error("Missing TTOKEN_ADDRESS env var (token contract address).");
+    throw new Error("Missing TTOKEN_ADDRESS");
   }
 
   if (!privateKey) {
-    throw new Error("Missing AIRDROP_PRIVATE_KEY env var (wallet private key).");
+    throw new Error("Missing AIRDROP_PRIVATE_KEY");
   }
 
   const wallet = new ethers.Wallet(privateKey, ethers.provider);
