@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TSLA Intraday Candles</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <style>
+    :root {
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --accent: #e04c4c;
+      --accent-2: #1b8b8b;
+      --panel: rgba(255, 255, 255, 0.85);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 32px;
+    }
+
+    header {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      font-family: "DM Serif Display", serif;
+      font-size: clamp(28px, 3vw, 40px);
+      margin: 0;
+      letter-spacing: 0.3px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 15px;
+      max-width: 640px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 16px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 20px;
+      backdrop-filter: blur(8px);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 6px;
+      display: block;
+    }
+
+    input, select, button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(16, 20, 24, 0.1);
+      font-family: inherit;
+      font-size: 14px;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      font-weight: 600;
+      transition: transform 120ms ease, box-shadow 120ms ease;
+      box-shadow: 0 10px 18px rgba(224, 76, 76, 0.25);
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    #status {
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    #chart {
+      margin-top: 24px;
+      height: 520px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-2);
+    }
+
+    .live-price {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(16, 20, 24, 0.08);
+      background: rgba(255, 255, 255, 0.6);
+      margin-bottom: 16px;
+    }
+
+    .live-label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .live-quote {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      font-size: clamp(24px, 3vw, 32px);
+      font-weight: 600;
+    }
+
+    .live-change {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .live-open {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .live-updated {
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    .change-positive {
+      color: var(--accent-2);
+    }
+
+    .change-negative {
+      color: var(--accent);
+    }
+
+    .change-neutral {
+      color: var(--muted);
+    }
+
+    .info-panel {
+      margin-top: 24px;
+    }
+
+    .info-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .info-title {
+      font-weight: 600;
+      font-size: 16px;
+    }
+
+    .info-updated {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px 18px;
+    }
+
+    .info-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .info-item strong {
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    @media (max-width: 720px) {
+      body {
+        padding: 20px;
+      }
+
+      #chart {
+        height: 420px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+
+  </header>
+
+  <div class="panel">
+    <form id="controls" class="controls">
+      <div>
+        <label for="symbol">Symbol</label>
+        <select id="symbol">
+          <option value="">Loading symbols...</option>
+        </select>
+      </div>
+      <div>
+        <label for="date">Date (ET)</label>
+        <input id="date" type="text" />
+      </div>
+      <div>
+        <label for="range">Range</label>
+        <select id="range">
+          <option value="1d">1 day</option>
+          <option value="5d">5 days</option>
+          <option value="1m">1 month</option>
+        </select>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button id="loadBtn" type="submit">Load Candles</button>
+        <!-- button to manually load candles to avoid abusing api limits -->
+      </div>
+    </form>
+    <div class="live-price">
+      <div>
+        <div id="live-symbol-label" class="live-label">TSLA live price</div>
+        <div class="live-quote">
+          <span id="live-price">-</span>
+          <span id="live-change" class="live-change change-neutral">-</span>
+        </div>
+        <div class="live-open">Open: <span id="live-open">-</span></div>
+        <div id="live-updated" class="live-updated change-neutral">Updated -</div>
+      </div>
+    </div>
+    <div id="status" class="badge"><span class="dot"></span><span>Ready</span></div>
+  </div>
+
+  <div id="chart" class="panel"></div>
+  <div id="stock-info" class="panel info-panel">
+    <div class="info-header">
+      <div class="info-title">Stock information</div>
+      <div id="info-updated" class="info-updated">Updated -</div>
+    </div>
+    <div class="info-grid">
+      <!-- information provided -->
+      <div class="info-item"><span>Previous close</span><strong id="info-prev-close">-</strong></div>
+      <div class="info-item"><span>Open</span><strong id="info-open">-</strong></div>
+      <div class="info-item"><span>Day range</span><strong id="info-day-range">-</strong></div>
+      <div class="info-item"><span>52-week range</span><strong id="info-year-range">-</strong></div>
+      <div class="info-item"><span>Volume</span><strong id="info-volume">-</strong></div>
+      <div class="info-item"><span>Market cap</span><strong id="info-market-cap">-</strong></div>
+    </div>
+  </div>
+  
+
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
+  
+  <script>
+    const statusEl = document.getElementById("status");
+    const statusText = statusEl.querySelector("span:last-child");
+    const form = document.getElementById("controls");
+    const symbolInput = document.getElementById("symbol");
+    const dateInput = document.getElementById("date");
+    const rangeInput = document.getElementById("range");
+    const chartEl = document.getElementById("chart");
+    // JSDOM
+    const liveSymbolLabel = document.getElementById("live-symbol-label");
+    const livePriceEl = document.getElementById("live-price");
+    const liveChangeEl = document.getElementById("live-change");
+    const liveOpenEl = document.getElementById("live-open");
+    const liveUpdatedEl = document.getElementById("live-updated");
+    const infoUpdatedEl = document.getElementById("info-updated");
+    const infoPrevCloseEl = document.getElementById("info-prev-close");
+    const infoOpenEl = document.getElementById("info-open");
+    const infoDayRangeEl = document.getElementById("info-day-range");
+    const infoYearRangeEl = document.getElementById("info-year-range");
+    const infoVolumeEl = document.getElementById("info-volume");
+    const infoMarketCapEl = document.getElementById("info-market-cap");
+
+    const CHANGE_CLASSES = ["change-positive", "change-negative", "change-neutral"];
+    let liveSymbol = "TSLA";
+    let liveOpenPrice;
+    let lastLiveUpdate;
+    let livePoller;
+    let liveTicker;
+    let livePollingEnabled = false;
+    let latestStockInfo;
+
+    function setStatus(text, tone = "neutral") {
+      statusText.textContent = text;
+      const dot = statusEl.querySelector(".dot");
+      if (tone === "error") {
+        dot.style.background = "#e04c4c";
+      } else {
+        dot.style.background = "#1b8b8b";
+      }
+    }
+
+    function applyChangeClass(el, direction) {
+      for (let i = 0; i < CHANGE_CLASSES.length; i++) {
+        const cls = CHANGE_CLASSES[i];
+        el.classList.remove(cls);
+      }
+      if (direction > 0) {
+        el.classList.add("change-positive");
+      } else if (direction < 0) {
+        el.classList.add("change-negative");
+      } else {
+        el.classList.add("change-neutral");
+      }
+    }
+
+    function formatPrice(value) {
+      return `$${value.toFixed(2)}`;
+    }
+
+    function formatNumber(value, digits = 2) {
+      return Number(value).toFixed(digits);
+    }
+
+    function formatInt(value) {
+      return Math.round(Number(value)).toLocaleString("en-US");
+    }
+
+    function formatRange(low, high) {
+      return `${formatPrice(Number(low))} - ${formatPrice(Number(high))}`;
+    }
+
+    function renderLiveUpdated() {
+      const seconds = Math.max(0, Math.floor((Date.now() - lastLiveUpdate) / 1000));
+      liveUpdatedEl.textContent = `Updated ${seconds}s ago`;
+    }
+
+    async function loadListedSymbols() {
+      const fallbackSymbols = ["TSLA", "AAPL", "MSFT"];
+      try {
+        const res = await fetch("/api/registry/listings");
+        const data = await res.json();
+        let listings = [];
+        if (Array.isArray(data.listings)) {
+          listings = data.listings;
+        }
+        symbolInput.innerHTML = "";
+        if (!listings.length) {
+          for (const symbol of fallbackSymbols) {
+            const opt = document.createElement("option");
+            opt.value = symbol;
+            opt.textContent = symbol;
+            symbolInput.appendChild(opt);
+          }
+        } else {
+          for (const item of listings) {
+            const symbol = String(item.symbol || "").toUpperCase();
+            if (!symbol || symbol === "LSE") continue;
+            const opt = document.createElement("option");
+            opt.value = symbol;
+            opt.textContent = symbol;
+            symbolInput.appendChild(opt);
+          }
+        }
+      } catch {
+        symbolInput.innerHTML = "";
+        for (const symbol of fallbackSymbols) {
+          const opt = document.createElement("option");
+          opt.value = symbol;
+          opt.textContent = symbol;
+          symbolInput.appendChild(opt);
+        }
+      }
+      const selected = symbolInput.value.trim().toUpperCase() || fallbackSymbols[0];
+      liveSymbol = selected;
+      resetLivePriceState(selected);
+      liveSymbolLabel.textContent = `${selected} live price`;
+    }
+
+    function setInfoText(el, value) {
+      el.textContent = value;
+    }
+
+    async function loadStockInfo() {
+      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      try {
+        const res = await fetch(
+          `/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`
+        );
+        const data = await res.json(
+        );
+        latestStockInfo = data;
+        setInfoText(infoPrevCloseEl, formatPrice(Number(data.previousClose)));
+        setInfoText(infoOpenEl, formatPrice(Number(data.open)));
+        setInfoText(infoDayRangeEl, formatRange(data.dayLow, data.dayHigh));
+        setInfoText(infoYearRangeEl, formatRange(data.yearLow, data.yearHigh));
+        setInfoText(infoVolumeEl, formatInt(data.volume));
+        setInfoText(infoMarketCapEl, formatInt(data.marketCap));
+        let infoLabel = "Snapshot";
+        if (data.stale) {
+          infoLabel = "Snapshot (stale)";
+        }
+        infoUpdatedEl.textContent = infoLabel;
+        liveOpenPrice = Number(data.open);
+        liveOpenEl.textContent = formatPrice(liveOpenPrice);
+      } catch (err) {
+        infoUpdatedEl.textContent = "Updated -";
+      }
+    }
+
+    function getETDateString() {
+      const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const y = etNow.getFullYear();
+      const m = String(etNow.getMonth() + 1).padStart(2, "0");
+      const d = String(etNow.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    }
+
+    const HOLIDAYS_ET = [
+      "2025-01-01","2025-01-20","2025-02-17","2025-04-18","2025-05-26","2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
+      "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
+    ];
+
+    let lastValidDate = getETDateString();
+    let [startY, startM, startD] = lastValidDate.split("-").map(Number);
+    let dt = new Date(Date.UTC(startY, startM - 1, startD));
+    for (let i = 0; i < 10; i++) {
+      dt.setUTCDate(dt.getUTCDate() - 1);
+      const cur = dt.toISOString().slice(0, 10);
+      const [y, m, d] = cur.split("-").map(Number);
+      const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+      const weekend = weekday === 0 || weekday === 6;
+      const holiday = HOLIDAYS_ET.includes(cur);
+      if (!weekend && !holiday) {
+        lastValidDate = cur;
+        break;
+      }
+    }
+    dateInput.value = lastValidDate;
+
+    flatpickr(dateInput, {
+      dateFormat: "Y-m-d",
+      defaultDate: lastValidDate,
+      maxDate: getETDateString(),
+      disable: [
+        (date) => {
+          const day = date.getDay();
+          const isWeekend = day === 0 || day === 6;
+          return isWeekend;
+        },
+        ...HOLIDAYS_ET,
+      ],
+      onChange: (selectedDates, dateStr) => {
+        lastValidDate = dateStr;
+        setStatus("Ready");
+        loadCandles();
+      },
+    });
+
+    const etFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    const chart = LightweightCharts.createChart(chartEl, {
+      layout: {
+        background: { color: "transparent" },
+        textColor: "#101418",
+        fontFamily: "Space Grotesk, sans-serif",
+      },
+      grid: {
+        vertLines: { color: "rgba(16, 20, 24, 0.08)" },
+        horzLines: { color: "rgba(16, 20, 24, 0.08)" },
+      },
+      rightPriceScale: {
+        borderVisible: false,
+      },
+      timeScale: {
+        borderVisible: false,
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time) => {
+          return etFormatter.format(new Date(time * 1000));
+        },
+      },
+      localization: {
+        timeFormatter: (time) => {
+          return etFormatter.format(new Date(time * 1000));
+        },
+      },
+    });
+
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: "#1b8b8b",
+      downColor: "#e04c4c",
+      borderVisible: false,
+      wickUpColor: "#1b8b8b",
+      wickDownColor: "#e04c4c",
+    });
+
+    
+
+    window.addEventListener("resize", () => {
+      chart.applyOptions({ width: chartEl.clientWidth });
+    });
+
+    function resetLivePriceState(symbol) {
+      liveSymbol = symbol;
+      liveOpenPrice = 0;
+      lastLiveUpdate = 0;
+      latestStockInfo = {};
+      livePriceEl.textContent = "-";
+      liveChangeEl.textContent = "-";
+      liveOpenEl.textContent = "-";
+      renderLiveUpdated();
+    }
+
+    async function loadLivePrice() {
+      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      if (symbol !== liveSymbol) {
+        resetLivePriceState(symbol);
+      }
+
+      liveSymbolLabel.textContent = `${symbol} live price`;
+
+      try {
+        const res = await fetch(
+          `/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`
+        );
+        const data = await res.json(
+        );
+        const currentPrice = data.price;
+        const previousClose = latestStockInfo.previousClose;
+        const changeValue = Number((currentPrice - previousClose).toFixed(2));
+        const changePct = (currentPrice - previousClose) / previousClose;
+
+        livePriceEl.textContent = formatPrice(currentPrice);
+        const pctValue = changePct * 100;
+        if (pctValue > 0) {
+          liveChangeEl.textContent = `+${pctValue.toFixed(2)}%`;
+        } else {
+          liveChangeEl.textContent = `${pctValue.toFixed(2)}%`;
+        }
+        liveOpenEl.textContent = formatPrice(liveOpenPrice);
+
+        const direction = changeValue;
+        applyChangeClass(liveChangeEl, direction);
+        applyChangeClass(liveUpdatedEl, direction);
+
+        lastLiveUpdate = Date.now();
+        renderLiveUpdated();
+      } catch (err) {
+        applyChangeClass(liveChangeEl, 0);
+        applyChangeClass(liveUpdatedEl, 0);
+      }
+    }
+
+    function startLivePricePolling() {
+      clearInterval(livePoller);
+      clearInterval(liveTicker);
+      if (!livePollingEnabled) {
+        return;
+      }
+      livePoller = setInterval(loadLivePrice, 10000);
+      liveTicker = setInterval(renderLiveUpdated, 1000);
+    }
+
+    async function loadCandles() {
+      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      const date = dateInput.value;
+      const range = rangeInput.value;
+      let interval = "5";
+      if (range === "1d") {
+        interval = "5";
+      } else if (range === "5d") {
+        interval = "360";
+      } else if (range === "1m") {
+        interval = "1440";
+      } else if (range === "3m") {
+        interval = "1440";
+      } else if (range === "6m") {
+        interval = "17280";
+      }
+
+      setStatus("loading candles");
+
+      try {
+        const res = await fetch(
+          `/api/candles?symbol=${encodeURIComponent(symbol)}&date=${date}&interval=${interval}&range=${range}`
+        );
+        const data = await res.json(
+        );
+        const candleData = data.candles.map((c) => {
+          return {
+            time: c.timeSec,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          };
+        });
+
+        candleSeries.setData(candleData);
+        chart.timeScale().fitContent();
+
+        const qfData = data.candles.map((c) => {
+          const parts = new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+          }).formatToParts(new Date(c.timeSec * 1000));
+
+          function getPartValue(type) {
+            for (let i = 0; i < parts.length; i++) {
+              const part = parts[i];
+              if (part.type === type) {
+                return part.value;
+              }
+            }
+            return "";
+          }
+
+          const time = Date.UTC(
+            Number(getPartValue("year")),
+            Number(getPartValue("month")) - 1,
+            Number(getPartValue("day")),
+            Number(getPartValue("hour")),
+            Number(getPartValue("minute")),
+            Number(getPartValue("second"))
+          );
+
+          return {
+            time: time,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+          };
+        });
+        
+        
+        let rangeLabel = "1 trading day";
+        if (data.range === "5d") {
+          rangeLabel = "5 trading days";
+        } else if (data.range === "1m") {
+          rangeLabel = "1 month (trading days)";
+        } else if (data.range === "3m") {
+          rangeLabel = "3 months (trading days)";
+        } else if (data.range === "6m") {
+          rangeLabel = "6 months (trading days)";
+        }
+        setStatus(`Loaded ${data.candles.length} candles for ${data.symbol} (${rangeLabel} ending ${data.date}).`);
+      } catch (err) {
+        setStatus(err.message, "error");
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      loadCandles();
+      loadLivePrice();
+    });
+
+    symbolInput.addEventListener("change", () => {
+      setStatus("Ready");
+      resetLivePriceState(symbolInput.value.trim().toUpperCase() || "TSLA");
+      loadLivePrice();
+      loadStockInfo();
+    });
+
+    rangeInput.addEventListener("change", () => {
+      setStatus("Ready");
+    });
+
+    (async function init() {
+      await loadListedSymbols();
+      await loadCandles();
+      applyLiveUpdatesState(false);
+    })();
+    
+    function applyLiveUpdatesState(enabled) {
+      livePollingEnabled = enabled;
+      if (enabled) {
+        loadLivePrice();
+        startLivePricePolling();
+        return;
+      }
+      clearInterval(livePoller);
+      clearInterval(liveTicker);
+    }
+
+    window.addEventListener("message", (event) => {
+      const payload = event.data;
+      if (payload.type === "LIVE_UPDATES") {
+        applyLiveUpdatesState(payload.enabled);
+      }
+    });
+    
+  </script>
+</body>
+</html>

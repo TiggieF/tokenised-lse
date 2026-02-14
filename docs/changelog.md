@@ -5,11 +5,11 @@
 * Created repository **tokenised-lse/**
 * Defined core folder structure (contracts, backend, frontend, docs)
 * Added documentation framework under `/docs`
-* Confirmed Ethereum + Hardhat architecture and TGBP currency design
+* Confirmed Ethereum + Hardhat architecture and TToken currency design
 
 ### v1.1.0 — Core Contracts Draft
 
-* Added base contracts: `TGBP.sol`, `EquityToken.sol`, `EquityTokenFactory.sol`
+* Added base contracts: `TToken.sol`, `EquityToken.sol`, `EquityTokenFactory.sol`
 * Implemented AccessControl and ERC-20 compliance
 * Established role permissions and capped supply
 

@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trade</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --accent: #e04c4c;
+      --accent-2: #1b8b8b;
+      --panel: rgba(255, 255, 255, 0.88);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+      --buy: #2f9e75;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 32px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 24px;
+      backdrop-filter: blur(8px);
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .title {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.85);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 10px 25px rgba(16, 20, 24, 0.12);
+      border: 1px solid rgba(16, 20, 24, 0.08);
+    }
+
+    .card-title {
+      font-size: 14px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 12px;
+      font-weight: 600;
+    }
+
+    .select {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      background: #fff;
+      font-family: inherit;
+      font-size: 14px;
+    }
+
+    .stat-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px dashed rgba(16, 20, 24, 0.12);
+      font-size: 14px;
+    }
+
+    .stat-row:last-child {
+      border-bottom: none;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .qty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      font-size: 2.2rem;
+      font-weight: 600;
+      margin: 16px 0;
+    }
+
+    .qty button {
+      width: 42px;
+      height: 42px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 20, 24, 0.2);
+      background: #fff;
+      font-size: 1.4rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .btn {
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: none;
+      font-weight: 700;
+      color: #fff;
+      cursor: pointer;
+      font-size: 1rem;
+    }
+
+    .btn-sell { background: var(--accent); }
+    .btn-buy { background: var(--buy); }
+
+    .muted-note {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    .status-error {
+      color: #e04c4c;
+      font-weight: 600;
+    }
+
+    .panel-hidden {
+      display: none;
+    }
+
+    .wallet-line {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .mode-tabs {
+      display: inline-flex;
+      gap: 8px;
+      background: rgba(16, 20, 24, 0.08);
+      padding: 4px;
+      border-radius: 999px;
+    }
+
+    .mode-tab {
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .mode-tab.active {
+      background: #fff;
+      color: var(--ink);
+      box-shadow: 0 6px 16px rgba(16, 20, 24, 0.12);
+    }
+
+    .input-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .input-row label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .input-row input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      font-family: inherit;
+      font-size: 14px;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="header">
+      <h1 class="title">Trade</h1>
+      <div class="mode-tabs">
+        <button class="mode-tab active" id="mode-buy" type="button">Buy</button>
+        <button class="mode-tab" id="mode-auto" type="button">Auto Buy</button>
+        <!-- auto buy placeholder -->
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2 class="card-title">Stock</h2>
+        <div class="wallet-line">Wallet: <span id="trade-wallet">-</span></div>
+        <select class="select" id="trade-symbol">
+          <option value="">Loading symbols...</option>
+        </select>
+        <div class="stat-row">
+          <span class="muted">Live price</span>
+          <strong>$412.50</strong>
+        </div>
+        <div class="stat-row">
+          <span class="muted">Available TToken</span>
+          <strong id="ttoken-balance">0.00</strong>
+        </div>
+      </div>
+
+      <div class="card" id="buy-panel">
+        <h2 class="card-title">Order size</h2>
+        <div class="input-row">
+          <label>Limit price (USD)</label>
+          <input type="text" id="buy-price" value="$395.00" />
+        </div>
+        <div class="qty">
+          <button type="button">-</button>
+          <div>1000</div>
+          <button type="button">+</button>
+        </div>
+        <div class="stat-row">
+          <span class="muted">Estimated cost</span>
+          <strong id="estimated-cost">1,000 TToken</strong>
+        </div>
+        <div class="actions">
+          <button class="btn btn-buy" id="buy-btn" type="button">Buy</button>
+        </div>
+        <div class="muted-note" id="buy-status">Ready</div>
+      </div>
+
+      <div class="card panel-hidden" id="auto-panel">
+        <h2 class="card-title">Auto buy setup</h2>
+        <div class="input-row">
+          <label>Target buy price</label>
+          <input type="text" id="auto-price" value="$395.00" />
+        </div>
+        <div class="input-row">
+          <label>Order size</label>
+          <input type="text" id="auto-qty" value="1000" />
+        </div>
+        <div class="actions">
+          <button class="btn btn-buy" id="auto-buy-btn" type="button">Set Auto Buy</button>
+        </div>
+        <div class="muted-note" id="auto-status">Ready</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // dom elements
+    const tradeWallet = document.getElementById("trade-wallet");
+    const tradeSymbol = document.getElementById("trade-symbol");
+    const buyPriceInput = document.getElementById("buy-price");
+    const buyStatus = document.getElementById("buy-status");
+    const buyButton = document.getElementById("buy-btn");
+    const ttokenBalanceEl = document.getElementById("ttoken-balance");
+    const buyQtyContainer = document.querySelector("#buy-panel .qty");
+    const buyQtyValue = buyQtyContainer.querySelector("div");
+    const buyQtyButtons = buyQtyContainer.querySelectorAll("button");
+    const buyMinusButton = buyQtyButtons[0];
+    const buyPlusButton = buyQtyButtons[1];
+    const estimatedCostEl = document.getElementById("estimated-cost");
+    const autoPriceInput = document.getElementById("auto-price");
+    const autoQtyInput = document.getElementById("auto-qty");
+    const autoStatus = document.getElementById("auto-status");
+    const autoButton = document.getElementById("auto-buy-btn");
+    let currentAccount = "";
+    let ttokenBalance = 0;
+
+    function setWalletAddress(address) {
+      currentAccount = address;
+      tradeWallet.textContent = address;
+      // set wallet address for display
+    }
+
+    async function loadListedSymbols() {
+      const fallbackSymbols = ["TSLA", "AAPL", "MSFT"];
+      let listings = [];
+      try {
+        const res = await fetch("/api/registry/listings");
+        const data = await res.json();
+        if (Array.isArray(data.listings)) {
+          listings = data.listings;
+        } else {
+          listings = [];
+        }
+      } catch {
+        listings = [];
+      }
+      tradeSymbol.innerHTML = "";
+      if (!listings.length) {
+        for (const symbol of fallbackSymbols) {
+          const opt = document.createElement("option");
+          opt.value = symbol;
+          opt.textContent = symbol;
+          tradeSymbol.appendChild(opt);
+        }
+        return;
+      }
+      for (const item of listings) {
+        const symbol = String(item.symbol || "").toUpperCase();
+        if (!symbol) continue;
+        const opt = document.createElement("option");
+        opt.value = symbol;
+        opt.textContent = symbol;
+        tradeSymbol.appendChild(opt);
+      }
+    }
+
+    function getSymbolFromSelect() {
+      return String(tradeSymbol.value || "").toUpperCase();
+    }
+
+    function parsePriceToCents(text) {
+      const cleaned = text.replace("$", "").replace(",", "");
+      const value = Number(cleaned);
+      const cents = Math.round(value * 100);
+      return cents;
+      // cent
+    }
+
+    function updateBuyQty(nextValue) {
+      let value = Number(nextValue);
+      if (Number.isNaN(value)) {
+        value = 1000;
+      }
+      if (value < 1000) {
+        value = 1000;
+      }
+      buyQtyValue.textContent = String(value);
+      updateEstimatedCost(value);
+    }
+
+    function updateEstimatedCost(qty) {
+      // estimated price update
+      const priceText = buyPriceInput.value;
+      const priceCents = parsePriceToCents(priceText);
+      const priceDollars = priceCents / 100;
+      const totalCost = priceDollars * qty;
+      const costText = totalCost.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+      estimatedCostEl.textContent = `${costText} TToken`;
+    }
+
+    async function placeLimitOrder(symbol, side, priceCents, qty) {
+      // limit order through api
+      const payload = {
+        symbol: symbol,
+        side: side,
+        priceCents: priceCents,
+        qty: qty,
+        from: currentAccount,
+      };
+      const res = await fetch(
+        "/api/orderbook/limit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = await res.json(
+      );
+      return data.txHash;
+    }
+
+    async function loadTTokenBalance() {
+      const res = await fetch(
+        `/api/ttoken/balance?address=${encodeURIComponent(currentAccount)}`
+      );
+      const data = await res.json(
+      );
+      // rest api for balance
+      const balanceWei = Number(data.balanceWei);
+      const balance = balanceWei / 1e18;
+      ttokenBalance = balance;
+      ttokenBalanceEl.textContent = balance.toFixed(2);
+    }
+
+    function showNoFunds(messageEl) {
+      messageEl.textContent = "no enough fund";
+      messageEl.classList.add("status-error");
+      // error for no fund
+    }
+
+    function showStatus(messageEl, message) {
+      messageEl.textContent = message;
+      messageEl.classList.remove("status-error");
+      // status for action
+    }
+
+    const modeBuy = document.getElementById("mode-buy");
+    const modeAuto = document.getElementById("mode-auto");
+    const buyPanel = document.getElementById("buy-panel");
+    const autoPanel = document.getElementById("auto-panel");
+
+    function setMode(mode) {
+      // switches between buy and auto panel
+      if (mode === "buy") {
+        modeBuy.classList.add("active");
+        modeAuto.classList.remove("active");
+        buyPanel.classList.remove("panel-hidden");
+        autoPanel.classList.add("panel-hidden");
+        return;
+      }
+      modeBuy.classList.remove("active");
+      modeAuto.classList.add("active");
+      buyPanel.classList.add("panel-hidden");
+      autoPanel.classList.remove("panel-hidden");
+    }
+
+    modeBuy.addEventListener("click", () => {
+      setMode("buy");
+    });
+
+    modeAuto.addEventListener("click", () => {
+      setMode("auto");
+    });
+
+    buyMinusButton.addEventListener("click", () => {
+      const currentValue = Number(buyQtyValue.textContent);
+      const nextValue = currentValue - 1000;
+      updateBuyQty(nextValue);
+    });
+
+    buyPlusButton.addEventListener("click", () => {
+      const currentValue = Number(buyQtyValue.textContent);
+      const nextValue = currentValue + 1000;
+      updateBuyQty(nextValue);
+    });
+
+    buyPriceInput.addEventListener("input", () => {
+      const currentValue = Number(buyQtyValue.textContent);
+      updateEstimatedCost(currentValue);
+    });
+
+    buyButton.addEventListener("click", async () => {
+      const symbol = getSymbolFromSelect();
+      if (!symbol) {
+        showNoFunds(buyStatus);
+        buyStatus.textContent = "No listed symbol selected";
+        return;
+      }
+      const priceCents = parsePriceToCents(buyPriceInput.value);
+      const qtyText = document.querySelector("#buy-panel .qty div").textContent;
+      const qty = Number(qtyText);
+      if (qty > ttokenBalance) {
+        showNoFunds(buyStatus);
+        return;
+      }
+      showStatus(buyStatus, "Submitting");
+      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      showStatus(buyStatus, `Order placed: ${String(hash)}`);
+      await loadTTokenBalance();
+    });
+
+    autoButton.addEventListener("click", async () => {
+      const symbol = getSymbolFromSelect();
+      if (!symbol) {
+        showNoFunds(autoStatus);
+        autoStatus.textContent = "No listed symbol selected";
+        return;
+      }
+      const priceCents = parsePriceToCents(autoPriceInput.value);
+      const qty = Number(autoQtyInput.value);
+      if (qty > ttokenBalance) {
+        showNoFunds(autoStatus);
+        return;
+      }
+      showStatus(autoStatus, "Submitting");
+      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      showStatus(autoStatus, `Auto buy set: ${String(hash)}`);
+      await loadTTokenBalance();
+    });
+
+    (async function () {
+      await loadListedSymbols();
+      const accounts = await window.ethereum.request(
+        {
+          method: "eth_requestAccounts",
+        }
+      );
+      setWalletAddress(accounts[0]);
+      await loadTTokenBalance();
+    })();
+    window.ethereum.on("accountsChanged", (accounts) => {
+      setWalletAddress(accounts[0]);
+      loadTTokenBalance();
+    });
+  </script>
+</body>
+</html>

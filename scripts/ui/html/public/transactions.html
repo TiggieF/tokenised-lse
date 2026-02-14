@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transactions</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --panel: rgba(255, 255, 255, 0.88);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+      --danger: #dc2626;
+      --ok: #15803d;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 32px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 24px;
+      backdrop-filter: blur(8px);
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    .pill {
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .pill.active {
+      background: rgba(16, 20, 24, 0.9);
+      color: #fff;
+      border-color: transparent;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: rgba(255, 255, 255, 0.7);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(16, 20, 24, 0.08);
+      vertical-align: top;
+    }
+
+    th {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    .cancel-btn {
+      border: none;
+      background: var(--danger);
+      color: #fff;
+      border-radius: 10px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .status {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .footer-actions {
+      margin-top: 12px;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .ok {
+      color: var(--ok);
+    }
+
+    .error {
+      color: var(--danger);
+    }
+
+    @media (max-width: 780px) {
+      body { padding: 20px; }
+      .header { flex-direction: column; align-items: flex-start; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="header">
+      <div>
+        <h1 class="title">Transactions</h1>
+        <div class="sub">Wallet: <span id="wallet" class="mono">-</span></div>
+      </div>
+      <button id="refresh-btn" class="pill" type="button">Refresh</button>
+    </div>
+
+    <div class="controls">
+      <button class="pill active" data-type="ALL" type="button">All</button>
+      <button class="pill" data-type="ORDERS" type="button">Orders</button>
+      <button class="pill" data-type="FILLS" type="button">Fills</button>
+      <button class="pill" data-type="CASHFLOW" type="button">Cashflow</button>
+      <button class="pill" data-type="TRANSFERS" type="button">Transfers</button>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Type</th>
+          <th>Symbol</th>
+          <th>Details</th>
+          <th>Tx</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <div id="status" class="status">Connecting wallet...</div>
+    <div class="footer-actions">
+      <button id="load-more-btn" class="pill" type="button">Load more</button>
+    </div>
+  </div>
+
+  <script>
+    const walletEl = document.getElementById("wallet");
+    const rowsEl = document.getElementById("rows");
+    const statusEl = document.getElementById("status");
+    const refreshBtn = document.getElementById("refresh-btn");
+    const loadMoreBtn = document.getElementById("load-more-btn");
+    const filterButtons = document.querySelectorAll("[data-type]");
+
+    let currentWallet = "";
+    let currentType = "ALL";
+    let nextCursor = null;
+    let currentItems = [];
+    const PAGE_SIZE = 50;
+
+    function setStatus(text, tone = "") {
+      statusEl.textContent = text;
+      statusEl.classList.remove("ok", "error");
+      if (tone) statusEl.classList.add(tone);
+    }
+
+    function formatWeiToToken(valueWei, maxDecimals = 4) {
+      try {
+        const negative = String(valueWei).startsWith("-");
+        let raw = String(valueWei);
+        if (negative) {
+          raw = String(valueWei).slice(1);
+        }
+        const padded = raw.padStart(19, "0");
+        const whole = padded.slice(0, -18).replace(/^0+/, "") || "0";
+        const fractionRaw = padded.slice(-18);
+        const fraction = fractionRaw.slice(0, maxDecimals).replace(/0+$/, "");
+        let rendered = whole;
+        if (fraction.length) {
+          rendered = `${whole}.${fraction}`;
+        }
+        if (negative) {
+          return `-${rendered}`;
+        }
+        return rendered;
+      } catch {
+        return String(valueWei);
+      }
+    }
+
+    function formatTime(timestampMs) {
+      if (!timestampMs) return "-";
+      return new Date(timestampMs).toLocaleString();
+    }
+
+    function toDisplay(item) {
+      if (item.kind === "ORDER_PLACED") {
+        return `${item.side} ${formatWeiToToken(item.qtyWei)} @ ${item.priceCents}c (${item.status})`;
+      }
+      if (item.kind === "ORDER_CANCELLED") {
+        return `${item.side} refund ${formatWeiToToken(item.refundWei)}`;
+      }
+      if (item.kind === "ORDER_FILLED") {
+        return `${item.side} ${formatWeiToToken(item.qtyWei)} @ ${item.priceCents}c`;
+      }
+      if (item.kind === "CASHFLOW") {
+        return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.reason})`;
+      }
+      if (item.kind === "TRANSFER") {
+        return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.from} -> ${item.to})`;
+      }
+      return "-";
+    }
+
+    async function cancelOrder(orderId) {
+      try {
+        setStatus(`Cancelling order #${orderId}`);
+        const response = await fetch("/api/orders/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallet: currentWallet, orderId }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error(data.error || "Cancel failed");
+        }
+        setStatus(`Cancelled order #${orderId}`, "ok");
+        await loadTransactions();
+      } catch (err) {
+        setStatus(err.message || "Cancel failed", "error");
+      }
+    }
+
+    function renderRows(items) {
+      rowsEl.innerHTML = "";
+      if (!items.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = '<td colspan="6">No transactions yet</td>';
+        rowsEl.appendChild(tr);
+        return;
+      }
+
+      for (const item of items) {
+        const tr = document.createElement("tr");
+        const actionCell = document.createElement("td");
+        if (item.kind === "ORDER_PLACED" && (item.status === "OPEN" || item.status === "PARTIAL")) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "cancel-btn";
+          btn.textContent = "Cancel";
+          btn.addEventListener("click", () => cancelOrder(item.orderId));
+          actionCell.appendChild(btn);
+        } else {
+          actionCell.textContent = "Completed";
+        }
+
+        tr.innerHTML = `
+          <td>${formatTime(item.timestampMs)}</td>
+          <td>${item.kind}</td>
+          <td>${item.symbol || item.assetSymbol || "-"}</td>
+          <td>${toDisplay(item)}</td>
+          <td class="mono">${item.txHash || "-"}</td>
+        `;
+        tr.appendChild(actionCell);
+        rowsEl.appendChild(tr);
+      }
+    }
+
+    async function loadTransactions({ append = false } = {}) {
+      if (!currentWallet) return;
+      try {
+        setStatus("Loading");
+        let cursorParam = "";
+        if (append && nextCursor !== null) {
+          cursorParam = `&cursor=${encodeURIComponent(nextCursor)}`;
+        }
+        const response = await fetch(
+          `/api/txs?wallet=${encodeURIComponent(currentWallet)}&type=${encodeURIComponent(currentType)}&limit=${PAGE_SIZE}${cursorParam}`
+        );
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error(data.error || "Failed to load transactions");
+        }
+        const batch = data.items || [];
+        if (append) {
+          currentItems = currentItems.concat(batch);
+        } else {
+          currentItems = batch;
+        }
+        nextCursor = data.nextCursor;
+        renderRows(currentItems);
+        if (nextCursor === null) {
+          loadMoreBtn.disabled = true;
+          loadMoreBtn.textContent = "No more items";
+        } else {
+          loadMoreBtn.disabled = false;
+          loadMoreBtn.textContent = "Load more";
+        }
+        const loadedCount = currentItems.length;
+        const totalCount = data.total;
+        const syncedBlock = data.indexerState.lastIndexedBlock;
+        setStatus(`Loaded ${loadedCount}/${totalCount} items  Synced block: ${syncedBlock}`, "ok");
+      } catch (err) {
+        setStatus(err.message || "Failed to load transactions", "error");
+      }
+    }
+
+    function setFilter(type) {
+      currentType = type;
+      for (const button of filterButtons) {
+        button.classList.toggle("active", button.dataset.type === type);
+      }
+      nextCursor = null;
+      currentItems = [];
+      loadTransactions({ append: false });
+    }
+
+    for (const button of filterButtons) {
+      button.addEventListener("click", () => setFilter(button.dataset.type));
+    }
+
+    refreshBtn.addEventListener("click", () => {
+      nextCursor = null;
+      currentItems = [];
+      loadTransactions({ append: false });
+    });
+    loadMoreBtn.addEventListener("click", () => {
+      if (nextCursor === null) {
+        return;
+      }
+      loadTransactions({ append: true });
+    });
+
+    if (window.ethereum) {
+      window.ethereum.on("accountsChanged", async (accounts) => {
+        currentWallet = accounts[0] || "";
+        walletEl.textContent = currentWallet || "-";
+        nextCursor = null;
+        currentItems = [];
+        await loadTransactions({ append: false });
+      });
+    }
+
+    (async function init() {
+      if (!window.ethereum) {
+        setStatus("Wallet provider not found", "error");
+        return;
+      }
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+      currentWallet = accounts[0] || "";
+      walletEl.textContent = currentWallet || "-";
+      nextCursor = null;
+      currentItems = [];
+      await loadTransactions({ append: false });
+    })();
+  </script>
+</body>
+</html>

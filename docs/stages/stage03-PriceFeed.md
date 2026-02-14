@@ -2,15 +2,15 @@
 
 ## Objective
 
-Implement on-chain price feed storing latest stock price in pence and timestamp.
+Implement on-chain price feed storing latest stock price in USD cents and timestamp.
 
 ## Deliverables
 
 * `PriceFeed.sol`
 
-  * Struct: `PriceEntry { uint pricePence; uint timestamp }`
-  * Mapping: `symbol → PriceEntry`
-  * Role: `ORACLE_ROLE` (admin backend)
+* Struct: `PriceEntry { uint priceCents; uint timestamp }`
+* Mapping: `symbol → PriceEntry`
+* Role: `ORACLE_ROLE` (backend oracle)
 * Backend route `/admin/updatePrice` pushes price via Finnhub API
 
 ## Tests

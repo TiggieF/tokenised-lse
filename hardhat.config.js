@@ -1,14 +1,15 @@
 require("@nomicfoundation/hardhat-toolbox");
 
-/** @type import("hardhat/config").HardhatUserConfig */
-module.exports = {
+const config = {
   solidity: "0.8.20",
   networks: {
     hardhat: {
-      chainId: 31337
-    }
+      chainId: 31338,
+    },
   },
   mocha: {
-    timeout: 200000
-  }
+    timeout: 200000,
+  },
 };
+
+module.exports = config;

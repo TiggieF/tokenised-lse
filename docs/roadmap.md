@@ -2,7 +2,7 @@
 
 | Stage | Deliverable | Description | Status |
 |--------|--------------|-------------|--------|
-| 1 | TGBP Token | Base ERC-20 stablecoin with cap + airdrop | ✅ Complete |
+| 1 | TToken Token | Base ERC-20 stablecoin with cap + airdrop | ✅ Complete |
 | 2 | Listings & Factory | Deploy per-company tokens, registry mapping | 🟡 In progress |
 | 3 | PriceFeed | On-chain oracle with timestamp freshness | ⬜ Planned |
 | 4 | OrderBookDEX | Limit order matching, partial fills, fee | ⬜ Planned |

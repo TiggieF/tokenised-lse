@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --accent: #e04c4c;
+      --accent-2: #1b8b8b;
+      --panel: rgba(255, 255, 255, 0.88);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 24px;
+      overflow-x: hidden;
+    }
+
+    .panel {
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 24px;
+      backdrop-filter: blur(8px);
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .title {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    .section {
+      margin-top: 18px;
+    }
+
+    .section-title {
+      font-size: 14px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 12px;
+      font-weight: 600;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      background: rgba(255, 255, 255, 0.7);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    thead th {
+      text-align: left;
+      padding: 12px 16px;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom: 1px solid rgba(16, 20, 24, 0.08);
+    }
+
+    tbody td {
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(16, 20, 24, 0.06);
+    }
+
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .pill-buy {
+      background: rgba(27, 139, 139, 0.12);
+      color: var(--accent-2);
+    }
+
+    .pill-sell {
+      background: rgba(224, 76, 76, 0.12);
+      color: var(--accent);
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .addr {
+      word-break: break-all;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+      align-items: end;
+    }
+
+    .form-grid label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .form-grid select,
+    .form-grid input,
+    .form-grid button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      font-family: inherit;
+      font-size: 14px;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    .form-grid button {
+      cursor: pointer;
+      border: none;
+      color: #fff;
+      background: var(--accent-2);
+      font-weight: 600;
+    }
+
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="header">
+      <h1 class="title">Admin</h1>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">List new company symbol</h2>
+      <div class="form-grid">
+        <div>
+          <label for="list-stock">Company</label>
+          <select id="list-stock"></select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="list-create-btn" type="button">List Symbol</button>
+        </div>
+      </div>
+      <div id="list-status" class="status">Ready</div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Dividends distribution</h2>
+      <div class="form-grid">
+        <div>
+          <label for="div-symbol">Symbol</label>
+          <select id="div-symbol"></select>
+        </div>
+        <div>
+          <label for="div-per-share">TToken per share</label>
+          <input id="div-per-share" type="text" value="0.10" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="div-distribute-btn" type="button">Distribute</button>
+        </div>
+      </div>
+      <div id="div-status" class="status">Ready</div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Order book (open)</h2>
+      <!-- ongoing order thats looking to be filled -->
+      <table>
+        <thead>
+          <tr>
+            <th>Order ID</th>
+            <th>Side</th>
+            <th>Symbol</th>
+            <th>Price (cents)</th>
+            <th>Qty</th>
+            <th>Remaining</th>
+            <th>Trader</th>
+            <th>Active</th>
+          </tr>
+        </thead>
+        <tbody id="open-orders-body"></tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Completed transactions</h2>
+      <!-- completed transaction here -->
+      <table>
+        <thead>
+          <tr>
+            <th>Maker</th>
+            <th>Taker</th>
+            <th>Symbol</th>
+            <th>Price (cents)</th>
+            <th>Qty</th>
+            <th>Timestamp</th>
+          </tr>
+        </thead>
+        <tbody id="fills-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const openOrdersBody = document.getElementById("open-orders-body");
+    const fillsBody = document.getElementById("fills-body");
+    const listStock = document.getElementById("list-stock");
+    const listCreateBtn = document.getElementById("list-create-btn");
+    const listStatus = document.getElementById("list-status");
+    const divSymbol = document.getElementById("div-symbol");
+    const divPerShare = document.getElementById("div-per-share");
+    const divDistributeBtn = document.getElementById("div-distribute-btn");
+    const divStatus = document.getElementById("div-status");
+    // JSDOM
+    const LISTABLE_STOCKS = [
+      { symbol: "AAPL", name: "Apple Inc" },
+      { symbol: "MSFT", name: "Microsoft" },
+      { symbol: "NVDA", name: "NVIDIA" },
+      { symbol: "AMZN", name: "Amazon" },
+      { symbol: "GOOGL", name: "Alphabet" },
+      { symbol: "META", name: "Meta Platforms" },
+      { symbol: "TSLA", name: "Tesla" },
+      { symbol: "AVGO", name: "Broadcom" },
+      { symbol: "NFLX", name: "Netflix" },
+      { symbol: "AMD", name: "AMD" },
+      { symbol: "INTC", name: "Intel" },
+      { symbol: "ORCL", name: "Oracle" },
+      { symbol: "CSCO", name: "Cisco" },
+      { symbol: "ADBE", name: "Adobe" },
+      { symbol: "QCOM", name: "Qualcomm" },
+      { symbol: "JPM", name: "JPMorgan Chase" },
+      { symbol: "V", name: "Visa" },
+      { symbol: "MA", name: "Mastercard" },
+      { symbol: "WMT", name: "Walmart" },
+      { symbol: "COST", name: "Costco" },
+    ];
+
+    function shortAddress(address) {
+      return String(address || "");
+      // keep full address for transparency
+    }
+
+    function formatQty(wei) {
+      const value = Number(wei) / 1e18;
+      return value.toFixed(2);
+      // to fixed 2 dc
+    }
+
+    function setDivStatus(text, isError = false) {
+      divStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      divStatus.style.color = nextColor;
+    }
+
+    function setListStatus(text, isError = false) {
+      listStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      listStatus.style.color = nextColor;
+    }
+
+    async function loadDividendSymbols() {
+      const res = await fetch("/api/registry/listings");
+      const data = await res.json();
+      divSymbol.innerHTML = "";
+      for (const item of data.listings || []) {
+        const option = document.createElement("option");
+        option.value = item.symbol;
+        option.textContent = item.symbol;
+        divSymbol.appendChild(option);
+      }
+    }
+
+    async function loadListableStocks() {
+      let listedSet = new Set();
+      try {
+        const res = await fetch("/api/registry/listings");
+        const data = await res.json();
+        let listed = [];
+        if (Array.isArray(data.listings)) {
+          listed = data.listings;
+        }
+        const listedSymbols = [];
+        for (let i = 0; i < listed.length; i += 1) {
+          const item = listed[i];
+          const itemSymbol = String(item.symbol || "").toUpperCase();
+          listedSymbols.push(itemSymbol);
+        }
+        listedSet = new Set(listedSymbols);
+      } catch {
+        listedSet = new Set();
+      }
+
+      listStock.innerHTML = "";
+      let firstUnlistedValue = "";
+      for (const stock of LISTABLE_STOCKS) {
+        const option = document.createElement("option");
+        option.value = stock.symbol;
+        const isListed = listedSet.has(stock.symbol);
+        option.textContent = isListed
+          ? `${stock.name} (${stock.symbol}) — LISTED`
+          : `${stock.name} (${stock.symbol})`;
+        option.disabled = isListed;
+        if (!isListed && !firstUnlistedValue) {
+          firstUnlistedValue = stock.symbol;
+        }
+        listStock.appendChild(option);
+      }
+      if (firstUnlistedValue) {
+        listStock.value = firstUnlistedValue;
+      }
+    }
+
+    async function distributeDividend() {
+      try {
+        setDivStatus("Submitting distribution");
+        const payload = {
+          symbol: divSymbol.value,
+          divPerShare: divPerShare.value,
+        };
+        const res = await fetch("/api/dividends/declare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Distribution failed");
+        }
+        setDivStatus(`Distributed for ${payload.symbol} Tx: ${data.txHash}`);
+      } catch (err) {
+        setDivStatus(err.message || "Distribution failed", true);
+      }
+    }
+
+    async function createListing() {
+      try {
+        const symbol = String(listStock.value || "").toUpperCase().trim();
+        const selected = LISTABLE_STOCKS.find((s) => s.symbol === symbol);
+        let name = symbol;
+        if (selected) {
+          name = selected.name;
+        }
+        if (!symbol || !name) {
+          setListStatus("Please select a company", true);
+          return;
+        }
+        if (listStock.selectedOptions[0] && listStock.selectedOptions[0].disabled) {
+          setListStatus(`${symbol} is already listed`, true);
+          return;
+        }
+        setListStatus("Listing symbol");
+        const res = await fetch("/api/equity/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ symbol, name }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Listing failed");
+        }
+        setListStatus(`Listed ${symbol} Tx: ${data.txHash}`);
+        await loadListableStocks();
+        await loadDividendSymbols();
+      } catch (err) {
+        setListStatus(err.message || "Listing failed", true);
+      }
+    }
+
+    listCreateBtn.addEventListener("click", createListing);
+    divDistributeBtn.addEventListener("click", distributeDividend);
+
+    (async function () {
+      await loadListableStocks();
+      await loadDividendSymbols();
+      const openRes = await fetch("/api/orderbook/open");
+      const openData = await openRes.json();
+      // rest api
+
+      openOrdersBody.innerHTML = "";
+      const activeOrders = [];
+      for (const order of openData.orders) {
+        if (order.active === true && Number(order.remaining) > 0) {
+          activeOrders.push(order);
+          // add to existing order if active
+        }
+      }
+      for (const order of activeOrders) {
+        const tr = document.createElement("tr");
+        let pillClass = "pill pill-sell";
+        if (order.side === "BUY") {
+          pillClass = "pill pill-buy";
+        }
+        tr.innerHTML = `
+          <td>${order.id}</td>
+          <td><span class="${pillClass}">${order.side}</span></td>
+          <td>${order.symbol}</td>
+          <td>${order.priceCents}</td>
+          <td>${formatQty(order.qty)}</td>
+          <td>${formatQty(order.remaining)}</td>
+          <td class="muted addr">${shortAddress(order.trader)}</td>
+          <td>${order.active}</td>
+        `;
+        openOrdersBody.appendChild(tr);
+      }
+
+
+
+      // satisfied order
+      const fillsRes = await fetch("/api/orderbook/fills");
+      const fillsData = await fillsRes.json();
+
+      fillsBody.innerHTML = "";
+      for (const fill of fillsData.fills) {
+        const tr = document.createElement("tr");
+        const date = new Date(fill.timestampMs);
+        const formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        const formatted = formatter.format(date);
+        tr.innerHTML = `
+          <td class="muted addr">${shortAddress(fill.makerTrader)}</td>
+          <td class="muted addr">${shortAddress(fill.takerTrader)}</td>
+          <td>${fill.symbol}</td>
+          <td>${fill.priceCents}</td>
+          <td>${formatQty(fill.qty)}</td>
+          <td class="muted">${formatted}</td>
+        `;
+        fillsBody.appendChild(tr);
+      }
+    })();
+  </script>
+</body>
+</html>
