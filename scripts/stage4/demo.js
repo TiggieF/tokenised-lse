@@ -1,14 +1,6 @@
-
-
-
-
-
-
-
-
 const { ethers } = require("hardhat");
 
-const DEFAULT_PRICE = 10_000n; 
+const DEFAULT_PRICE = 10_000n;
 const ONE_SHARE = 10n ** 18n;
 
 async function main() {
@@ -16,14 +8,28 @@ async function main() {
   const admin = signers[0];
   const seller = signers[1];
   const buyer = signers[2];
-  const equityMinterIndex = Number.parseInt(process.env.EQUITY_MINTER_INDEX || "0", 10);
-  const equityMinter = signers[equityMinterIndex] || admin;
+
+  const rawEquityMinterIndex = process.env.EQUITY_MINTER_INDEX || "0";
+  const equityMinterIndex = Number.parseInt(rawEquityMinterIndex, 10);
+
+  let equityMinter = admin;
+  if (equityMinterIndex >= 0 && equityMinterIndex < signers.length) {
+    equityMinter = signers[equityMinterIndex];
+  }
 
   const dexAddress = process.env.DEX_ADDRESS;
   const ttokenAddress = process.env.TTOKEN_ADDRESS;
   const equityAddress = process.env.EQUITY_TOKEN_ADDRESS;
-  const price = process.env.PRICE ? BigInt(process.env.PRICE) : DEFAULT_PRICE;
-  const qty = process.env.QTY ? BigInt(process.env.QTY) : ONE_SHARE;
+
+  let price = DEFAULT_PRICE;
+  if (process.env.PRICE) {
+    price = BigInt(process.env.PRICE);
+  }
+
+  let qty = ONE_SHARE;
+  if (process.env.QTY) {
+    qty = BigInt(process.env.QTY);
+  }
 
   if (!dexAddress) {
     throw new Error("Set DEX_ADDRESS env var");
@@ -39,8 +45,8 @@ async function main() {
   if (equityAddress) {
     equity = await ethers.getContractAt("EquityToken", equityAddress);
   } else {
-    const EquityToken = await ethers.getContractFactory("EquityToken");
-    equity = await EquityToken.deploy("Acme Equity", "ACME", admin.address, admin.address);
+    const equityFactory = await ethers.getContractFactory("EquityToken");
+    equity = await equityFactory.deploy("Acme Equity", "ACME", admin.address, admin.address);
     await equity.waitForDeployment();
     console.log("EquityToken deployed to:", await equity.getAddress());
   }
@@ -53,13 +59,18 @@ async function main() {
   await equity.connect(seller).approve(dexAddress, ethers.MaxUint256);
   await ttoken.connect(buyer).approve(dexAddress, ethers.MaxUint256);
 
-  await dex.connect(seller).placeLimitOrder(await equity.getAddress(), 1, price, qty);
-  await dex.connect(buyer).placeLimitOrder(await equity.getAddress(), 0, price, qty);
+  const equityTokenAddress = await equity.getAddress();
+  await dex.connect(seller).placeLimitOrder(equityTokenAddress, 1, price, qty);
+  await dex.connect(buyer).placeLimitOrder(equityTokenAddress, 0, price, qty);
+
+  const sellerEquity = await equity.balanceOf(seller.address);
+  const buyerEquity = await equity.balanceOf(buyer.address);
+  const buyerCash = await ttoken.balanceOf(buyer.address);
 
   console.log("Trade executed.");
-  console.log("Seller equity balance:", (await equity.balanceOf(seller.address)).toString());
-  console.log("Buyer equity balance:", (await equity.balanceOf(buyer.address)).toString());
-  console.log("Buyer TToken balance:", (await ttoken.balanceOf(buyer.address)).toString());
+  console.log("Seller equity balance:", sellerEquity.toString());
+  console.log("Buyer equity balance:", buyerEquity.toString());
+  console.log("Buyer TToken balance:", buyerCash.toString());
 }
 
 main().catch((error) => {

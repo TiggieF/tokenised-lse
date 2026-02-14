@@ -1,4 +1,3 @@
-
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
@@ -32,9 +31,8 @@ interface IListingsRegistry {
         returns (bool);
 }
 
-
 contract Dividends is AccessControl, ReentrancyGuard {
-    uint256 public constant MIN_DIV_PER_SHARE = 1e16; 
+    uint256 public constant MIN_DIV_PER_SHARE = 1e16;
     uint256 public constant SHARE_UNIT = 1e18;
 
     ITTokenMintable public immutable ttoken;
@@ -58,6 +56,7 @@ contract Dividends is AccessControl, ReentrancyGuard {
         uint256 snapshotId,
         uint256 divPerShareWei
     );
+
     event DividendClaimed(
         address indexed equityToken,
         uint256 indexed epochId,
@@ -72,6 +71,7 @@ contract Dividends is AccessControl, ReentrancyGuard {
 
         ttoken = ITTokenMintable(ttokenAddress);
         registry = IListingsRegistry(registryAddress);
+
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
@@ -81,20 +81,29 @@ contract Dividends is AccessControl, ReentrancyGuard {
         returns (uint256 epochId, uint256 snapshotId)
     {
         require(equityToken != address(0), "dividends: equity token is zero");
-        require(registry.isTokenListed(equityToken), "dividends: not an equity token");
+
+        bool listed = registry.isTokenListed(equityToken);
+        require(listed, "dividends: not an equity token");
+
         require(divPerShareWei >= MIN_DIV_PER_SHARE, "dividends: div per share too small");
 
         snapshotId = IEquityTokenSnapshot(equityToken).snapshot();
-        epochId = ++epochCount[equityToken];
 
-        uint256 supplyAt = IEquityTokenSnapshot(equityToken).totalSupplyAt(snapshotId);
-        epochs[equityToken][epochId] = DividendEpoch({
+        uint256 nextEpochId = epochCount[equityToken] + 1;
+        epochCount[equityToken] = nextEpochId;
+        epochId = nextEpochId;
+
+        uint256 supplyAtSnapshot = IEquityTokenSnapshot(equityToken).totalSupplyAt(snapshotId);
+
+        DividendEpoch memory epoch = DividendEpoch({
             snapshotId: snapshotId,
             divPerShareWei: divPerShareWei,
             declaredAt: block.timestamp,
             totalClaimedWei: 0,
-            totalSupplyAtSnapshot: supplyAt
+            totalSupplyAtSnapshot: supplyAtSnapshot
         });
+
+        epochs[equityToken][epochId] = epoch;
 
         emit DividendDeclared(equityToken, epochId, snapshotId, divPerShareWei);
     }
@@ -106,18 +115,23 @@ contract Dividends is AccessControl, ReentrancyGuard {
     {
         DividendEpoch storage epoch = epochs[equityToken][epochId];
         require(epoch.snapshotId != 0, "dividends: epoch not found");
-        require(!claimed[equityToken][epochId][msg.sender], "dividends: already claimed");
 
-        uint256 bal = IEquityTokenSnapshot(equityToken).balanceOfAt(msg.sender, epoch.snapshotId);
-        require(bal > 0, "dividends: no balance");
+        bool alreadyClaimed = claimed[equityToken][epochId][msg.sender];
+        require(!alreadyClaimed, "dividends: already claimed");
 
-        mintedWei = (bal * epoch.divPerShareWei) / SHARE_UNIT;
+        uint256 balanceAtSnapshot = IEquityTokenSnapshot(equityToken).balanceOfAt(msg.sender, epoch.snapshotId);
+        require(balanceAtSnapshot > 0, "dividends: no balance");
+
+        mintedWei = (balanceAtSnapshot * epoch.divPerShareWei) / SHARE_UNIT;
         require(mintedWei > 0, "dividends: nothing to claim");
 
         claimed[equityToken][epochId][msg.sender] = true;
-        epoch.totalClaimedWei += mintedWei;
+
+        uint256 updatedClaimedTotal = epoch.totalClaimedWei + mintedWei;
+        epoch.totalClaimedWei = updatedClaimedTotal;
 
         ttoken.mint(msg.sender, mintedWei);
+
         emit DividendClaimed(equityToken, epochId, msg.sender, mintedWei);
     }
 
@@ -127,20 +141,26 @@ contract Dividends is AccessControl, ReentrancyGuard {
         returns (uint256 amountWei)
     {
         DividendEpoch storage epoch = epochs[equityToken][epochId];
+
         if (epoch.snapshotId == 0) {
             return 0;
         }
-        if (claimed[equityToken][epochId][account]) {
+
+        bool alreadyClaimed = claimed[equityToken][epochId][account];
+        if (alreadyClaimed) {
             return 0;
         }
-        uint256 bal = IEquityTokenSnapshot(equityToken).balanceOfAt(account, epoch.snapshotId);
-        if (bal == 0) {
+
+        uint256 balanceAtSnapshot = IEquityTokenSnapshot(equityToken).balanceOfAt(account, epoch.snapshotId);
+        if (balanceAtSnapshot == 0) {
             return 0;
         }
-        return (bal * epoch.divPerShareWei) / SHARE_UNIT;
+
+        amountWei = (balanceAtSnapshot * epoch.divPerShareWei) / SHARE_UNIT;
     }
 
     function isClaimed(address equityToken, uint256 epochId, address account) external view returns (bool) {
-        return claimed[equityToken][epochId][account];
+        bool wasClaimed = claimed[equityToken][epochId][account];
+        return wasClaimed;
     }
 }

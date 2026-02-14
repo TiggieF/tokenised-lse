@@ -6,79 +6,138 @@ const ONE_SHARE = 10n ** 18n;
 const ONE_TTOKEN = 10n ** 18n;
 
 async function deployStage5Fixture() {
-  const [admin, alice, bob, carol] = await ethers.getSigners();
+  const signers = await ethers.getSigners();
+  const admin = signers[0];
+  const alice = signers[1];
+  const bob = signers[2];
+  const carol = signers[3];
 
-  const TToken = await ethers.getContractFactory("TToken");
-  const ttoken = await TToken.deploy();
+  const ttokenFactory = await ethers.getContractFactory("TToken");
+  const ttoken = await ttokenFactory.deploy();
   await ttoken.waitForDeployment();
 
-  const ListingsRegistry = await ethers.getContractFactory("ListingsRegistry");
-  const registry = await ListingsRegistry.deploy(admin.address);
+  const registryFactory = await ethers.getContractFactory("ListingsRegistry");
+  const registry = await registryFactory.deploy(admin.address);
   await registry.waitForDeployment();
 
-  const EquityToken = await ethers.getContractFactory("EquityToken");
-  const equity = await EquityToken.deploy("Acme Equity", "ACME1", admin.address, admin.address);
+  const equityFactory = await ethers.getContractFactory("EquityToken");
+  const equity = await equityFactory.deploy("Acme Equity", "ACME1", admin.address, admin.address);
   await equity.waitForDeployment();
 
-  await registry.connect(admin).registerListing("ACME1", "Acme Equity", await equity.getAddress());
+  const equityAddress = await equity.getAddress();
+  await registry.connect(admin).registerListing("ACME1", "Acme Equity", equityAddress);
 
-  const Dividends = await ethers.getContractFactory("Dividends");
-  const dividends = await Dividends.deploy(await ttoken.getAddress(), await registry.getAddress(), admin.address);
+  const dividendsFactory = await ethers.getContractFactory("Dividends");
+  const dividends = await dividendsFactory.deploy(
+    await ttoken.getAddress(),
+    await registry.getAddress(),
+    admin.address
+  );
   await dividends.waitForDeployment();
 
+  const dividendsAddress = await dividends.getAddress();
   const snapshotRole = await equity.SNAPSHOT_ROLE();
-  await equity.connect(admin).grantRole(snapshotRole, await dividends.getAddress());
+  await equity.connect(admin).grantRole(snapshotRole, dividendsAddress);
 
   const minterRole = await ttoken.MINTER_ROLE();
-  await ttoken.connect(admin).grantRole(minterRole, await dividends.getAddress());
+  await ttoken.connect(admin).grantRole(minterRole, dividendsAddress);
 
   return { admin, alice, bob, carol, ttoken, registry, equity, dividends };
 }
 
 describe("Stage 5 — Dividends", function () {
   it("uses snapshot balances for claims", async function () {
-    const { admin, alice, bob, ttoken, equity, dividends } = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployStage5Fixture);
+    const admin = fixture.admin;
+    const alice = fixture.alice;
+    const bob = fixture.bob;
+    const ttoken = fixture.ttoken;
+    const equity = fixture.equity;
+    const dividends = fixture.dividends;
+
+    const equityAddress = await equity.getAddress();
 
     await equity.connect(admin).mint(alice.address, 2n * ONE_SHARE);
     await equity.connect(admin).mint(bob.address, ONE_SHARE);
 
-    await dividends.connect(admin).declareDividendPerShare(await equity.getAddress(), ONE_TTOKEN);
-
+    await dividends.connect(admin).declareDividendPerShare(equityAddress, ONE_TTOKEN);
     await equity.connect(alice).transfer(bob.address, ONE_SHARE);
 
-    await dividends.connect(alice).claimDividend(await equity.getAddress(), 1);
-    await dividends.connect(bob).claimDividend(await equity.getAddress(), 1);
+    await dividends.connect(alice).claimDividend(equityAddress, 1);
+    await dividends.connect(bob).claimDividend(equityAddress, 1);
 
-    expect(await ttoken.balanceOf(alice.address)).to.equal(2n * ONE_TTOKEN);
-    expect(await ttoken.balanceOf(bob.address)).to.equal(ONE_TTOKEN);
+    const aliceBalance = await ttoken.balanceOf(alice.address);
+    const bobBalance = await ttoken.balanceOf(bob.address);
+
+    expect(aliceBalance).to.equal(2n * ONE_TTOKEN);
+    expect(bobBalance).to.equal(ONE_TTOKEN);
   });
 
   it("prevents double claims", async function () {
-    const { admin, alice, equity, dividends } = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployStage5Fixture);
+    const admin = fixture.admin;
+    const alice = fixture.alice;
+    const equity = fixture.equity;
+    const dividends = fixture.dividends;
+
+    const equityAddress = await equity.getAddress();
 
     await equity.connect(admin).mint(alice.address, ONE_SHARE);
-    await dividends.connect(admin).declareDividendPerShare(await equity.getAddress(), ONE_TTOKEN);
+    await dividends.connect(admin).declareDividendPerShare(equityAddress, ONE_TTOKEN);
 
-    await dividends.connect(alice).claimDividend(await equity.getAddress(), 1);
+    await dividends.connect(alice).claimDividend(equityAddress, 1);
 
-    await expect(dividends.connect(alice).claimDividend(await equity.getAddress(), 1))
+    await expect(dividends.connect(alice).claimDividend(equityAddress, 1))
       .to.be.revertedWith("dividends: already claimed");
   });
 
   it("handles zero balance gracefully", async function () {
-    const { admin, carol, equity, dividends } = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployStage5Fixture);
+    const admin = fixture.admin;
+    const carol = fixture.carol;
+    const equity = fixture.equity;
+    const dividends = fixture.dividends;
 
-    await dividends.connect(admin).declareDividendPerShare(await equity.getAddress(), ONE_TTOKEN);
+    const equityAddress = await equity.getAddress();
 
-    await expect(dividends.connect(carol).claimDividend(await equity.getAddress(), 1))
+    await dividends.connect(admin).declareDividendPerShare(equityAddress, ONE_TTOKEN);
+
+    await expect(dividends.connect(carol).claimDividend(equityAddress, 1))
       .to.be.revertedWith("dividends: no balance");
   });
 
   it("enforces minimum dividend per share", async function () {
-    const { admin, equity, dividends } = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployStage5Fixture);
+    const admin = fixture.admin;
+    const equity = fixture.equity;
+    const dividends = fixture.dividends;
 
-    await expect(
-      dividends.connect(admin).declareDividendPerShare(await equity.getAddress(), 10n ** 15n)
-    ).to.be.revertedWith("dividends: div per share too small");
+    const equityAddress = await equity.getAddress();
+
+    await expect(dividends.connect(admin).declareDividendPerShare(equityAddress, 10n ** 15n))
+      .to.be.revertedWith("dividends: div per share too small");
+  });
+
+  it("uses current balance when a later snapshot has no direct account entry", async function () {
+    const fixture = await loadFixture(deployStage5Fixture);
+    const admin = fixture.admin;
+    const alice = fixture.alice;
+    const bob = fixture.bob;
+    const ttoken = fixture.ttoken;
+    const equity = fixture.equity;
+    const dividends = fixture.dividends;
+
+    const equityAddress = await equity.getAddress();
+
+    await equity.connect(admin).mint(alice.address, 3n * ONE_SHARE);
+
+    await dividends.connect(admin).declareDividendPerShare(equityAddress, ONE_TTOKEN);
+    await equity.connect(alice).transfer(bob.address, ONE_SHARE);
+
+    await dividends.connect(admin).declareDividendPerShare(equityAddress, ONE_TTOKEN);
+    await dividends.connect(alice).claimDividend(equityAddress, 2);
+
+    const aliceBalance = await ttoken.balanceOf(alice.address);
+    expect(aliceBalance).to.equal(2n * ONE_TTOKEN);
   });
 });

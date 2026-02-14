@@ -1,21 +1,16 @@
-
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IPriceFeed {
-    // get price and time
     function getPrice(string memory symbol)
-// called outside the contract
-        external 
-        
+        external
         view
-        // read only
         returns (
             uint256 priceCents,
             uint256 timestamp
         );
-    // check whether fresh or not
+
     function isFresh(string memory symbol)
         external
         view
@@ -29,7 +24,6 @@ interface IListingsRegistry {
         returns (string[] memory);
 
     function getSymbols(uint256 offset, uint256 limit)
-    // load limited number of symbols
         external
         view
         returns (string[] memory);
@@ -40,7 +34,6 @@ interface IListingsRegistry {
         returns (address);
 }
 
-
 contract PortfolioAggregator {
     struct Holding {
         address token;
@@ -48,7 +41,6 @@ contract PortfolioAggregator {
         uint256 balanceWei;
         uint256 priceCents;
         uint256 valueWei;
-        // actual balance
     }
 
     IERC20 public immutable ttoken;
@@ -59,21 +51,21 @@ contract PortfolioAggregator {
         require(ttokenAddress != address(0), "aggregator: ttoken is zero");
         require(registryAddress != address(0), "aggregator: registry is zero");
         require(priceFeedAddress != address(0), "aggregator: pricefeed is zero");
-        // checks for all address
+
         ttoken = IERC20(ttokenAddress);
         registry = IListingsRegistry(registryAddress);
         priceFeed = IPriceFeed(priceFeedAddress);
     }
 
     function getTTokenBalance(address user) external view returns (uint256) {
-        return ttoken.balanceOf(user);
-        // getter ttoken balance
+        uint256 balance = ttoken.balanceOf(user);
+        return balance;
     }
 
     function getHoldings(address user) external view returns (Holding[] memory) {
         string[] memory symbols = registry.getAllSymbols();
-        return buildHoldings(user, symbols);
-        // getter for all holdings in the wallet
+        Holding[] memory holdings = buildHoldings(user, symbols);
+        return holdings;
     }
 
     function getHoldingsSlice(address user, uint256 offset, uint256 limit)
@@ -82,27 +74,36 @@ contract PortfolioAggregator {
         returns (Holding[] memory)
     {
         string[] memory symbols = registry.getSymbols(offset, limit);
-        return buildHoldings(user, symbols);
+        Holding[] memory holdings = buildHoldings(user, symbols);
+        return holdings;
     }
 
     function getTotalValue(address user) external view returns (uint256 totalWei) {
-        // total value
-        totalWei = ttoken.balanceOf(user);
+        uint256 cashValue = ttoken.balanceOf(user);
+        totalWei = cashValue;
+
         string[] memory symbols = registry.getAllSymbols();
+
         for (uint256 i = 0; i < symbols.length; i++) {
-            address token = registry.getListing(symbols[i]);
+            string memory symbol = symbols[i];
+            address token = registry.getListing(symbol);
+
             if (token == address(0)) {
                 continue;
             }
+
             uint256 balance = IERC20(token).balanceOf(user);
             if (balance == 0) {
                 continue;
             }
-            (uint256 priceCents, ) = priceFeed.getPrice(symbols[i]);
+
+            (uint256 priceCents, ) = priceFeed.getPrice(symbol);
             if (priceCents == 0) {
                 continue;
             }
-            totalWei += (balance * priceCents) / 100;
+
+            uint256 valueWei = (balance * priceCents) / 100;
+            totalWei = totalWei + valueWei;
         }
     }
 
@@ -113,26 +114,33 @@ contract PortfolioAggregator {
     {
         cashValueWei = ttoken.balanceOf(user);
         stockValueWei = 0;
+
         string[] memory symbols = registry.getAllSymbols();
+
         for (uint256 i = 0; i < symbols.length; i++) {
-            address token = registry.getListing(symbols[i]);
+            string memory symbol = symbols[i];
+            address token = registry.getListing(symbol);
+
             if (token == address(0)) {
                 continue;
             }
+
             uint256 balance = IERC20(token).balanceOf(user);
             if (balance == 0) {
                 continue;
             }
-            (uint256 priceCents, ) = priceFeed.getPrice(symbols[i]);
+
+            (uint256 priceCents, ) = priceFeed.getPrice(symbol);
             if (priceCents == 0) {
                 continue;
             }
-            stockValueWei += (balance * priceCents) / 100;
+
+            uint256 valueWei = (balance * priceCents) / 100;
+            stockValueWei = stockValueWei + valueWei;
         }
+
         totalValueWei = cashValueWei + stockValueWei;
-        // total value
     }
-    // construct portfolio summary + cash + stock value
 
     function buildHoldings(address user, string[] memory symbols)
         internal
@@ -140,28 +148,38 @@ contract PortfolioAggregator {
         returns (Holding[] memory)
     {
         Holding[] memory holdings = new Holding[](symbols.length);
+
         for (uint256 i = 0; i < symbols.length; i++) {
-            address token = registry.getListing(symbols[i]);
+            string memory symbol = symbols[i];
+            address token = registry.getListing(symbol);
+
             uint256 balance = 0;
-            if (token != address(0)) {
-                balance = IERC20(token).balanceOf(user);
-            }
             uint256 priceCents = 0;
             uint256 valueWei = 0;
-            if (token != address(0) && balance > 0) {
-                (priceCents, ) = priceFeed.getPrice(symbols[i]);
-                if (priceCents > 0) {
-                    valueWei = (balance * priceCents) / 100;
+
+            if (token != address(0)) {
+                balance = IERC20(token).balanceOf(user);
+
+                if (balance > 0) {
+                    (priceCents, ) = priceFeed.getPrice(symbol);
+
+                    if (priceCents > 0) {
+                        valueWei = (balance * priceCents) / 100;
+                    }
                 }
             }
-            holdings[i] = Holding({
+
+            Holding memory holding = Holding({
                 token: token,
-                symbol: symbols[i],
+                symbol: symbol,
                 balanceWei: balance,
                 priceCents: priceCents,
                 valueWei: valueWei
             });
+
+            holdings[i] = holding;
         }
+
         return holdings;
     }
 }

@@ -233,14 +233,7 @@
         <h2 class="card-title">Stock</h2>
         <div class="wallet-line">Wallet: <span id="trade-wallet">-</span></div>
         <select class="select" id="trade-symbol">
-          <!-- selection of stocks -->
-          <option>Apple (AAPL)</option>
-          <option>Tesla (TSLA)</option>
-          <option>Amazon (AMZN)</option>
-          <option>Alphabet (GOOGL)</option>
-          <option>Nvidia (NVDA)</option>
-          <option>Meta (META)</option>
-          <option>Visa (V)</option>
+          <option value="">Loading symbols...</option>
         </select>
         <div class="stat-row">
           <span class="muted">Live price</span>
@@ -270,7 +263,7 @@
         <div class="actions">
           <button class="btn btn-buy" id="buy-btn" type="button">Buy</button>
         </div>
-        <div class="muted-note" id="buy-status">Ready.</div>
+        <div class="muted-note" id="buy-status">Ready</div>
       </div>
 
       <div class="card panel-hidden" id="auto-panel">
@@ -286,7 +279,7 @@
         <div class="actions">
           <button class="btn btn-buy" id="auto-buy-btn" type="button">Set Auto Buy</button>
         </div>
-        <div class="muted-note" id="auto-status">Ready.</div>
+        <div class="muted-note" id="auto-status">Ready</div>
       </div>
     </div>
   </div>
@@ -318,13 +311,42 @@
       // set wallet address for display
     }
 
+    async function loadListedSymbols() {
+      const fallbackSymbols = ["TSLA", "AAPL", "MSFT"];
+      let listings = [];
+      try {
+        const res = await fetch("/api/registry/listings");
+        const data = await res.json();
+        if (Array.isArray(data.listings)) {
+          listings = data.listings;
+        } else {
+          listings = [];
+        }
+      } catch {
+        listings = [];
+      }
+      tradeSymbol.innerHTML = "";
+      if (!listings.length) {
+        for (const symbol of fallbackSymbols) {
+          const opt = document.createElement("option");
+          opt.value = symbol;
+          opt.textContent = symbol;
+          tradeSymbol.appendChild(opt);
+        }
+        return;
+      }
+      for (const item of listings) {
+        const symbol = String(item.symbol || "").toUpperCase();
+        if (!symbol) continue;
+        const opt = document.createElement("option");
+        opt.value = symbol;
+        opt.textContent = symbol;
+        tradeSymbol.appendChild(opt);
+      }
+    }
+
     function getSymbolFromSelect() {
-      const text = tradeSymbol.value;
-      const parts = text.split("(");
-      const symbolPart = parts[1];
-      const symbol = symbolPart.replace(")", "");
-      return symbol;
-      // get symbol from selection
+      return String(tradeSymbol.value || "").toUpperCase();
     }
 
     function parsePriceToCents(text) {
@@ -454,6 +476,11 @@
 
     buyButton.addEventListener("click", async () => {
       const symbol = getSymbolFromSelect();
+      if (!symbol) {
+        showNoFunds(buyStatus);
+        buyStatus.textContent = "No listed symbol selected";
+        return;
+      }
       const priceCents = parsePriceToCents(buyPriceInput.value);
       const qtyText = document.querySelector("#buy-panel .qty div").textContent;
       const qty = Number(qtyText);
@@ -461,7 +488,7 @@
         showNoFunds(buyStatus);
         return;
       }
-      showStatus(buyStatus, "Submitting...");
+      showStatus(buyStatus, "Submitting");
       const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
       showStatus(buyStatus, `Order placed: ${String(hash)}`);
       await loadTTokenBalance();
@@ -469,19 +496,25 @@
 
     autoButton.addEventListener("click", async () => {
       const symbol = getSymbolFromSelect();
+      if (!symbol) {
+        showNoFunds(autoStatus);
+        autoStatus.textContent = "No listed symbol selected";
+        return;
+      }
       const priceCents = parsePriceToCents(autoPriceInput.value);
       const qty = Number(autoQtyInput.value);
       if (qty > ttokenBalance) {
         showNoFunds(autoStatus);
         return;
       }
-      showStatus(autoStatus, "Submitting...");
+      showStatus(autoStatus, "Submitting");
       const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
       showStatus(autoStatus, `Auto buy set: ${String(hash)}`);
       await loadTTokenBalance();
     });
 
     (async function () {
+      await loadListedSymbols();
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",

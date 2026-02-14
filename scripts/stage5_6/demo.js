@@ -1,9 +1,3 @@
-
-
-
-
-
-
 const { ethers } = require("hardhat");
 
 const ONE_SHARE = 10n ** 18n;
@@ -13,38 +7,51 @@ function quoteAmount(qty, priceCents) {
 }
 
 async function logBalances(label, equity, ttoken, dexAddr, maker, taker) {
+  const makerEquity = await equity.balanceOf(maker.address);
+  const takerEquity = await equity.balanceOf(taker.address);
+  const dexEquity = await equity.balanceOf(dexAddr);
+
+  const makerCash = await ttoken.balanceOf(maker.address);
+  const takerCash = await ttoken.balanceOf(taker.address);
+  const dexCash = await ttoken.balanceOf(dexAddr);
+
   console.log(`\n${label}`);
-  console.log("Maker equity:", (await equity.balanceOf(maker.address)).toString());
-  console.log("Taker equity:", (await equity.balanceOf(taker.address)).toString());
-  console.log("DEX equity:", (await equity.balanceOf(dexAddr)).toString());
-  console.log("Maker TToken:", (await ttoken.balanceOf(maker.address)).toString());
-  console.log("Taker TToken:", (await ttoken.balanceOf(taker.address)).toString());
-  console.log("DEX TToken:", (await ttoken.balanceOf(dexAddr)).toString());
+  console.log("Maker equity:", makerEquity.toString());
+  console.log("Taker equity:", takerEquity.toString());
+  console.log("DEX equity:", dexEquity.toString());
+  console.log("Maker TToken:", makerCash.toString());
+  console.log("Taker TToken:", takerCash.toString());
+  console.log("DEX TToken:", dexCash.toString());
 }
 
 async function main() {
-  const [admin, maker, taker] = await ethers.getSigners();
+  const signers = await ethers.getSigners();
+  const admin = signers[0];
+  const maker = signers[1];
+  const taker = signers[2];
 
-  const TToken = await ethers.getContractFactory("TToken");
-  const ttoken = await TToken.deploy();
+  const ttokenFactory = await ethers.getContractFactory("TToken");
+  const ttoken = await ttokenFactory.deploy();
   await ttoken.waitForDeployment();
 
-  const ListingsRegistry = await ethers.getContractFactory("ListingsRegistry");
-  const registry = await ListingsRegistry.deploy(admin.address);
+  const registryFactory = await ethers.getContractFactory("ListingsRegistry");
+  const registry = await registryFactory.deploy(admin.address);
   await registry.waitForDeployment();
 
-  const PriceFeed = await ethers.getContractFactory("PriceFeed");
-  const priceFeed = await PriceFeed.deploy(admin.address, admin.address);
+  const priceFeedFactory = await ethers.getContractFactory("PriceFeed");
+  const priceFeed = await priceFeedFactory.deploy(admin.address, admin.address);
   await priceFeed.waitForDeployment();
 
-  const EquityToken = await ethers.getContractFactory("EquityToken");
-  const equity = await EquityToken.deploy("Acme Equity", "AAPL", admin.address, admin.address);
+  const equityFactory = await ethers.getContractFactory("EquityToken");
+  const equity = await equityFactory.deploy("Acme Equity", "AAPL", admin.address, admin.address);
   await equity.waitForDeployment();
 
-  await registry.connect(admin).registerListing("AAPL", "Acme Equity", await equity.getAddress());
+  const equityAddress = await equity.getAddress();
+  const registerTx = await registry.connect(admin).registerListing("AAPL", "Acme Equity", equityAddress);
+  await registerTx.wait();
 
-  const OrderBookDEX = await ethers.getContractFactory("OrderBookDEX");
-  const dex = await OrderBookDEX.deploy(
+  const dexFactory = await ethers.getContractFactory("OrderBookDEX");
+  const dex = await dexFactory.deploy(
     await ttoken.getAddress(),
     await registry.getAddress(),
     await priceFeed.getAddress()
@@ -52,52 +59,65 @@ async function main() {
   await dex.waitForDeployment();
 
   const price = 10_000n;
-  const maxSlippageBps = 100n; 
+  const maxSlippageBps = 100n;
   const makerQty = 2n * ONE_SHARE;
   const budget = quoteAmount(ONE_SHARE, price);
 
-  await priceFeed.connect(admin).setPrice("AAPL", Number(price));
+  const setPriceTx = await priceFeed.connect(admin).setPrice("AAPL", Number(price));
+  await setPriceTx.wait();
 
-  await equity.connect(admin).mint(maker.address, makerQty);
-  await ttoken.connect(admin).mint(taker.address, budget);
+  const mintMakerTx = await equity.connect(admin).mint(maker.address, makerQty);
+  await mintMakerTx.wait();
 
-  await equity.connect(maker).approve(await dex.getAddress(), ethers.MaxUint256);
-  await ttoken.connect(taker).approve(await dex.getAddress(), ethers.MaxUint256);
+  const mintTakerTx = await ttoken.connect(admin).mint(taker.address, budget);
+  await mintTakerTx.wait();
+
+  const dexAddress = await dex.getAddress();
+  const approveMakerTx = await equity.connect(maker).approve(dexAddress, ethers.MaxUint256);
+  await approveMakerTx.wait();
+
+  const approveTakerTx = await ttoken.connect(taker).approve(dexAddress, ethers.MaxUint256);
+  await approveTakerTx.wait();
 
   console.log("TToken:", await ttoken.getAddress());
-  console.log("EquityToken:", await equity.getAddress());
+  console.log("EquityToken:", equityAddress);
   console.log("ListingsRegistry:", await registry.getAddress());
   console.log("PriceFeed:", await priceFeed.getAddress());
-  console.log("OrderBookDEX:", await dex.getAddress());
+  console.log("OrderBookDEX:", dexAddress);
   console.log("Oracle price (cents):", price.toString());
   console.log("Max slippage (bps):", maxSlippageBps.toString());
   console.log("Quote budget (wei):", budget.toString());
 
-  await logBalances("Balances before placing sell", equity, ttoken, await dex.getAddress(), maker, taker);
+  await logBalances("Balances before placing sell", equity, ttoken, dexAddress, maker, taker);
 
-  const sellTx = await dex.connect(maker).placeLimitOrder(await equity.getAddress(), 1, price, makerQty);
+  const sellTx = await dex.connect(maker).placeLimitOrder(equityAddress, 1, price, makerQty);
   const sellReceipt = await sellTx.wait();
   console.log("\nSell gas used:", sellReceipt.gasUsed.toString());
 
-  await logBalances("Balances before buyExactQuoteAtOracle", equity, ttoken, await dex.getAddress(), maker, taker);
+  await logBalances("Balances before buyExactQuoteAtOracle", equity, ttoken, dexAddress, maker, taker);
 
   const callResult = await dex
     .connect(taker)
-    .buyExactQuoteAtOracle.staticCall(await equity.getAddress(), budget, maxSlippageBps);
+    .buyExactQuoteAtOracle.staticCall(equityAddress, budget, maxSlippageBps);
 
   const buyTx = await dex
     .connect(taker)
-    .buyExactQuoteAtOracle(await equity.getAddress(), budget, maxSlippageBps);
+    .buyExactQuoteAtOracle(equityAddress, budget, maxSlippageBps);
   const buyReceipt = await buyTx.wait();
 
+  const qtyBoughtWei = callResult[0];
+  const quoteSpentWei = callResult[1];
+  const oraclePriceCents = callResult[2];
+  const oracleMaxPriceCents = callResult[3];
+
   console.log("\nOracle buy return:");
-  console.log("qtyBoughtWei:", callResult[0].toString());
-  console.log("quoteSpentWei:", callResult[1].toString());
-  console.log("oraclePriceCents:", callResult[2].toString());
-  console.log("oracleMaxPriceCents:", callResult[3].toString());
+  console.log("qtyBoughtWei:", qtyBoughtWei.toString());
+  console.log("quoteSpentWei:", quoteSpentWei.toString());
+  console.log("oraclePriceCents:", oraclePriceCents.toString());
+  console.log("oracleMaxPriceCents:", oracleMaxPriceCents.toString());
   console.log("Buy gas used:", buyReceipt.gasUsed.toString());
 
-  await logBalances("Balances after buyExactQuoteAtOracle", equity, ttoken, await dex.getAddress(), maker, taker);
+  await logBalances("Balances after buyExactQuoteAtOracle", equity, ttoken, dexAddress, maker, taker);
 }
 
 main().catch((error) => {

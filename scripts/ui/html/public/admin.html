@@ -128,12 +128,89 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 12px;
     }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+      align-items: end;
+    }
+
+    .form-grid label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .form-grid select,
+    .form-grid input,
+    .form-grid button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      font-family: inherit;
+      font-size: 14px;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    .form-grid button {
+      cursor: pointer;
+      border: none;
+      color: #fff;
+      background: var(--accent-2);
+      font-weight: 600;
+    }
+
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
   <div class="panel">
     <div class="header">
       <h1 class="title">Admin</h1>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">List new company symbol</h2>
+      <div class="form-grid">
+        <div>
+          <label for="list-stock">Company</label>
+          <select id="list-stock"></select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="list-create-btn" type="button">List Symbol</button>
+        </div>
+      </div>
+      <div id="list-status" class="status">Ready</div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Dividends distribution</h2>
+      <div class="form-grid">
+        <div>
+          <label for="div-symbol">Symbol</label>
+          <select id="div-symbol"></select>
+        </div>
+        <div>
+          <label for="div-per-share">TToken per share</label>
+          <input id="div-per-share" type="text" value="0.10" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="div-distribute-btn" type="button">Distribute</button>
+        </div>
+      </div>
+      <div id="div-status" class="status">Ready</div>
     </div>
 
     <div class="section">
@@ -178,7 +255,36 @@
   <script>
     const openOrdersBody = document.getElementById("open-orders-body");
     const fillsBody = document.getElementById("fills-body");
+    const listStock = document.getElementById("list-stock");
+    const listCreateBtn = document.getElementById("list-create-btn");
+    const listStatus = document.getElementById("list-status");
+    const divSymbol = document.getElementById("div-symbol");
+    const divPerShare = document.getElementById("div-per-share");
+    const divDistributeBtn = document.getElementById("div-distribute-btn");
+    const divStatus = document.getElementById("div-status");
     // JSDOM
+    const LISTABLE_STOCKS = [
+      { symbol: "AAPL", name: "Apple Inc" },
+      { symbol: "MSFT", name: "Microsoft" },
+      { symbol: "NVDA", name: "NVIDIA" },
+      { symbol: "AMZN", name: "Amazon" },
+      { symbol: "GOOGL", name: "Alphabet" },
+      { symbol: "META", name: "Meta Platforms" },
+      { symbol: "TSLA", name: "Tesla" },
+      { symbol: "AVGO", name: "Broadcom" },
+      { symbol: "NFLX", name: "Netflix" },
+      { symbol: "AMD", name: "AMD" },
+      { symbol: "INTC", name: "Intel" },
+      { symbol: "ORCL", name: "Oracle" },
+      { symbol: "CSCO", name: "Cisco" },
+      { symbol: "ADBE", name: "Adobe" },
+      { symbol: "QCOM", name: "Qualcomm" },
+      { symbol: "JPM", name: "JPMorgan Chase" },
+      { symbol: "V", name: "Visa" },
+      { symbol: "MA", name: "Mastercard" },
+      { symbol: "WMT", name: "Walmart" },
+      { symbol: "COST", name: "Costco" },
+    ];
 
     function shortAddress(address) {
       return String(address || "");
@@ -191,7 +297,138 @@
       // to fixed 2 dc
     }
 
+    function setDivStatus(text, isError = false) {
+      divStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      divStatus.style.color = nextColor;
+    }
+
+    function setListStatus(text, isError = false) {
+      listStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      listStatus.style.color = nextColor;
+    }
+
+    async function loadDividendSymbols() {
+      const res = await fetch("/api/registry/listings");
+      const data = await res.json();
+      divSymbol.innerHTML = "";
+      for (const item of data.listings || []) {
+        const option = document.createElement("option");
+        option.value = item.symbol;
+        option.textContent = item.symbol;
+        divSymbol.appendChild(option);
+      }
+    }
+
+    async function loadListableStocks() {
+      let listedSet = new Set();
+      try {
+        const res = await fetch("/api/registry/listings");
+        const data = await res.json();
+        let listed = [];
+        if (Array.isArray(data.listings)) {
+          listed = data.listings;
+        }
+        const listedSymbols = [];
+        for (let i = 0; i < listed.length; i += 1) {
+          const item = listed[i];
+          const itemSymbol = String(item.symbol || "").toUpperCase();
+          listedSymbols.push(itemSymbol);
+        }
+        listedSet = new Set(listedSymbols);
+      } catch {
+        listedSet = new Set();
+      }
+
+      listStock.innerHTML = "";
+      let firstUnlistedValue = "";
+      for (const stock of LISTABLE_STOCKS) {
+        const option = document.createElement("option");
+        option.value = stock.symbol;
+        const isListed = listedSet.has(stock.symbol);
+        option.textContent = isListed
+          ? `${stock.name} (${stock.symbol}) — LISTED`
+          : `${stock.name} (${stock.symbol})`;
+        option.disabled = isListed;
+        if (!isListed && !firstUnlistedValue) {
+          firstUnlistedValue = stock.symbol;
+        }
+        listStock.appendChild(option);
+      }
+      if (firstUnlistedValue) {
+        listStock.value = firstUnlistedValue;
+      }
+    }
+
+    async function distributeDividend() {
+      try {
+        setDivStatus("Submitting distribution");
+        const payload = {
+          symbol: divSymbol.value,
+          divPerShare: divPerShare.value,
+        };
+        const res = await fetch("/api/dividends/declare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Distribution failed");
+        }
+        setDivStatus(`Distributed for ${payload.symbol} Tx: ${data.txHash}`);
+      } catch (err) {
+        setDivStatus(err.message || "Distribution failed", true);
+      }
+    }
+
+    async function createListing() {
+      try {
+        const symbol = String(listStock.value || "").toUpperCase().trim();
+        const selected = LISTABLE_STOCKS.find((s) => s.symbol === symbol);
+        let name = symbol;
+        if (selected) {
+          name = selected.name;
+        }
+        if (!symbol || !name) {
+          setListStatus("Please select a company", true);
+          return;
+        }
+        if (listStock.selectedOptions[0] && listStock.selectedOptions[0].disabled) {
+          setListStatus(`${symbol} is already listed`, true);
+          return;
+        }
+        setListStatus("Listing symbol");
+        const res = await fetch("/api/equity/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ symbol, name }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Listing failed");
+        }
+        setListStatus(`Listed ${symbol} Tx: ${data.txHash}`);
+        await loadListableStocks();
+        await loadDividendSymbols();
+      } catch (err) {
+        setListStatus(err.message || "Listing failed", true);
+      }
+    }
+
+    listCreateBtn.addEventListener("click", createListing);
+    divDistributeBtn.addEventListener("click", distributeDividend);
+
     (async function () {
+      await loadListableStocks();
+      await loadDividendSymbols();
       const openRes = await fetch("/api/orderbook/open");
       const openData = await openRes.json();
       // rest api
@@ -206,7 +443,10 @@
       }
       for (const order of activeOrders) {
         const tr = document.createElement("tr");
-        const pillClass = order.side === "BUY" ? "pill pill-buy" : "pill pill-sell";
+        let pillClass = "pill pill-sell";
+        if (order.side === "BUY") {
+          pillClass = "pill pill-buy";
+        }
         tr.innerHTML = `
           <td>${order.id}</td>
           <td><span class="${pillClass}">${order.side}</span></td>

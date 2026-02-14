@@ -213,18 +213,24 @@
     }
 
     function formatWeiToToken(valueWei, maxDecimals = 4) {
-      if (valueWei === undefined || valueWei === null || valueWei === "") {
-        return "-";
-      }
       try {
         const negative = String(valueWei).startsWith("-");
-        const raw = negative ? String(valueWei).slice(1) : String(valueWei);
+        let raw = String(valueWei);
+        if (negative) {
+          raw = String(valueWei).slice(1);
+        }
         const padded = raw.padStart(19, "0");
         const whole = padded.slice(0, -18).replace(/^0+/, "") || "0";
         const fractionRaw = padded.slice(-18);
         const fraction = fractionRaw.slice(0, maxDecimals).replace(/0+$/, "");
-        const rendered = fraction.length ? `${whole}.${fraction}` : whole;
-        return negative ? `-${rendered}` : rendered;
+        let rendered = whole;
+        if (fraction.length) {
+          rendered = `${whole}.${fraction}`;
+        }
+        if (negative) {
+          return `-${rendered}`;
+        }
+        return rendered;
       } catch {
         return String(valueWei);
       }
@@ -256,7 +262,7 @@
 
     async function cancelOrder(orderId) {
       try {
-        setStatus(`Cancelling order #${orderId}...`);
+        setStatus(`Cancelling order #${orderId}`);
         const response = await fetch("/api/orders/cancel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -266,7 +272,7 @@
         if (!response.ok || data.error) {
           throw new Error(data.error || "Cancel failed");
         }
-        setStatus(`Cancelled order #${orderId}.`, "ok");
+        setStatus(`Cancelled order #${orderId}`, "ok");
         await loadTransactions();
       } catch (err) {
         setStatus(err.message || "Cancel failed", "error");
@@ -277,7 +283,7 @@
       rowsEl.innerHTML = "";
       if (!items.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="6">No transactions yet.</td>';
+        tr.innerHTML = '<td colspan="6">No transactions yet</td>';
         rowsEl.appendChild(tr);
         return;
       }
@@ -311,8 +317,11 @@
     async function loadTransactions({ append = false } = {}) {
       if (!currentWallet) return;
       try {
-        setStatus("Loading...");
-        const cursorParam = append && nextCursor !== null ? `&cursor=${encodeURIComponent(nextCursor)}` : "";
+        setStatus("Loading");
+        let cursorParam = "";
+        if (append && nextCursor !== null) {
+          cursorParam = `&cursor=${encodeURIComponent(nextCursor)}`;
+        }
         const response = await fetch(
           `/api/txs?wallet=${encodeURIComponent(currentWallet)}&type=${encodeURIComponent(currentType)}&limit=${PAGE_SIZE}${cursorParam}`
         );
@@ -328,9 +337,17 @@
         }
         nextCursor = data.nextCursor;
         renderRows(currentItems);
-        loadMoreBtn.disabled = nextCursor === null;
-        loadMoreBtn.textContent = nextCursor === null ? "No more items" : "Load more";
-        setStatus(`Loaded ${currentItems.length}/${data.total} items. Synced block: ${data.indexerState.lastIndexedBlock}.`, "ok");
+        if (nextCursor === null) {
+          loadMoreBtn.disabled = true;
+          loadMoreBtn.textContent = "No more items";
+        } else {
+          loadMoreBtn.disabled = false;
+          loadMoreBtn.textContent = "Load more";
+        }
+        const loadedCount = currentItems.length;
+        const totalCount = data.total;
+        const syncedBlock = data.indexerState.lastIndexedBlock;
+        setStatus(`Loaded ${loadedCount}/${totalCount} items  Synced block: ${syncedBlock}`, "ok");
       } catch (err) {
         setStatus(err.message || "Failed to load transactions", "error");
       }
@@ -356,7 +373,9 @@
       loadTransactions({ append: false });
     });
     loadMoreBtn.addEventListener("click", () => {
-      if (nextCursor === null) return;
+      if (nextCursor === null) {
+        return;
+      }
       loadTransactions({ append: true });
     });
 
@@ -372,7 +391,7 @@
 
     (async function init() {
       if (!window.ethereum) {
-        setStatus("Wallet provider not found.", "error");
+        setStatus("Wallet provider not found", "error");
         return;
       }
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });

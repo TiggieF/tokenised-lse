@@ -254,7 +254,7 @@
         <div class="actions">
           <button class="btn btn-sell" id="sell-btn" type="button">Sell</button>
         </div>
-        <div class="muted-note" id="sell-status">Ready.</div>
+        <div class="muted-note" id="sell-status">Ready</div>
       </div>
 
       <div class="card panel-hidden" id="auto-panel">
@@ -270,7 +270,7 @@
         <div class="actions">
           <button class="btn btn-auto" id="auto-sell-btn" type="button">Set Auto Sell</button>
         </div>
-        <div class="muted-note" id="auto-status">Ready.</div>
+        <div class="muted-note" id="auto-status">Ready</div>
       </div>
     </div>
   </div>
@@ -424,7 +424,7 @@
       const priceCents = parsePriceToCents(sellPriceInput.value);
       const qtyText = document.querySelector("#sell-panel + .card .qty div").textContent;
       const qty = Number(qtyText);
-      sellStatus.textContent = "Submitting...";
+      sellStatus.textContent = "Submitting";
       const hash = await placeLimitOrder("SELL", priceCents, qty);
       sellStatus.textContent = `Order placed: ${String(hash)}`;
     });
@@ -432,7 +432,7 @@
     autoButton.addEventListener("click", async () => {
       const priceCents = parsePriceToCents(autoPriceInput.value);
       const qty = Number(autoQtyInput.value);
-      autoStatus.textContent = "Submitting...";
+      autoStatus.textContent = "Submitting";
       const hash = await placeLimitOrder("SELL", priceCents, qty);
       autoStatus.textContent = `Auto sell set: ${String(hash)}`;
     });

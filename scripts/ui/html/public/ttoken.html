@@ -139,7 +139,7 @@
         />
       </div>
       <button class="airdrop-btn" id="airdrop-btn" type="button">Airdrop</button>
-      <div class="status" id="status-text" style="display:none;">Select an amount and airdrop to your wallet.</div>
+      <div class="status" id="status-text" style="display:none;">Select an amount and airdrop to your wallet</div>
       <div class="status">Wallet: <span id="ttoken-wallet">-</span></div>
       <div class="status" id="import-hint" style="display:none;"></div>
     </div>
@@ -158,7 +158,7 @@
         </div>
         <button class="airdrop-btn" id="mint-equity-btn" type="button">Mint Equity</button>
         <!-- equity token mint -->
-        <div class="status" id="equity-status" style="display:none;">Create or mint to your wallet.</div>
+        <div class="status" id="equity-status" style="display:none;">Create or mint to your wallet</div>
         <div class="status">Wallet: <span id="equity-wallet">-</span></div>
         <div class="status" id="equity-import-hint" style="display:none;"></div>
       </div>
@@ -186,19 +186,7 @@
     // default amount
     let currentAccount = "";
 
-    const STOCKS = [
-      { symbol: "AAPL", name: "Apple" },
-      { symbol: "MSFT", name: "Microsoft" },
-      { symbol: "AMZN", name: "Amazon" },
-      { symbol: "NVDA", name: "NVIDIA" },
-      { symbol: "GOOGL", name: "Alphabet" },
-      { symbol: "META", name: "Meta" },
-      { symbol: "TSLA", name: "Tesla" },
-      { symbol: "BRKB", name: "Berkshire Hathaway (BRK.B)" },
-      { symbol: "JPM", name: "JPMorgan Chase" },
-      { symbol: "V", name: "Visa" },
-    ];
-    // hardcoded stock for now
+    let listedStocks = [];
 
     function renderEquityAmount() {
       equityAmountValue.textContent = String(equityAmount);
@@ -206,13 +194,21 @@
 
     function setEquityStatus(message, tone = "neutral") {
       equityStatus.textContent = message;
-      equityStatus.style.color = tone === "error" ? "#e04c4c" : "#5b6b7a";
+      let nextColor = "#5b6b7a";
+      if (tone === "error") {
+        nextColor = "#e04c4c";
+      }
+      equityStatus.style.color = nextColor;
       // set style for equity status
     }
 
     function setStatus(message, tone = "neutral") {
       statusText.textContent = message;
-      statusText.style.color = tone === "error" ? "#e04c4c" : "#5b6b7a";
+      let nextColor = "#5b6b7a";
+      if (tone === "error") {
+        nextColor = "#e04c4c";
+      }
+      statusText.style.color = nextColor;
     }
 
     function setWalletAddress(address) {
@@ -234,7 +230,7 @@
     async function airdrop() {
       try {
         // ttoken mint api call
-        setStatus("Submitting airdrop...");
+        setStatus("Submitting airdrop");
         const rawAmount = amountInput.value;
         const parsedAmount = Number(rawAmount);
         const ttokenAddressRes = await fetch("/api/ttoken-address");
@@ -265,18 +261,8 @@
     mintEquityBtn.addEventListener("click", async () => {
       try {
         // mint on click
-        setEquityStatus("Creating & minting equity...");
-        let selected;
-        for (let i = 0; i < STOCKS.length; i++) {
-          const stock = STOCKS[i];
-          if (stock.symbol === equitySymbol.value) {
-            selected = stock;
-          }
-        }
-        let selectedName = equitySymbol.value;
-        if (selected && selected.name) {
-          selectedName = selected.name;
-        }
+        setEquityStatus("Creating & minting equity");
+        const selectedName = equitySymbol.value;
         const res = await fetch("/api/equity/create-mint", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -289,7 +275,7 @@
         });
         const data = await res.json();
         const mintHash = data.mintTx || data.txHash || "";
-        setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value}. Tx: ${mintHash}`);
+        setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value} Tx: ${mintHash}`);
         equityImportHint.style.display = "block";
         equityImportHint.textContent = `${equitySymbol.value} address: ${data.tokenAddress}`;
       } catch (err) {
@@ -300,12 +286,31 @@
     (async function () {
       // on load get account and balance
       renderEquityAmount();
+      try {
+        const listingsRes = await fetch("/api/registry/listings");
+        const listingsData = await listingsRes.json();
+        let listings = [];
+        if (Array.isArray(listingsData.listings)) {
+          listings = listingsData.listings;
+        }
+        listedStocks = [];
+        for (const item of listings) {
+          const symbol = String(item.symbol || "").toUpperCase();
+          if (!symbol || symbol === "LSE") continue;
+          listedStocks.push({ symbol });
+        }
+        if (!listedStocks.length) {
+          listedStocks = [{ symbol: "TSLA" }, { symbol: "AAPL" }, { symbol: "MSFT" }];
+        }
+      } catch {
+        listedStocks = [{ symbol: "TSLA" }, { symbol: "AAPL" }, { symbol: "MSFT" }];
+      }
       equitySymbol.innerHTML = "";
-      for (let i = 0; i < STOCKS.length; i++) {
-        const stock = STOCKS[i];
+      for (let i = 0; i < listedStocks.length; i++) {
+        const stock = listedStocks[i];
         const opt = document.createElement("option");
         opt.value = stock.symbol;
-        opt.textContent = `${stock.name} (${stock.symbol})`;
+        opt.textContent = stock.symbol;
         equitySymbol.appendChild(opt);
       }
       const accounts = await window.ethereum.request(

@@ -1,4 +1,8 @@
-const { ethers } = require('ethers');
+const { ethers } = require("ethers");
+
 const wallet = ethers.Wallet.createRandom();
-console.log("Private Key:", wallet.privateKey);
-console.log("Address:", wallet.address);
+const privateKey = wallet.privateKey;
+const address = wallet.address;
+
+console.log("Private Key:", privateKey);
+console.log("Address:", address);

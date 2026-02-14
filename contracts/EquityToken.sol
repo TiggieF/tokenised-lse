@@ -1,20 +1,15 @@
-
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-
 contract EquityToken is ERC20, AccessControl {
-    
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
-    
     bytes32 public constant SNAPSHOT_ROLE = keccak256("SNAPSHOT_ROLE");
-    // snapshot to record balance and total supply (dividends)
+
     struct Snapshots {
         uint256[] ids;
         uint256[] values;
-        
     }
 
     mapping(address => Snapshots) private accountBalanceSnapshots;
@@ -23,7 +18,6 @@ contract EquityToken is ERC20, AccessControl {
 
     event Snapshot(uint256 id);
 
-    
     constructor(
         string memory name_,
         string memory symbol_,
@@ -38,68 +32,81 @@ contract EquityToken is ERC20, AccessControl {
         _grantRole(SNAPSHOT_ROLE, admin);
     }
 
-    
     function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {
         require(amount > 0, "equitytoken: amount must be > 0");
-        // mint tokens
         _mint(to, amount);
     }
 
     function snapshot() external onlyRole(SNAPSHOT_ROLE) returns (uint256 snapshotId) {
         snapshotId = takeSnapshot();
-        // return the snapshot for offchain
     }
 
     function balanceOfAt(address account, uint256 snapshotId) external view returns (uint256) {
-        (bool found, uint256 value) = valueAt(snapshotId, accountBalanceSnapshots[account]);
+        Snapshots storage snapshots = accountBalanceSnapshots[account];
+        (bool found, uint256 value) = valueAt(snapshotId, snapshots);
+
         if (found) {
             return value;
         }
-        return balanceOf(account);
-        // getter
+
+        uint256 currentBalance = balanceOf(account);
+        return currentBalance;
     }
 
     function totalSupplyAt(uint256 snapshotId) external view returns (uint256) {
         (bool found, uint256 value) = valueAt(snapshotId, totalSupplySnapshots);
+
         if (found) {
             return value;
         }
-        return totalSupply();
-        // getter for total supply(of this equity token) at snapshot
+
+        uint256 currentSupply = totalSupply();
+        return currentSupply;
     }
 
     function takeSnapshot() internal returns (uint256 snapshotId) {
         currentSnapshotId = currentSnapshotId + 1;
         snapshotId = currentSnapshotId;
+
         emit Snapshot(snapshotId);
     }
 
     function _update(address from, address to, uint256 value) internal override {
-        if (currentSnapshotId > 0) {
-            if (from != address(0)) {
+        bool hasSnapshotContext = currentSnapshotId > 0;
+
+        if (hasSnapshotContext) {
+            bool hasFrom = from != address(0);
+            bool hasTo = to != address(0);
+
+            if (hasFrom) {
                 updateAccountSnapshot(from);
             }
-            if (to != address(0)) {
+
+            if (hasTo) {
                 updateAccountSnapshot(to);
             }
+
             updateTotalSupplySnapshot();
         }
+
         super._update(from, to, value);
-        // update snapshot on transfer mint burn
     }
 
     function updateAccountSnapshot(address account) private {
-        updateSnapshot(accountBalanceSnapshots[account], balanceOf(account));
-        // setter for account balance snapshot when transfer mint burn
+        uint256 currentBalance = balanceOf(account);
+        updateSnapshot(accountBalanceSnapshots[account], currentBalance);
     }
 
     function updateTotalSupplySnapshot() private {
-        updateSnapshot(totalSupplySnapshots, totalSupply());
+        uint256 currentSupply = totalSupply();
+        updateSnapshot(totalSupplySnapshots, currentSupply);
     }
 
     function updateSnapshot(Snapshots storage snapshots, uint256 currentValue) private {
         uint256 currentId = currentSnapshotId;
-        if (lastSnapshotId(snapshots.ids) < currentId) {
+        uint256 latestStoredId = lastSnapshotId(snapshots.ids);
+
+        if (latestStoredId < currentId) {
             snapshots.ids.push(currentId);
             snapshots.values.push(currentValue);
         }
@@ -110,35 +117,44 @@ contract EquityToken is ERC20, AccessControl {
         view
         returns (bool found, uint256 value)
     {
-        // getter for snapshot value, binary search for the snapshot id
         require(snapshotId > 0, "equitytoken: snapshot id is 0");
+
         uint256 index = findUpperBound(snapshots.ids, snapshotId);
-        if (index == 0) {
-            return (false, 0);
+
+        if (index == snapshots.ids.length) {
+            found = false;
+            value = 0;
+        } else {
+            found = true;
+            value = snapshots.values[index];
         }
-        return (true, snapshots.values[index - 1]);
     }
 
     function lastSnapshotId(uint256[] storage ids) private view returns (uint256) {
-        // getter for last snapshot id
         if (ids.length == 0) {
             return 0;
         }
-        return ids[ids.length - 1];
+
+        uint256 index = ids.length - 1;
+        uint256 id = ids[index];
+        return id;
     }
 
     function findUpperBound(uint256[] storage ids, uint256 snapshotId) private view returns (uint256) {
-        // find upper bound
         uint256 low = 0;
         uint256 high = ids.length;
+
         while (low < high) {
             uint256 mid = (low + high) / 2;
-            if (ids[mid] > snapshotId) {
+            uint256 midValue = ids[mid];
+
+            if (midValue >= snapshotId) {
                 high = mid;
             } else {
                 low = mid + 1;
             }
         }
+
         return low;
     }
 }

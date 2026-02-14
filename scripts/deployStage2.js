@@ -1,9 +1,3 @@
-
-
-
-
-
-
 const fs = require("fs");
 const path = require("path");
 const { ethers, network } = require("hardhat");
@@ -21,51 +15,75 @@ async function ensureDir(dirPath) {
 async function writeDeployment(networkName, payload) {
   const dir = path.join(__dirname, "..", "deployments");
   await ensureDir(dir);
+
   const filePath = path.join(dir, `${networkName}.json`);
   let existing = {};
+
   try {
-    existing = JSON.parse(await fs.promises.readFile(filePath, "utf8"));
-  } catch (err) {
+    const raw = await fs.promises.readFile(filePath, "utf8");
+    existing = JSON.parse(raw);
+  } catch (readError) {
     existing = {};
   }
-  const merged = { ...existing, ...payload };
-  await fs.promises.writeFile(filePath, JSON.stringify(merged, null, 2) + "\n");
+
+  const merged = {
+    ...existing,
+    ...payload,
+  };
+
+  const body = JSON.stringify(merged, null, 2) + "\n";
+  await fs.promises.writeFile(filePath, body);
+
   return filePath;
 }
 
 async function main() {
-  const [admin, defaultMinter] = await ethers.getSigners();
-  const shouldCreateListings = process.env.CREATE_LISTINGS !== "false";
+  const signers = await ethers.getSigners();
+  const admin = signers[0];
+  const defaultMinter = signers[1];
+
+  let shouldCreateListings = true;
+  if (process.env.CREATE_LISTINGS === "false") {
+    shouldCreateListings = false;
+  }
 
   console.log("Network:", network.name);
   console.log("Admin:", admin.address);
   console.log("Default minter:", defaultMinter.address);
 
-  const ListingsRegistry = await ethers.getContractFactory("ListingsRegistry");
-  const registry = await ListingsRegistry.deploy(admin.address);
+  const listingsRegistryFactory = await ethers.getContractFactory("ListingsRegistry");
+  const registry = await listingsRegistryFactory.deploy(admin.address);
   await registry.waitForDeployment();
 
-  const EquityTokenFactory = await ethers.getContractFactory("EquityTokenFactory");
-  const factory = await EquityTokenFactory.deploy(
+  const equityTokenFactoryFactory = await ethers.getContractFactory("EquityTokenFactory");
+  const registryAddress = await registry.getAddress();
+  const tokenFactory = await equityTokenFactoryFactory.deploy(
     admin.address,
-    await registry.getAddress(),
+    registryAddress,
     defaultMinter.address
   );
-  await factory.waitForDeployment();
+  await tokenFactory.waitForDeployment();
 
   const listingRole = await registry.LISTING_ROLE();
-  await registry.connect(admin).grantRole(listingRole, await factory.getAddress());
+  const tokenFactoryAddress = await tokenFactory.getAddress();
+  const grantTx = await registry.connect(admin).grantRole(listingRole, tokenFactoryAddress);
+  await grantTx.wait();
 
-  const PriceFeed = await ethers.getContractFactory("PriceFeed");
-  const priceFeed = await PriceFeed.deploy(admin.address, admin.address);
+  const priceFeedFactory = await ethers.getContractFactory("PriceFeed");
+  const priceFeed = await priceFeedFactory.deploy(admin.address, admin.address);
   await priceFeed.waitForDeployment();
 
   if (shouldCreateListings) {
-    for (const listing of DEFAULT_LISTINGS) {
-      const tx = await factory.connect(admin).createEquityToken(listing.symbol, listing.name);
-      await tx.wait();
-      const [tokenAddr, sym, name] = await registry.getListingFull(listing.symbol);
-      console.log(`Listed ${sym} (${name}):`, tokenAddr);
+    for (let i = 0; i < DEFAULT_LISTINGS.length; i += 1) {
+      const listing = DEFAULT_LISTINGS[i];
+      const createTx = await tokenFactory.connect(admin).createEquityToken(listing.symbol, listing.name);
+      await createTx.wait();
+
+      const listingData = await registry.getListingFull(listing.symbol);
+      const tokenAddress = listingData[0];
+      const symbol = listingData[1];
+      const name = listingData[2];
+      console.log(`Listed ${symbol} (${name}):`, tokenAddress);
     }
   }
 
@@ -73,8 +91,8 @@ async function main() {
     network: network.name,
     admin: admin.address,
     defaultMinter: defaultMinter.address,
-    listingsRegistry: await registry.getAddress(),
-    equityTokenFactory: await factory.getAddress(),
+    listingsRegistry: registryAddress,
+    equityTokenFactory: tokenFactoryAddress,
     priceFeed: await priceFeed.getAddress(),
   };
 

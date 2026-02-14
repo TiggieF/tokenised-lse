@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8" />
-  <title>tLSE Shell – Stage 0</title>
+  <title>Tokenised NASDAQ Shell</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -272,6 +272,7 @@
         <a class="nav-link" href="#" data-page="transactions">Transactions</a>
         <a class="nav-link" href="#" data-page="ttoken">TToken</a>
         <a class="nav-link" href="#" data-page="trade">Trade</a>
+        <a class="nav-link" href="#" data-page="award">Award</a>
         <a class="nav-link" href="#" data-page="admin">Admin</a>
         <button id="live-updates-toggle" class="nav-toggle-btn disabled" type="button">Live updates: Disabled</button>
       </nav>
@@ -304,6 +305,84 @@
     const navLinks = document.querySelectorAll(".nav-link");
     const liveUpdatesToggle = document.getElementById("live-updates-toggle");
     let liveUpdatesEnabled = false;
+    let activeEthereumProvider = null;
+
+    function findEthereumProvider() {
+      const rootProvider = window.ethereum;
+      if (rootProvider.providers && Array.isArray(rootProvider.providers)) {
+        let metamaskProvider = rootProvider.providers[0];
+        for (let i = 0; i < rootProvider.providers.length; i++) {
+          const provider = rootProvider.providers[i];
+          if (provider && provider.isMetaMask) {
+            metamaskProvider = provider;
+          }
+        }
+        return metamaskProvider;
+      }
+
+      return rootProvider;
+    }
+
+    activeEthereumProvider = findEthereumProvider();
+
+    function normalizeAccounts(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      return accounts;
+    }
+
+    function chooseDisplayAccount(provider, rawAccounts) {
+      const accounts = normalizeAccounts(rawAccounts);
+      let selectedAddress = "";
+      if (provider && provider.selectedAddress) {
+        selectedAddress = String(provider.selectedAddress);
+      }
+
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i++) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
+          }
+        }
+      }
+
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
+    async function refreshWalletFromProvider() {
+      const accounts = await activeEthereumProvider.request(
+        {
+          method: "eth_accounts",
+        }
+      );
+      const account = chooseDisplayAccount(activeEthereumProvider, accounts);
+      setWalletStatus(true, account);
+    }
+
+    async function reconnectWalletInteractive() {
+      activeEthereumProvider = findEthereumProvider();
+      await activeEthereumProvider.request(
+        {
+          method: "wallet_requestPermissions",
+          params: [{ eth_accounts: {} }],
+        }
+      );
+
+      const accounts = await activeEthereumProvider.request(
+        {
+          method: "eth_requestAccounts",
+        }
+      );
+      const account = chooseDisplayAccount(activeEthereumProvider, accounts);
+      setWalletStatus(true, account);
+    }
 
     function setWalletStatus(connected, account) {
       if (connected) {
@@ -356,6 +435,12 @@
         setActiveNav("admin");
         return;
       }
+      if (page === "award") {
+        pageFrame.src = "/award.html";
+        pageFrame.title = "Award";
+        setActiveNav("award");
+        return;
+      }
       pageFrame.src = "/dataFetch/tsla-yahoo/chart.html";
       pageFrame.title = "Stock information module";
       setActiveNav("markets");
@@ -383,41 +468,27 @@
       const link = navLinks[i];
       link.addEventListener("click", (event) => {
         event.preventDefault();
-        loadPage(link.dataset.page || "markets");
+        loadPage(link.dataset.page);
       });
     }
 
     (async function () {
       try {
         // connction to wallet and listens for changes
-        const accounts = await window.ethereum.request(
-          {
-            method: "eth_accounts",
-          }
-        );
-        const account = accounts[0];
-        setWalletStatus(true, account);
+        await refreshWalletFromProvider();
       } catch (err) {
         setWalletStatus(false);
       }
     })();
-    if (window.ethereum) {
-      window.ethereum.on("accountsChanged", (accounts) => {
-        const account = accounts[0];
-        setWalletStatus(true, account);
-        pageFrame.contentWindow.location.reload();
-      });
-    }
+    activeEthereumProvider.on("accountsChanged", async (accounts) => {
+      const account = chooseDisplayAccount(activeEthereumProvider, accounts);
+      setWalletStatus(true, account);
+      pageFrame.contentWindow.location.reload();
+    });
     walletStatus.addEventListener("click", async () => {
       try {
-        // listener for wallet connection
-        const accounts = await window.ethereum.request(
-          {
-            method: "eth_requestAccounts",
-          }
-        );
-        const account = accounts[0];
-        setWalletStatus(true, account);
+        await reconnectWalletInteractive();
+        pageFrame.contentWindow.location.reload();
       } catch (err) {
         setWalletStatus(false);
       }

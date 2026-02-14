@@ -1,56 +1,106 @@
-
 const API_KEY = "TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS";
-
-
 const SYMBOL = "TSLA";
 
+const encodedSymbol = encodeURIComponent(SYMBOL);
+const encodedApiKey = encodeURIComponent(API_KEY);
+
 const endpoints = {
-  quote: `https://financialmodelingprep.com/stable/quote?symbol=${encodeURIComponent(SYMBOL)}&apikey=${encodeURIComponent(API_KEY)}`,
-  aftermarket: `https://financialmodelingprep.com/stable/aftermarket-quote?symbol=${encodeURIComponent(SYMBOL)}&apikey=${encodeURIComponent(API_KEY)}`,
+  quote: `https://financialmodelingprep.com/stable/quote?symbol=${encodedSymbol}&apikey=${encodedApiKey}`,
+  aftermarket: `https://financialmodelingprep.com/stable/aftermarket-quote?symbol=${encodedSymbol}&apikey=${encodedApiKey}`,
 };
 
 async function getJson(url) {
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${text}`);
+  }
+
   try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Non-JSON response: ${text.slice(0, 200)}...`);
+    const parsed = JSON.parse(text);
+    return parsed;
+  } catch (parseError) {
+    const preview = text.slice(0, 200);
+    throw new Error(`Non-JSON response: ${preview}...`);
   }
 }
 
 function firstOrNull(payload) {
-  return Array.isArray(payload) ? (payload[0] ?? null) : payload ?? null;
+  const isArray = Array.isArray(payload);
+
+  if (isArray) {
+    if (payload.length > 0) {
+      return payload[0];
+    }
+    return null;
+  }
+
+  if (payload === undefined || payload === null) {
+    return null;
+  }
+
+  return payload;
 }
 
 function fmtNum(x, digits = 2) {
-  if (x === null || x === undefined || x === "") return null;
+  if (x === null || x === undefined || x === "") {
+    return null;
+  }
+
   const n = Number(x);
-  return Number.isFinite(n) ? n.toFixed(digits) : String(x);
+  if (Number.isFinite(n)) {
+    return n.toFixed(digits);
+  }
+
+  return String(x);
 }
 
 function fmtInt(x) {
-  if (x === null || x === undefined || x === "") return null;
+  if (x === null || x === undefined || x === "") {
+    return null;
+  }
+
   const n = Number(x);
-  return Number.isFinite(n) ? Math.round(n).toLocaleString("en-GB") : String(x);
+  if (Number.isFinite(n)) {
+    return Math.round(n).toLocaleString("en-GB");
+  }
+
+  return String(x);
 }
 
 function pick(obj, keys) {
-  for (const k of keys) {
-    if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i];
+    if (obj && obj[key] !== undefined && obj[key] !== null) {
+      return obj[key];
+    }
   }
+
   return null;
 }
 
 (async () => {
-  const [quotePayload, afterPayload] = await Promise.all([
-    getJson(endpoints.quote),
-    getJson(endpoints.aftermarket).catch((e) => ({ __error: e.message })),
-  ]);
+  const quotePayload = await getJson(endpoints.quote);
+
+  let afterPayload;
+  try {
+    afterPayload = await getJson(endpoints.aftermarket);
+  } catch (error) {
+    let message = String(error);
+    if (error && error.message) {
+      message = error.message;
+    }
+    afterPayload = { __error: message };
+  }
 
   const quote = firstOrNull(quotePayload);
-  const after = afterPayload.__error ? null : firstOrNull(afterPayload);
+  const hasAfterError = Boolean(afterPayload.__error);
+
+  let after = null;
+  if (!hasAfterError) {
+    after = firstOrNull(afterPayload);
+  }
 
   console.log("=== RAW: /stable/quote ===");
   console.log(JSON.stringify(quotePayload, null, 2));
@@ -58,7 +108,6 @@ function pick(obj, keys) {
   console.log("\n=== RAW: /stable/aftermarket-quote ===");
   console.log(JSON.stringify(afterPayload, null, 2));
 
-  
   const previousClose = pick(quote, ["previousClose", "prevClose"]);
   const open = pick(quote, ["open", "priceOpen"]);
   const dayLow = pick(quote, ["dayLow", "low"]);
@@ -72,7 +121,6 @@ function pick(obj, keys) {
   const peTTM = pick(quote, ["pe", "peRatioTTM", "peTTM"]);
   const epsTTM = pick(quote, ["eps", "epsTTM"]);
 
-  
   const bid = pick(after, ["bid", "bidPrice"]);
   const bidSize = pick(after, ["bidSize", "bidSizeShares"]);
   const ask = pick(after, ["ask", "askPrice"]);
@@ -80,31 +128,89 @@ function pick(obj, keys) {
 
   console.log("\n=== MAPPED PANEL (best-effort) ===");
   console.log(`Symbol: ${SYMBOL}`);
-  console.log(`Previous close: ${previousClose ?? "N/A"}`);
-  console.log(`Open: ${open ?? "N/A"}`);
-  console.log(
-    `Day's range: ${dayLow !== null && dayHigh !== null ? `${fmtNum(dayLow)} - ${fmtNum(dayHigh)}` : "N/A"}`
-  );
-  console.log(
-    `52-week range: ${yearLow !== null && yearHigh !== null ? `${fmtNum(yearLow)} - ${fmtNum(yearHigh)}` : "N/A"}`
-  );
-  console.log(`Volume: ${volume !== null ? fmtInt(volume) : "N/A"}`);
-  console.log(`Avg. Volume: ${avgVolume !== null ? fmtInt(avgVolume) : "N/A"}`);
-  console.log(`Market cap: ${marketCap !== null ? fmtInt(marketCap) : "N/A"}`);
-  console.log(`Beta (5Y monthly): ${beta !== null ? fmtNum(beta) : "N/A"}`);
-  console.log(`PE ratio (TTM): ${peTTM !== null ? fmtNum(peTTM) : "N/A"}`);
-  console.log(`EPS (TTM): ${epsTTM !== null ? fmtNum(epsTTM) : "N/A"}`);
 
-  if (afterPayload.__error) {
+  let previousCloseText = "N/A";
+  if (previousClose !== null) {
+    previousCloseText = String(previousClose);
+  }
+  console.log(`Previous close: ${previousCloseText}`);
+
+  let openText = "N/A";
+  if (open !== null) {
+    openText = String(open);
+  }
+  console.log(`Open: ${openText}`);
+
+  let dayRange = "N/A";
+  if (dayLow !== null && dayHigh !== null) {
+    dayRange = `${fmtNum(dayLow)} - ${fmtNum(dayHigh)}`;
+  }
+  console.log(`Day's range: ${dayRange}`);
+
+  let yearRange = "N/A";
+  if (yearLow !== null && yearHigh !== null) {
+    yearRange = `${fmtNum(yearLow)} - ${fmtNum(yearHigh)}`;
+  }
+  console.log(`52-week range: ${yearRange}`);
+
+  let volumeText = "N/A";
+  if (volume !== null) {
+    volumeText = fmtInt(volume);
+  }
+  console.log(`Volume: ${volumeText}`);
+
+  let avgVolumeText = "N/A";
+  if (avgVolume !== null) {
+    avgVolumeText = fmtInt(avgVolume);
+  }
+  console.log(`Avg. Volume: ${avgVolumeText}`);
+
+  let marketCapText = "N/A";
+  if (marketCap !== null) {
+    marketCapText = fmtInt(marketCap);
+  }
+  console.log(`Market cap: ${marketCapText}`);
+
+  let betaText = "N/A";
+  if (beta !== null) {
+    betaText = fmtNum(beta);
+  }
+  console.log(`Beta (5Y monthly): ${betaText}`);
+
+  let peText = "N/A";
+  if (peTTM !== null) {
+    peText = fmtNum(peTTM);
+  }
+  console.log(`PE ratio (TTM): ${peText}`);
+
+  let epsText = "N/A";
+  if (epsTTM !== null) {
+    epsText = fmtNum(epsTTM);
+  }
+  console.log(`EPS (TTM): ${epsText}`);
+
+  if (hasAfterError) {
     console.log(`Bid: N/A (aftermarket endpoint error: ${afterPayload.__error})`);
     console.log(`Ask: N/A (aftermarket endpoint error: ${afterPayload.__error})`);
   } else {
-    const bidStr =
-      bid !== null ? `${fmtNum(bid)}${bidSize !== null ? ` x ${fmtInt(bidSize)}` : ""}` : "N/A";
-    const askStr =
-      ask !== null ? `${fmtNum(ask)}${askSize !== null ? ` x ${fmtInt(askSize)}` : ""}` : "N/A";
-    console.log(`Bid: ${bidStr}`);
-    console.log(`Ask: ${askStr}`);
+    let bidText = "N/A";
+    if (bid !== null) {
+      bidText = String(fmtNum(bid));
+      if (bidSize !== null) {
+        bidText = `${bidText} x ${fmtInt(bidSize)}`;
+      }
+    }
+
+    let askText = "N/A";
+    if (ask !== null) {
+      askText = String(fmtNum(ask));
+      if (askSize !== null) {
+        askText = `${askText} x ${fmtInt(askSize)}`;
+      }
+    }
+
+    console.log(`Bid: ${bidText}`);
+    console.log(`Ask: ${askText}`);
   }
 
   console.log("\nNotes:");

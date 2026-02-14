@@ -9,28 +9,33 @@ function quoteAmount(qty, priceCents) {
 }
 
 async function deployStage56Fixture() {
-  const [admin, maker1, maker2, taker] = await ethers.getSigners();
+  const signers = await ethers.getSigners();
+  const admin = signers[0];
+  const maker1 = signers[1];
+  const maker2 = signers[2];
+  const taker = signers[3];
 
-  const TToken = await ethers.getContractFactory("TToken");
-  const ttoken = await TToken.deploy();
+  const ttokenFactory = await ethers.getContractFactory("TToken");
+  const ttoken = await ttokenFactory.deploy();
   await ttoken.waitForDeployment();
 
-  const ListingsRegistry = await ethers.getContractFactory("ListingsRegistry");
-  const registry = await ListingsRegistry.deploy(admin.address);
+  const registryFactory = await ethers.getContractFactory("ListingsRegistry");
+  const registry = await registryFactory.deploy(admin.address);
   await registry.waitForDeployment();
 
-  const PriceFeed = await ethers.getContractFactory("PriceFeed");
-  const priceFeed = await PriceFeed.deploy(admin.address, admin.address);
+  const priceFeedFactory = await ethers.getContractFactory("PriceFeed");
+  const priceFeed = await priceFeedFactory.deploy(admin.address, admin.address);
   await priceFeed.waitForDeployment();
 
-  const EquityToken = await ethers.getContractFactory("EquityToken");
-  const equity = await EquityToken.deploy("Acme Equity", "AAPL", admin.address, admin.address);
+  const equityFactory = await ethers.getContractFactory("EquityToken");
+  const equity = await equityFactory.deploy("Acme Equity", "AAPL", admin.address, admin.address);
   await equity.waitForDeployment();
 
-  await registry.connect(admin).registerListing("AAPL", "Acme Equity", await equity.getAddress());
+  const equityAddress = await equity.getAddress();
+  await registry.connect(admin).registerListing("AAPL", "Acme Equity", equityAddress);
 
-  const OrderBookDEX = await ethers.getContractFactory("OrderBookDEX");
-  const dex = await OrderBookDEX.deploy(
+  const dexFactory = await ethers.getContractFactory("OrderBookDEX");
+  const dex = await dexFactory.deploy(
     await ttoken.getAddress(),
     await registry.getAddress(),
     await priceFeed.getAddress()
@@ -42,8 +47,15 @@ async function deployStage56Fixture() {
 
 describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
   it("uses oracle max bound to filter asks", async function () {
-    const { admin, maker1, maker2, taker, ttoken, priceFeed, equity, dex } =
-      await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployStage56Fixture);
+    const admin = fixture.admin;
+    const maker1 = fixture.maker1;
+    const maker2 = fixture.maker2;
+    const taker = fixture.taker;
+    const ttoken = fixture.ttoken;
+    const priceFeed = fixture.priceFeed;
+    const equity = fixture.equity;
+    const dex = fixture.dex;
 
     await priceFeed.connect(admin).setPrice("AAPL", 10_000);
 
@@ -51,83 +63,126 @@ describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
     await equity.connect(admin).mint(maker2.address, ONE_SHARE);
     await ttoken.connect(admin).mint(taker.address, quoteAmount(ONE_SHARE, 10_000n));
 
-    await equity.connect(maker1).approve(await dex.getAddress(), ONE_SHARE);
-    await equity.connect(maker2).approve(await dex.getAddress(), ONE_SHARE);
-    await ttoken.connect(taker).approve(await dex.getAddress(), ethers.MaxUint256);
+    const dexAddress = await dex.getAddress();
+    const equityAddress = await equity.getAddress();
 
-    await dex.connect(maker1).placeLimitOrder(await equity.getAddress(), 1, 9_990n, ONE_SHARE);
-    await dex.connect(maker2).placeLimitOrder(await equity.getAddress(), 1, 10_010n, ONE_SHARE);
+    await equity.connect(maker1).approve(dexAddress, ONE_SHARE);
+    await equity.connect(maker2).approve(dexAddress, ONE_SHARE);
+    await ttoken.connect(taker).approve(dexAddress, ethers.MaxUint256);
 
-    await dex.connect(taker).buyExactQuoteAtOracle(await equity.getAddress(), quoteAmount(ONE_SHARE, 10_000n), 0);
+    await dex.connect(maker1).placeLimitOrder(equityAddress, 1, 9_990n, ONE_SHARE);
+    await dex.connect(maker2).placeLimitOrder(equityAddress, 1, 10_010n, ONE_SHARE);
 
-    const orders = await dex.getSellOrders(await equity.getAddress());
+    const budget = quoteAmount(ONE_SHARE, 10_000n);
+    await dex.connect(taker).buyExactQuoteAtOracle(equityAddress, budget, 0);
+
+    const orders = await dex.getSellOrders(equityAddress);
     expect(orders[0].remaining).to.equal(0);
     expect(orders[1].remaining).to.equal(ONE_SHARE);
   });
 
   it("expands eligibility with slippage", async function () {
-    const { admin, maker1, taker, ttoken, priceFeed, equity, dex } =
-      await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployStage56Fixture);
+    const admin = fixture.admin;
+    const maker1 = fixture.maker1;
+    const taker = fixture.taker;
+    const ttoken = fixture.ttoken;
+    const priceFeed = fixture.priceFeed;
+    const equity = fixture.equity;
+    const dex = fixture.dex;
 
     await priceFeed.connect(admin).setPrice("AAPL", 10_000);
 
     await equity.connect(admin).mint(maker1.address, ONE_SHARE);
     await ttoken.connect(admin).mint(taker.address, quoteAmount(ONE_SHARE, 10_150n));
 
-    await equity.connect(maker1).approve(await dex.getAddress(), ONE_SHARE);
-    await ttoken.connect(taker).approve(await dex.getAddress(), ethers.MaxUint256);
+    const dexAddress = await dex.getAddress();
+    const equityAddress = await equity.getAddress();
 
-    await dex.connect(maker1).placeLimitOrder(await equity.getAddress(), 1, 10_150n, ONE_SHARE);
+    await equity.connect(maker1).approve(dexAddress, ONE_SHARE);
+    await ttoken.connect(taker).approve(dexAddress, ethers.MaxUint256);
 
-    await dex.connect(taker).buyExactQuoteAtOracle(await equity.getAddress(), quoteAmount(ONE_SHARE, 10_150n), 200);
+    await dex.connect(maker1).placeLimitOrder(equityAddress, 1, 10_150n, ONE_SHARE);
 
-    const orders = await dex.getSellOrders(await equity.getAddress());
+    const budget = quoteAmount(ONE_SHARE, 10_150n);
+    await dex.connect(taker).buyExactQuoteAtOracle(equityAddress, budget, 200);
+
+    const orders = await dex.getSellOrders(equityAddress);
     expect(orders[0].remaining).to.equal(0);
   });
 
   it("reverts when stale", async function () {
-    const { admin, taker, ttoken, priceFeed, equity, dex } = await loadFixture(
-      deployStage56Fixture
-    );
+    const fixture = await loadFixture(deployStage56Fixture);
+    const admin = fixture.admin;
+    const taker = fixture.taker;
+    const ttoken = fixture.ttoken;
+    const priceFeed = fixture.priceFeed;
+    const equity = fixture.equity;
+    const dex = fixture.dex;
 
     await priceFeed.connect(admin).setPrice("AAPL", 10_000);
     await time.increase(61);
 
-    await ttoken.connect(admin).mint(taker.address, quoteAmount(ONE_SHARE, 10_000n));
-    await ttoken.connect(taker).approve(await dex.getAddress(), ethers.MaxUint256);
+    const budget = quoteAmount(ONE_SHARE, 10_000n);
+    await ttoken.connect(admin).mint(taker.address, budget);
 
-    await expect(
-      dex.connect(taker).buyExactQuoteAtOracle(await equity.getAddress(), quoteAmount(ONE_SHARE, 10_000n), 0)
-    ).to.be.revertedWith("orderbook: stale price");
+    const dexAddress = await dex.getAddress();
+    const equityAddress = await equity.getAddress();
+
+    await ttoken.connect(taker).approve(dexAddress, ethers.MaxUint256);
+
+    await expect(dex.connect(taker).buyExactQuoteAtOracle(equityAddress, budget, 0))
+      .to.be.revertedWith("orderbook: stale price");
   });
 
   it("reverts for unknown token", async function () {
-    const { admin, taker, ttoken, priceFeed, dex } = await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployStage56Fixture);
+    const admin = fixture.admin;
+    const taker = fixture.taker;
+    const ttoken = fixture.ttoken;
+    const priceFeed = fixture.priceFeed;
+    const dex = fixture.dex;
 
     await priceFeed.connect(admin).setPrice("AAPL", 10_000);
-    await ttoken.connect(admin).mint(taker.address, quoteAmount(ONE_SHARE, 10_000n));
-    await ttoken.connect(taker).approve(await dex.getAddress(), ethers.MaxUint256);
 
-    await expect(
-      dex.connect(taker).buyExactQuoteAtOracle(ethers.Wallet.createRandom().address, quoteAmount(ONE_SHARE, 10_000n), 0)
-    ).to.be.revertedWith("orderbook: unknown token");
+    const budget = quoteAmount(ONE_SHARE, 10_000n);
+    await ttoken.connect(admin).mint(taker.address, budget);
+
+    const dexAddress = await dex.getAddress();
+    await ttoken.connect(taker).approve(dexAddress, ethers.MaxUint256);
+
+    const unknownToken = ethers.Wallet.createRandom().address;
+
+    await expect(dex.connect(taker).buyExactQuoteAtOracle(unknownToken, budget, 0))
+      .to.be.revertedWith("orderbook: unknown token");
   });
 
   it("emits OracleQuoteBuyExecuted", async function () {
-    const { admin, maker1, taker, ttoken, priceFeed, equity, dex } =
-      await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployStage56Fixture);
+    const admin = fixture.admin;
+    const maker1 = fixture.maker1;
+    const taker = fixture.taker;
+    const ttoken = fixture.ttoken;
+    const priceFeed = fixture.priceFeed;
+    const equity = fixture.equity;
+    const dex = fixture.dex;
 
     await priceFeed.connect(admin).setPrice("AAPL", 10_000);
+
     await equity.connect(admin).mint(maker1.address, ONE_SHARE);
     await ttoken.connect(admin).mint(taker.address, quoteAmount(ONE_SHARE, 10_000n));
 
-    await equity.connect(maker1).approve(await dex.getAddress(), ONE_SHARE);
-    await ttoken.connect(taker).approve(await dex.getAddress(), ethers.MaxUint256);
+    const dexAddress = await dex.getAddress();
+    const equityAddress = await equity.getAddress();
 
-    await dex.connect(maker1).placeLimitOrder(await equity.getAddress(), 1, 10_000n, ONE_SHARE);
+    await equity.connect(maker1).approve(dexAddress, ONE_SHARE);
+    await ttoken.connect(taker).approve(dexAddress, ethers.MaxUint256);
 
-    await expect(
-      dex.connect(taker).buyExactQuoteAtOracle(await equity.getAddress(), quoteAmount(ONE_SHARE, 10_000n), 0)
-    ).to.emit(dex, "OracleQuoteBuyExecuted");
+    await dex.connect(maker1).placeLimitOrder(equityAddress, 1, 10_000n, ONE_SHARE);
+
+    const budget = quoteAmount(ONE_SHARE, 10_000n);
+
+    await expect(dex.connect(taker).buyExactQuoteAtOracle(equityAddress, budget, 0))
+      .to.emit(dex, "OracleQuoteBuyExecuted");
   });
 });

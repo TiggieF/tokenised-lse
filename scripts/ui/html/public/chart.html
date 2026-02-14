@@ -249,16 +249,7 @@
       <div>
         <label for="symbol">Symbol</label>
         <select id="symbol">
-          <option value="AAPL">Apple (AAPL)</option>
-          <option value="MSFT">Microsoft (MSFT)</option>
-          <option value="AMZN">Amazon (AMZN)</option>
-          <option value="NVDA">NVIDIA (NVDA)</option>
-          <option value="GOOGL">Alphabet (GOOGL)</option>
-          <option value="META">Meta (META)</option>
-          <option value="TSLA" selected>Tesla (TSLA)</option>
-          <option value="BRK.B">Berkshire Hathaway (BRK.B)</option>
-          <option value="JPM">JPMorgan Chase (JPM)</option>
-          <option value="V">Visa (V)</option>
+          <option value="">Loading symbols...</option>
         </select>
       </div>
       <div>
@@ -290,7 +281,7 @@
         <div id="live-updated" class="live-updated change-neutral">Updated -</div>
       </div>
     </div>
-    <div id="status" class="badge"><span class="dot"></span><span>Ready.</span></div>
+    <div id="status" class="badge"><span class="dot"></span><span>Ready</span></div>
   </div>
 
   <div id="chart" class="panel"></div>
@@ -338,7 +329,7 @@
     const infoMarketCapEl = document.getElementById("info-market-cap");
 
     const CHANGE_CLASSES = ["change-positive", "change-negative", "change-neutral"];
-    let liveSymbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+    let liveSymbol = "TSLA";
     let liveOpenPrice;
     let lastLiveUpdate;
     let livePoller;
@@ -391,6 +382,48 @@
       liveUpdatedEl.textContent = `Updated ${seconds}s ago`;
     }
 
+    async function loadListedSymbols() {
+      const fallbackSymbols = ["TSLA", "AAPL", "MSFT"];
+      try {
+        const res = await fetch("/api/registry/listings");
+        const data = await res.json();
+        let listings = [];
+        if (Array.isArray(data.listings)) {
+          listings = data.listings;
+        }
+        symbolInput.innerHTML = "";
+        if (!listings.length) {
+          for (const symbol of fallbackSymbols) {
+            const opt = document.createElement("option");
+            opt.value = symbol;
+            opt.textContent = symbol;
+            symbolInput.appendChild(opt);
+          }
+        } else {
+          for (const item of listings) {
+            const symbol = String(item.symbol || "").toUpperCase();
+            if (!symbol || symbol === "LSE") continue;
+            const opt = document.createElement("option");
+            opt.value = symbol;
+            opt.textContent = symbol;
+            symbolInput.appendChild(opt);
+          }
+        }
+      } catch {
+        symbolInput.innerHTML = "";
+        for (const symbol of fallbackSymbols) {
+          const opt = document.createElement("option");
+          opt.value = symbol;
+          opt.textContent = symbol;
+          symbolInput.appendChild(opt);
+        }
+      }
+      const selected = symbolInput.value.trim().toUpperCase() || fallbackSymbols[0];
+      liveSymbol = selected;
+      resetLivePriceState(selected);
+      liveSymbolLabel.textContent = `${selected} live price`;
+    }
+
     function setInfoText(el, value) {
       el.textContent = value;
     }
@@ -410,7 +443,11 @@
         setInfoText(infoYearRangeEl, formatRange(data.yearLow, data.yearHigh));
         setInfoText(infoVolumeEl, formatInt(data.volume));
         setInfoText(infoMarketCapEl, formatInt(data.marketCap));
-        infoUpdatedEl.textContent = data.stale ? "Snapshot (stale)" : "Snapshot";
+        let infoLabel = "Snapshot";
+        if (data.stale) {
+          infoLabel = "Snapshot (stale)";
+        }
+        infoUpdatedEl.textContent = infoLabel;
         liveOpenPrice = Number(data.open);
         liveOpenEl.textContent = formatPrice(liveOpenPrice);
       } catch (err) {
@@ -462,7 +499,7 @@
       ],
       onChange: (selectedDates, dateStr) => {
         lastValidDate = dateStr;
-        setStatus("Ready.");
+        setStatus("Ready");
         loadCandles();
       },
     });
@@ -681,18 +718,21 @@
     });
 
     symbolInput.addEventListener("change", () => {
-      setStatus("Ready.");
+      setStatus("Ready");
       resetLivePriceState(symbolInput.value.trim().toUpperCase() || "TSLA");
       loadLivePrice();
       loadStockInfo();
     });
 
     rangeInput.addEventListener("change", () => {
-      setStatus("Ready.");
+      setStatus("Ready");
     });
 
-    loadCandles();
-    applyLiveUpdatesState(false);
+    (async function init() {
+      await loadListedSymbols();
+      await loadCandles();
+      applyLiveUpdatesState(false);
+    })();
     
     function applyLiveUpdatesState(enabled) {
       livePollingEnabled = enabled;

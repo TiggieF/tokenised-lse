@@ -1,4 +1,3 @@
-
 const { ethers } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
@@ -11,22 +10,25 @@ function loadDeployments(networkName) {
   const raw = fs.readFileSync(deploymentsPath, "utf8");
   return JSON.parse(raw);
 }
+
 async function fetchFinnhubQuote(symbol, apiKey) {
-  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(
-    symbol
-  )}&token=${encodeURIComponent(apiKey)}`;
+  const encodedSymbol = encodeURIComponent(symbol);
+  const encodedApiKey = encodeURIComponent(apiKey);
+  const url = `https://finnhub.io/api/v1/quote?symbol=${encodedSymbol}&token=${encodedApiKey}`;
 
   const response = await fetch(url, {
     headers: {
       Accept: "application/json,text/plain,*/*",
     },
   });
+
   if (!response.ok) {
     throw new Error(`Finnhub request failed: ${response.status} ${response.statusText}`);
   }
 
   const data = await response.json();
-  if (!data || typeof data.c !== "number") {
+  const hasPrice = data && typeof data.c === "number";
+  if (!hasPrice) {
     throw new Error("Finnhub response missing price data");
   }
 
@@ -35,39 +37,51 @@ async function fetchFinnhubQuote(symbol, apiKey) {
 
 function toCents(quote) {
   const price = quote.c;
-  return Math.round(price * 100);
-  // price to cent
+  const cents = Math.round(price * 100);
+  return cents;
+}
+
+async function findOracleSigner(signers, fallbackIndex) {
+  for (let i = 0; i < signers.length; i += 1) {
+    const signer = signers[i];
+    if (signer.address === DEFAULT_ORACLE_ADDRESS) {
+      return signer;
+    }
+  }
+
+  const indexIsValid = !Number.isNaN(fallbackIndex) && fallbackIndex >= 0 && fallbackIndex < signers.length;
+  if (indexIsValid) {
+    return signers[fallbackIndex];
+  }
+
+  return null;
 }
 
 async function main() {
   const deployments = loadDeployments("localhost");
-  const priceFeedAddress = process.env.PRICE_FEED_ADDRESS || deployments.priceFeed;
-  // get price feed address from env or deployments
+
+  const envPriceFeedAddress = process.env.PRICE_FEED_ADDRESS;
+  const priceFeedAddress = envPriceFeedAddress || deployments.priceFeed;
+
   const symbol = process.env.SYMBOL;
-  // get symbol
   const finnhubSymbol = process.env.FINNHUB_SYMBOL || symbol;
   const apiKey = process.env.FINNHUB_API_KEY || DEFAULT_FINNHUB_API_KEY;
-  const signerIndex = Number.parseInt(process.env.ORACLE_SIGNER_INDEX || "2", 10);
-  
+
+  const rawSignerIndex = process.env.ORACLE_SIGNER_INDEX || "2";
+  const signerIndex = Number.parseInt(rawSignerIndex, 10);
 
   if (!symbol) {
     throw new Error("Set SYMBOL env var (A-Z/0-9)");
-    // check for symbol
   }
 
   const signers = await ethers.getSigners();
-  let oracle = signers.find((signer) => signer.address === DEFAULT_ORACLE_ADDRESS);
-  if (!oracle && !Number.isNaN(signerIndex)) {
-    if (signerIndex < 0 || signerIndex >= signers.length) {
-      throw new Error(`Invalid ORACLE_SIGNER_INDEX ${process.env.ORACLE_SIGNER_INDEX}`);
-    }
-    oracle = signers[signerIndex];
-  }
+  const oracle = await findOracleSigner(signers, signerIndex);
+
   if (!oracle) {
     throw new Error(`Oracle signer ${DEFAULT_ORACLE_ADDRESS} not found in this network`);
   }
-  const feed = await ethers.getContractAt("PriceFeed", priceFeedAddress);
 
+  const feed = await ethers.getContractAt("PriceFeed", priceFeedAddress);
   const quote = await fetchFinnhubQuote(finnhubSymbol, apiKey);
   const priceCents = toCents(quote);
 
@@ -77,10 +91,12 @@ async function main() {
   const tx = await feed.connect(oracle).setPrice(symbol, priceCents);
   await tx.wait();
 
-  const [storedPrice, timestamp] = await feed.getPrice(symbol);
+  const priceData = await feed.getPrice(symbol);
+  const storedPrice = priceData[0];
+  const timestamp = priceData[1];
+
   console.log("Stored price:", storedPrice.toString(), "cents");
   console.log("Timestamp:", timestamp.toString());
-  // fetch price and set on chain and double check
 }
 
 main().catch((error) => {
