@@ -215,7 +215,7 @@ event DividendClaimed(
 
 ## 5.8 Tests (Stage 5 test plan)
 
-Create: `test/stage5_Dividends.test.js`
+Create: `test/dividends.test.js`
 
 ### Setup
 - Deploy TToken

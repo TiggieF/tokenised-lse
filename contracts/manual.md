@@ -385,17 +385,17 @@ The system is a local Hardhat blockchain with a Node and Express API server and 
 ## 6) Deployment
 
 ### 6.1 Stage 1
-- `scripts/stage1/deploy.js` deploys TToken and writes deployments.
+- `scripts/deploy-ttoken.js` deploys TToken and writes deployments.
 
 ### 6.2 Stage 2
-- `scripts/deployStage2.js` deploys ListingsRegistry, EquityTokenFactory, PriceFeed.
-- Creates default listings for AAPL, TSLA, LSE.
+- `scripts/deploy-listings.js` deploys ListingsRegistry, EquityTokenFactory, PriceFeed.
+- Creates default listings for AAPL, TSLA, NVDA.
 
 ### 6.3 Stage 4
-- `scripts/stage4/deploy.js` deploys OrderBookDEX.
+- `scripts/deploy-orderbook.js` deploys OrderBookDEX.
 
 ### 6.4 Stage 5
-- `scripts/stage5/deploy.js` deploys Dividends.
+- `scripts/deploy-dividends.js` deploys Dividends.
 
 ## 7) Missing Components
 
@@ -461,4 +461,3 @@ The system is a local Hardhat blockchain with a Node and Express API server and 
 **Clarity of explication**
 - Use UI, API, and contract code to point to exact logic.
 - Explain each step and show the exact REST payloads.
-

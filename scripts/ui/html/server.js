@@ -168,9 +168,14 @@ const INDEXER_CANCELLATIONS_FILE = path.join(INDEXER_DIR, 'cancellations.json');
 const INDEXER_CASHFLOWS_FILE = path.join(INDEXER_DIR, 'cashflows.json');
 const INDEXER_TRANSFERS_FILE = path.join(INDEXER_DIR, 'transfers.json');
 const INDEXER_LEVERAGED_FILE = path.join(INDEXER_DIR, 'leveraged.json');
+const AUTOTRADE_DIR = path.join(__dirname, '../../..', 'cache', 'autotrade');
+const AUTOTRADE_STATE_FILE = path.join(AUTOTRADE_DIR, 'state.json');
+const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
+const AUTOTRADE_POLL_INTERVAL_MS = 3000;
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
+let autoTradeLoopBusy = false;
 
 async function ensureContract(address) {
   const code = await hardhatRpc('eth_getCode', [address, 'latest']);
@@ -966,6 +971,365 @@ async function getListingBySymbol(registryAddr, symbol) {
   return normalizeAddress(tokenAddr);
 }
 
+function ensureAutoTradeDir() {
+  if (!fs.existsSync(AUTOTRADE_DIR)) {
+    fs.mkdirSync(AUTOTRADE_DIR, { recursive: true });
+  }
+}
+
+function getDefaultAutoTradeState() {
+  return {
+    listenerRunning: true,
+    nextRuleId: 1,
+    nextExecutionId: 1,
+    rules: [],
+    executions: [],
+    lastTickAtMs: 0,
+  };
+}
+
+function readAutoTradeState() {
+  ensureAutoTradeDir();
+  return readJsonFile(AUTOTRADE_STATE_FILE, getDefaultAutoTradeState());
+}
+
+function writeAutoTradeState(state) {
+  ensureAutoTradeDir();
+  writeJsonFile(AUTOTRADE_STATE_FILE, state);
+}
+
+function getDefaultSymbolStatusState() {
+  return {
+    symbols: {},
+  };
+}
+
+function readSymbolStatusState() {
+  ensureAutoTradeDir();
+  return readJsonFile(SYMBOL_STATUS_FILE, getDefaultSymbolStatusState());
+}
+
+function writeSymbolStatusState(state) {
+  ensureAutoTradeDir();
+  writeJsonFile(SYMBOL_STATUS_FILE, state);
+}
+
+function getSymbolLifecycleStatus(symbolRaw) {
+  const state = readSymbolStatusState();
+  const symbol = String(symbolRaw).toUpperCase();
+  const entry = state.symbols[symbol];
+  if (entry && entry.status) {
+    return String(entry.status).toUpperCase();
+  }
+  return 'ACTIVE';
+}
+
+function setSymbolLifecycleStatus(symbolRaw, statusRaw) {
+  const symbol = String(symbolRaw).toUpperCase();
+  const status = String(statusRaw).toUpperCase();
+  const state = readSymbolStatusState();
+  state.symbols[symbol] = {
+    symbol,
+    status,
+    updatedAtMs: Date.now(),
+  };
+  writeSymbolStatusState(state);
+  return state.symbols[symbol];
+}
+
+async function listAllSymbolsFromRegistry() {
+  const deployments = loadDeployments();
+  const registryAddr = deployments.listingsRegistry;
+  const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
+  const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
+  const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
+  return symbols;
+}
+
+async function getBestBookPrices(symbolRaw) {
+  const symbol = String(symbolRaw).toUpperCase();
+  const deployments = loadDeployments();
+  const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
+  if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    return {
+      symbol,
+      tokenAddress: '',
+      bestBidCents: 0,
+      bestAskCents: 0,
+      hasBid: false,
+      hasAsk: false,
+    };
+  }
+
+  const buyData = orderBookInterface.encodeFunctionData('getBuyOrders', [tokenAddress]);
+  const buyResult = await hardhatRpc('eth_call', [{ to: deployments.orderBookDex, data: buyData }, 'latest']);
+  const [buyOrders] = orderBookInterface.decodeFunctionResult('getBuyOrders', buyResult);
+
+  const sellData = orderBookInterface.encodeFunctionData('getSellOrders', [tokenAddress]);
+  const sellResult = await hardhatRpc('eth_call', [{ to: deployments.orderBookDex, data: sellData }, 'latest']);
+  const [sellOrders] = orderBookInterface.decodeFunctionResult('getSellOrders', sellResult);
+
+  let bestBidCents = 0;
+  let bestAskCents = 0;
+  let hasBid = false;
+  let hasAsk = false;
+
+  for (let i = 0; i < buyOrders.length; i += 1) {
+    const row = buyOrders[i];
+    const isActive = row.active === true;
+    const remainingWei = BigInt(row.remaining.toString());
+    if (isActive && remainingWei > 0n) {
+      const cents = Number(row.price);
+      if (!hasBid || cents > bestBidCents) {
+        hasBid = true;
+        bestBidCents = cents;
+      }
+    }
+  }
+
+  for (let i = 0; i < sellOrders.length; i += 1) {
+    const row = sellOrders[i];
+    const isActive = row.active === true;
+    const remainingWei = BigInt(row.remaining.toString());
+    if (isActive && remainingWei > 0n) {
+      const cents = Number(row.price);
+      if (!hasAsk || cents < bestAskCents) {
+        hasAsk = true;
+        bestAskCents = cents;
+      }
+    }
+  }
+
+  return {
+    symbol,
+    tokenAddress,
+    bestBidCents,
+    bestAskCents,
+    hasBid,
+    hasAsk,
+  };
+}
+
+function shouldRuleTrigger(rule, book) {
+  const side = String(rule.side).toUpperCase();
+  const triggerPriceCents = Number(rule.triggerPriceCents);
+  if (side === 'BUY') {
+    if (!book.hasAsk) {
+      return false;
+    }
+    return book.bestAskCents <= triggerPriceCents;
+  }
+  if (side === 'SELL') {
+    if (!book.hasBid) {
+      return false;
+    }
+    return book.bestBidCents >= triggerPriceCents;
+  }
+  return false;
+}
+
+function isRulePausedByLifecycle(rule) {
+  const symbolStatus = getSymbolLifecycleStatus(rule.symbol);
+  return symbolStatus === 'FROZEN' || symbolStatus === 'DELISTED';
+}
+
+function normalizeRuleForResponse(rule) {
+  return {
+    id: Number(rule.id),
+    wallet: rule.wallet,
+    symbol: rule.symbol,
+    side: rule.side,
+    triggerPriceCents: Number(rule.triggerPriceCents),
+    qtyWei: String(rule.qtyWei),
+    maxSlippageBps: Number(rule.maxSlippageBps),
+    enabled: Boolean(rule.enabled),
+    cooldownSec: Number(rule.cooldownSec || 0),
+    maxExecutionsPerDay: Number(rule.maxExecutionsPerDay || 0),
+    createdAtMs: Number(rule.createdAtMs || 0),
+    updatedAtMs: Number(rule.updatedAtMs || 0),
+    lastExecutedAtMs: Number(rule.lastExecutedAtMs || 0),
+    pausedByLifecycle: isRulePausedByLifecycle(rule),
+  };
+}
+
+function normalizeExecutionForResponse(entry) {
+  return {
+    id: Number(entry.id),
+    ruleId: Number(entry.ruleId),
+    wallet: entry.wallet,
+    symbol: entry.symbol,
+    side: entry.side,
+    triggerPriceCents: Number(entry.triggerPriceCents),
+    observedBestBidCents: Number(entry.observedBestBidCents || 0),
+    observedBestAskCents: Number(entry.observedBestAskCents || 0),
+    qtyWei: String(entry.qtyWei),
+    txHash: entry.txHash,
+    status: entry.status,
+    error: entry.error || '',
+    executedAtMs: Number(entry.executedAtMs),
+  };
+}
+
+async function executeAutoTradeRule(rule, book) {
+  const deployments = loadDeployments();
+  const orderBookAddr = deployments.orderBookDex;
+  const wallet = rule.wallet;
+  const symbol = rule.symbol;
+  const qtyWei = BigInt(rule.qtyWei);
+  const qtyUi = Number(ethers.formatUnits(qtyWei, 18));
+  const side = String(rule.side).toUpperCase();
+  const triggerPriceCents = Number(rule.triggerPriceCents);
+
+  if (!(qtyUi > 0)) {
+    throw new Error('rule qty is zero');
+  }
+
+  let data = '';
+  if (side === 'BUY') {
+    const ttokenAddr = deployments.ttoken;
+    const quoteWei = quoteAmountWei(qtyWei, triggerPriceCents);
+    const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, quoteWei]);
+    const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: ttokenAddr,
+      data: approveData,
+    }]);
+    await waitForReceipt(approveTxHash);
+    data = orderBookInterface.encodeFunctionData('placeLimitOrder', [
+      book.tokenAddress,
+      0,
+      triggerPriceCents,
+      qtyWei,
+    ]);
+  } else {
+    const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, qtyWei]);
+    const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: book.tokenAddress,
+      data: approveData,
+    }]);
+    await waitForReceipt(approveTxHash);
+    data = orderBookInterface.encodeFunctionData('placeLimitOrder', [
+      book.tokenAddress,
+      1,
+      triggerPriceCents,
+      qtyWei,
+    ]);
+  }
+
+  const txHash = await hardhatRpc('eth_sendTransaction', [{
+    from: wallet,
+    to: orderBookAddr,
+    data,
+  }]);
+  await waitForReceipt(txHash);
+
+  return {
+    txHash,
+    symbol,
+    side,
+    qtyWei: qtyWei.toString(),
+  };
+}
+
+function getDateKeyEt() {
+  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: TZ }));
+  const y = etNow.getFullYear();
+  const m = String(etNow.getMonth() + 1).padStart(2, '0');
+  const d = String(etNow.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+async function runAutoTradeTick() {
+  if (autoTradeLoopBusy) {
+    return;
+  }
+  autoTradeLoopBusy = true;
+
+  try {
+    const state = readAutoTradeState();
+    if (!state.listenerRunning) {
+      return;
+    }
+    state.lastTickAtMs = Date.now();
+
+    for (let i = 0; i < state.rules.length; i += 1) {
+      const rule = state.rules[i];
+      if (!rule.enabled) {
+        continue;
+      }
+      if (isRulePausedByLifecycle(rule)) {
+        continue;
+      }
+
+      const nowMs = Date.now();
+      const cooldownSec = Number(rule.cooldownSec || 0);
+      if (cooldownSec > 0 && Number(rule.lastExecutedAtMs || 0) > 0) {
+        const elapsedMs = nowMs - Number(rule.lastExecutedAtMs);
+        if (elapsedMs < (cooldownSec * 1000)) {
+          continue;
+        }
+      }
+
+      const maxExecutionsPerDay = Number(rule.maxExecutionsPerDay || 0);
+      const currentDay = getDateKeyEt();
+      if (rule.executionsDay !== currentDay) {
+        rule.executionsDay = currentDay;
+        rule.executionsDayCount = 0;
+      }
+      if (maxExecutionsPerDay > 0 && Number(rule.executionsDayCount || 0) >= maxExecutionsPerDay) {
+        continue;
+      }
+
+      const book = await getBestBookPrices(rule.symbol);
+      if (!book.tokenAddress) {
+        continue;
+      }
+      const triggerNow = shouldRuleTrigger(rule, book);
+      if (!triggerNow) {
+        continue;
+      }
+
+      const executionId = state.nextExecutionId;
+      state.nextExecutionId = Number(state.nextExecutionId) + 1;
+      const entry = {
+        id: executionId,
+        ruleId: Number(rule.id),
+        wallet: rule.wallet,
+        symbol: rule.symbol,
+        side: rule.side,
+        triggerPriceCents: Number(rule.triggerPriceCents),
+        observedBestBidCents: Number(book.bestBidCents || 0),
+        observedBestAskCents: Number(book.bestAskCents || 0),
+        qtyWei: String(rule.qtyWei),
+        txHash: '',
+        status: 'FAILED',
+        error: '',
+        executedAtMs: Date.now(),
+      };
+
+      try {
+        const result = await executeAutoTradeRule(rule, book);
+        entry.txHash = result.txHash;
+        entry.status = 'EXECUTED';
+        rule.lastExecutedAtMs = Date.now();
+        rule.updatedAtMs = Date.now();
+        rule.executionsDayCount = Number(rule.executionsDayCount || 0) + 1;
+        state.rules.splice(i, 1);
+        i -= 1;
+      } catch (err) {
+        entry.error = err.message || 'execution failed';
+      }
+
+      state.executions.push(entry);
+    }
+
+    writeAutoTradeState(state);
+  } finally {
+    autoTradeLoopBusy = false;
+  }
+}
+
 function computeSymbolCostBasis(lots) {
   
 }
@@ -1435,6 +1799,10 @@ app.post('/api/orderbook/limit', async (req, res) => {
   try {
     const body = req.body;
     const symbol = String(body.symbol).toUpperCase();
+    const symbolLifecycle = getSymbolLifecycleStatus(symbol);
+    if (symbolLifecycle === 'FROZEN' || symbolLifecycle === 'DELISTED') {
+      return res.status(400).json({ error: `symbol ${symbol} is ${symbolLifecycle}` });
+    }
     const sideText = String(body.side).toUpperCase();
     const priceCents = Number(body.priceCents);
     const qty = Number(body.qty);
@@ -2296,8 +2664,11 @@ app.get('/api/portfolio/positions', async (req, res) => {
           }
         }
       }
+      const lifecycleStatus = getSymbolLifecycleStatus(listing.symbol);
       let valuation = { priceCents: 0, priceSource: 'NONE' };
-      if (liveCents > 0) {
+      if (lifecycleStatus === 'DELISTED') {
+        valuation = { priceCents: 0, priceSource: 'DELISTED' };
+      } else if (liveCents > 0) {
         valuation = { priceCents: liveCents, priceSource: 'LIVE' };
       } else {
         const priceFeedAddr = normalizeAddress(deployments.priceFeed);
@@ -2625,8 +2996,11 @@ app.get('/api/portfolio/summary', async (req, res) => {
           }
         }
       }
+      const lifecycleStatus = getSymbolLifecycleStatus(listing.symbol);
       let valuation = { priceCents: 0, priceSource: 'NONE' };
-      if (liveCents > 0) {
+      if (lifecycleStatus === 'DELISTED') {
+        valuation = { priceCents: 0, priceSource: 'DELISTED' };
+      } else if (liveCents > 0) {
         valuation = { priceCents: liveCents, priceSource: 'LIVE' };
       } else {
         const priceFeedAddr = normalizeAddress(deployments.priceFeed);
@@ -3774,6 +4148,347 @@ app.get('/api/leveraged/positions', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+app.post('/api/admin/symbols/freeze', async (req, res) => {
+  try {
+    const symbol = String(req.body.symbol || '').toUpperCase();
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    const entry = setSymbolLifecycleStatus(symbol, 'FROZEN');
+    res.json({ symbol, status: 'FROZEN', entry });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/symbols/unfreeze', async (req, res) => {
+  try {
+    const symbol = String(req.body.symbol || '').toUpperCase();
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    const entry = setSymbolLifecycleStatus(symbol, 'ACTIVE');
+    res.json({ symbol, status: 'ACTIVE', entry });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/symbols/delist', async (req, res) => {
+  try {
+    const symbol = String(req.body.symbol || '').toUpperCase();
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    const entry = setSymbolLifecycleStatus(symbol, 'DELISTED');
+    res.json({ symbol, status: 'DELISTED', entry });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/symbols/list', async (req, res) => {
+  try {
+    const symbol = String(req.body.symbol || '').toUpperCase();
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    const entry = setSymbolLifecycleStatus(symbol, 'ACTIVE');
+    res.json({ symbol, status: 'ACTIVE', entry });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/symbols/status', async (_req, res) => {
+  try {
+    const symbols = await listAllSymbolsFromRegistry();
+    const rows = [];
+    for (let i = 0; i < symbols.length; i += 1) {
+      const symbol = symbols[i];
+      const status = getSymbolLifecycleStatus(symbol);
+      const visibleOnMarkets = status !== 'DELISTED';
+      const tradable = status === 'ACTIVE';
+      rows.push({
+        symbol,
+        status,
+        visibleOnMarkets,
+        tradable,
+      });
+    }
+    rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    res.json({ symbols: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/autotrade/rules/create', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const wallet = normalizeAddress(String(body.wallet || ''));
+    const symbol = String(body.symbol || '').toUpperCase();
+    const side = String(body.side || '').toUpperCase();
+    const triggerPriceCents = Number(body.triggerPriceCents);
+    const qtyWei = String(body.qtyWei || '');
+    const maxSlippageBps = Number(body.maxSlippageBps || 0);
+    const enabled = Boolean(body.enabled !== false);
+    const cooldownSec = Number(body.cooldownSec || 0);
+    const maxExecutionsPerDay = Number(body.maxExecutionsPerDay || 0);
+
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    if (side !== 'BUY' && side !== 'SELL') {
+      return res.status(400).json({ error: 'side must be BUY or SELL' });
+    }
+    if (!Number.isFinite(triggerPriceCents) || triggerPriceCents <= 0) {
+      return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
+    }
+    if (!(BigInt(qtyWei) > 0n)) {
+      return res.status(400).json({ error: 'qtyWei must be > 0' });
+    }
+
+    const state = readAutoTradeState();
+    const newRule = {
+      id: Number(state.nextRuleId),
+      wallet,
+      symbol,
+      side,
+      triggerPriceCents: Number(triggerPriceCents),
+      qtyWei: String(qtyWei),
+      maxSlippageBps,
+      enabled,
+      cooldownSec,
+      maxExecutionsPerDay,
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+      lastExecutedAtMs: 0,
+      executionsDay: getDateKeyEt(),
+      executionsDayCount: 0,
+    };
+    state.nextRuleId = Number(state.nextRuleId) + 1;
+    state.rules.push(newRule);
+    state.listenerRunning = true;
+    writeAutoTradeState(state);
+    await runAutoTradeTick();
+    res.json({ rule: normalizeRuleForResponse(newRule) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/autotrade/rules/update', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const ruleId = Number(body.ruleId);
+    if (!Number.isFinite(ruleId) || ruleId <= 0) {
+      return res.status(400).json({ error: 'ruleId is required' });
+    }
+    const state = readAutoTradeState();
+    let rule = null;
+    for (let i = 0; i < state.rules.length; i += 1) {
+      if (Number(state.rules[i].id) === ruleId) {
+        rule = state.rules[i];
+      }
+    }
+    if (!rule) {
+      return res.status(404).json({ error: 'rule not found' });
+    }
+
+    if (body.triggerPriceCents !== undefined) {
+      const nextTriggerPrice = Number(body.triggerPriceCents);
+      if (!Number.isFinite(nextTriggerPrice) || nextTriggerPrice <= 0) {
+        return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
+      }
+      rule.triggerPriceCents = nextTriggerPrice;
+    }
+    if (body.qtyWei !== undefined) {
+      const nextQtyWei = String(body.qtyWei);
+      if (!(BigInt(nextQtyWei) > 0n)) {
+        return res.status(400).json({ error: 'qtyWei must be > 0' });
+      }
+      rule.qtyWei = nextQtyWei;
+    }
+    if (body.maxSlippageBps !== undefined) {
+      rule.maxSlippageBps = Number(body.maxSlippageBps);
+    }
+    if (body.cooldownSec !== undefined) {
+      rule.cooldownSec = Number(body.cooldownSec);
+    }
+    if (body.maxExecutionsPerDay !== undefined) {
+      rule.maxExecutionsPerDay = Number(body.maxExecutionsPerDay);
+    }
+    if (body.enabled !== undefined) {
+      rule.enabled = Boolean(body.enabled);
+    }
+    rule.updatedAtMs = Date.now();
+
+    writeAutoTradeState(state);
+    res.json({ rule: normalizeRuleForResponse(rule) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/autotrade/rules/enable', async (req, res) => {
+  try {
+    const ruleId = Number(req.body.ruleId);
+    const state = readAutoTradeState();
+    let found = null;
+    for (let i = 0; i < state.rules.length; i += 1) {
+      const row = state.rules[i];
+      if (Number(row.id) === ruleId) {
+        row.enabled = true;
+        row.updatedAtMs = Date.now();
+        found = row;
+      }
+    }
+    if (!found) {
+      return res.status(404).json({ error: 'rule not found' });
+    }
+    writeAutoTradeState(state);
+    res.json({ rule: normalizeRuleForResponse(found) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/autotrade/rules/disable', async (req, res) => {
+  try {
+    const ruleId = Number(req.body.ruleId);
+    const state = readAutoTradeState();
+    let found = null;
+    for (let i = 0; i < state.rules.length; i += 1) {
+      const row = state.rules[i];
+      if (Number(row.id) === ruleId) {
+        row.enabled = false;
+        row.updatedAtMs = Date.now();
+        found = row;
+      }
+    }
+    if (!found) {
+      return res.status(404).json({ error: 'rule not found' });
+    }
+    writeAutoTradeState(state);
+    res.json({ rule: normalizeRuleForResponse(found) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/autotrade/rules/delete', async (req, res) => {
+  try {
+    const ruleId = Number(req.body.ruleId);
+    const state = readAutoTradeState();
+    const nextRules = [];
+    let removed = false;
+    for (let i = 0; i < state.rules.length; i += 1) {
+      const row = state.rules[i];
+      if (Number(row.id) === ruleId) {
+        removed = true;
+      } else {
+        nextRules.push(row);
+      }
+    }
+    if (!removed) {
+      return res.status(404).json({ error: 'rule not found' });
+    }
+    state.rules = nextRules;
+    writeAutoTradeState(state);
+    res.json({ removed: true, ruleId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/autotrade/rules', async (req, res) => {
+  try {
+    const walletRaw = String(req.query.wallet || '');
+    const wallet = normalizeAddress(walletRaw);
+    const state = readAutoTradeState();
+    const rows = [];
+    for (let i = 0; i < state.rules.length; i += 1) {
+      const row = state.rules[i];
+      if (!wallet || row.wallet === wallet) {
+        rows.push(normalizeRuleForResponse(row));
+      }
+    }
+    rows.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+    res.json({ wallet, rules: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/autotrade/executions', async (req, res) => {
+  try {
+    const walletRaw = String(req.query.wallet || '');
+    const wallet = normalizeAddress(walletRaw);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const state = readAutoTradeState();
+    const rows = [];
+    for (let i = 0; i < state.executions.length; i += 1) {
+      const row = state.executions[i];
+      if (!wallet || row.wallet === wallet) {
+        rows.push(normalizeExecutionForResponse(row));
+      }
+    }
+    rows.sort((a, b) => b.executedAtMs - a.executedAtMs);
+    res.json({ wallet, executions: rows.slice(0, limit) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/autotrade/status', async (_req, res) => {
+  try {
+    const state = readAutoTradeState();
+    let enabledCount = 0;
+    for (let i = 0; i < state.rules.length; i += 1) {
+      if (state.rules[i].enabled) {
+        enabledCount += 1;
+      }
+    }
+    res.json({
+      listenerRunning: Boolean(state.listenerRunning),
+      lastTickAtMs: Number(state.lastTickAtMs || 0),
+      ruleCount: state.rules.length,
+      enabledRuleCount: enabledCount,
+      executionCount: state.executions.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/autotrade/listener/start', async (_req, res) => {
+  try {
+    const state = readAutoTradeState();
+    state.listenerRunning = true;
+    state.lastTickAtMs = Number(state.lastTickAtMs || 0);
+    writeAutoTradeState(state);
+    await runAutoTradeTick();
+    res.json({ listenerRunning: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/autotrade/listener/stop', async (_req, res) => {
+  try {
+    const state = readAutoTradeState();
+    state.listenerRunning = false;
+    writeAutoTradeState(state);
+    res.json({ listenerRunning: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 // create equity token
 app.post('/api/equity/create', async (req, res) => {
   const body = req.body;
@@ -3924,7 +4639,7 @@ app.post('/api/equity/create-mint', async (req, res) => {
 });
 
 // rest api to get all the listings and addresses
-app.get('/api/registry/listings', async (_req, res) => {
+app.get('/api/registry/listings', async (req, res) => {
   try {
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
@@ -3936,13 +4651,22 @@ app.get('/api/registry/listings', async (_req, res) => {
     const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
     const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
 
+    let includeDelisted = false;
+    if (String(req.query.includeDelisted || '') === '1') {
+      includeDelisted = true;
+    }
+
     const listings = [];
     for (const symbol of symbols) {
       const lookup = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
       const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookup }, 'latest']);
       const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
       if (tokenAddr !== ethers.ZeroAddress) {
-        listings.push({ symbol, tokenAddress: tokenAddr });
+        const lifecycle = getSymbolLifecycleStatus(symbol);
+        const shouldHide = lifecycle === 'DELISTED' && !includeDelisted;
+        if (!shouldHide) {
+          listings.push({ symbol, tokenAddress: tokenAddr, lifecycleStatus: lifecycle });
+        }
       }
     }
     res.json({ listings });
@@ -4144,9 +4868,24 @@ app.get('/api/candles', async (req, res) => {
 
 ensureIndexerDir();
 ensureIndexerSynced();
+ensureAutoTradeDir();
+if (!fs.existsSync(AUTOTRADE_STATE_FILE)) {
+  writeAutoTradeState(getDefaultAutoTradeState());
+}
+if (!fs.existsSync(SYMBOL_STATUS_FILE)) {
+  writeSymbolStatusState(getDefaultSymbolStatusState());
+}
+if (fs.existsSync(AUTOTRADE_STATE_FILE)) {
+  const autoState = readAutoTradeState();
+  autoState.listenerRunning = true;
+  writeAutoTradeState(autoState);
+}
 setInterval(() => {
   ensureIndexerSynced();
 }, INDEXER_SYNC_INTERVAL_MS);
+setInterval(() => {
+  runAutoTradeTick();
+}, AUTOTRADE_POLL_INTERVAL_MS);
 
 app.use((_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

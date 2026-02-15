@@ -1,76 +1,112 @@
-# Stage 13 — Tokenised NASDAQ Realism (Scoped Version)
+# Stage 13 — Auto Trade with On-Chain Order Book Triggers
 
 ## 13.0 Purpose
 
-Add high-impact realism features aligned to your chosen scope:
+Replace call-auction and basket work with an automated trading stage.
 
-- no execution-metrics module in this stage
-- no session-state market-mode module
-- no stock split implementation
-- keep delist/freeze
-- keep lightweight call-auction feature
+This stage introduces:
+
+- auto buy rules
+- auto sell rules
+- on-chain order book watcher loop
+- execution against existing order-book paths
+
+Basket ETF and call auction are removed from Stage 13 scope.
 
 ---
 
 ## 13.1 In-Scope Features
 
-## 13.1.1 Admin-managed NASDAQ symbol onboarding (local list)
+## 13.1.1 Auto trade rule model
 
-From `admin.html`, provide:
+Support per-wallet rules:
 
-- symbol picker from local source file in repository
-- company name auto-fill from local list
-- one-click listing creation via `EquityTokenFactory`
+- `AUTO_BUY`
+- `AUTO_SELL`
 
-Requirements:
+Required rule fields:
 
-- source file versioned in repo (no runtime third-party dependency)
-- symbol can be enabled/disabled for trading in admin UI
-- newly listed symbol appears in chart/trade/portfolio flows
+- `wallet`
+- `symbol`
+- `side` (`BUY` or `SELL`)
+- `triggerPriceCents`
+- `qtyWei`
+- `maxSlippageBps`
+- `enabled`
 
-## 13.1.2 Delist/Freeze flow (no stock split)
+Optional controls:
 
-Implement delist/freeze semantics:
+- cooldown seconds
+- max executions per day
 
-- `ACTIVE`: normal trading
-- `FROZEN`: cannot place new orders, existing open orders cancellable only
-- `DELISTED`: no new orders, no matching, symbol removed from trading selectors
+## 13.1.2 On-chain order book watcher (3-second cadence)
 
-User-facing behavior:
+Backend loop must:
 
-- users still see holdings in portfolio
-- users cannot trade frozen/delisted symbols against TToken
-- transactions page records freeze/delist events affecting held symbols
+- read best bid and best ask from the on-chain order book every 3 seconds
+- evaluate enabled auto rules after each polling tick
 
-## 13.1.3 Lightweight call-auction mode (item 5 clarified)
+Trigger rule:
 
-Definition of item 5:
+- `AUTO_BUY` triggers when best ask is less than or equal to rule trigger price
+- `AUTO_SELL` triggers when best bid is greater than or equal to rule trigger price
 
-- a short batching mode where orders are collected first
-- one crossing price is computed
-- matched quantity executes in one batch
-- then order book returns to normal continuous mode
+Execution rule:
 
-Project implementation scope:
+- if trigger condition is met, place trade using existing on-chain execution path
+- log rule execution with tx hash
 
-- manual trigger from admin page per symbol
-- configurable auction window (e.g., 30 to 120 seconds)
-- deterministic crossing price algorithm (maximize matched quantity, then tie-break by closest to last price)
+## 13.1.3 Symbol lifecycle controls (kept)
 
-Why this helps marks:
+Keep symbol lifecycle from current plan:
 
-- demonstrates non-trivial market microstructure beyond plain limit-order matching.
+- `ACTIVE`
+- `FROZEN`
+- `DELISTED`
+
+Rule engine must respect status:
+
+- no new auto executions for frozen/delisted symbols
+- existing rules remain stored but paused while not tradable
+
+User-facing lifecycle behavior:
+
+- `ACTIVE`
+  - symbol is visible on Markets
+  - symbol is tradable (manual and auto)
+- `FROZEN`
+  - symbol remains visible on Markets
+  - symbol is not tradable (manual and auto blocked)
+- `DELISTED`
+  - symbol is removed from Markets display/selectors
+  - symbol is not tradable (manual and auto blocked)
+
+Portfolio behavior for all states:
+
+- existing equity holdings remain visible in Portfolio
+- holdings are not removed by freeze/delist state changes
 
 ---
 
 ## 13.2 API Additions
 
-## 13.2.1 Local NASDAQ catalog
+## 13.2.1 Rule management
 
-- `GET /api/admin/nasdaq-symbols`
-  - reads from local file (example: `scripts/ui/data/symbols/nasdaq.json`)
+- `POST /api/autotrade/rules/create`
+- `POST /api/autotrade/rules/update`
+- `POST /api/autotrade/rules/enable`
+- `POST /api/autotrade/rules/disable`
+- `POST /api/autotrade/rules/delete`
+- `GET /api/autotrade/rules?wallet=0x...`
 
-## 13.2.2 Symbol lifecycle
+## 13.2.2 Execution and monitoring
+
+- `GET /api/autotrade/status`
+- `POST /api/autotrade/listener/start`
+- `POST /api/autotrade/listener/stop`
+- `GET /api/autotrade/executions?wallet=0x...`
+
+## 13.2.3 Symbol lifecycle (kept)
 
 - `POST /api/admin/symbols/list`
 - `POST /api/admin/symbols/freeze`
@@ -78,24 +114,21 @@ Why this helps marks:
 - `POST /api/admin/symbols/delist`
 - `GET /api/admin/symbols/status`
 
-## 13.2.3 Call auction
-
-- `POST /api/admin/auction/start`
-- `GET /api/admin/auction/status?symbol=TSLA`
-- `POST /api/admin/auction/execute`
-
 ---
 
 ## 13.3 Contract/Backend Notes
 
-Contract-side options:
+Contract:
 
-1. Preferred: add symbol tradability state in `ListingsRegistry` and enforce checks in `OrderBookDEX`.
-2. Alternative: enforce state only at backend order entry path (weaker for decentralised correctness).
+- keep `ListingsRegistry` tradability state enforcement in `OrderBookDEX`
+- reuse current buy/sell execution paths
 
-Recommendation:
+Backend:
 
-- enforce in contract for grading strength and correctness.
+- implement deterministic 3-second listener loop
+- avoid duplicate triggers in same tick
+- use on-chain order book prices only for trigger checks
+- persist rule and execution logs to local storage file
 
 ---
 
@@ -105,33 +138,33 @@ Recommendation:
 
 Add panels:
 
-- NASDAQ local symbol onboarding
-- symbol status controls (freeze/unfreeze/delist)
-- auction control panel
+- symbol lifecycle controls (freeze/unfreeze/delist)
+- listener status and start/stop control
 
 ## 13.4.2 Trade page (`trade.html` / `sell.html`)
 
-Add behavior:
+Add panels:
 
-- symbol status badge
-- disable action buttons when symbol not tradable
-- show clear reason text (`FROZEN` or `DELISTED`)
+- create auto buy rule
+- create auto sell rule
+- list and toggle own rules
 
 ## 13.4.3 Portfolio and Transactions pages
 
 Add behavior:
 
-- show delisted/frozen badge beside holdings
-- show lifecycle events in transaction feed
+- show auto execution history in transactions feed
+- show rule-driven executions with clear labels
 
 ---
 
 ## 13.5 Acceptance Criteria
 
-1. Admin lists a NASDAQ symbol from local file and it is tradable end-to-end.
-2. Admin freezes symbol; users cannot place new orders but can cancel existing open orders.
-3. Admin delists symbol; users cannot trade it against TToken and UI reflects status.
-4. Admin runs call auction on an active symbol and batch execution occurs at deterministic crossing price.
+1. User creates auto buy rule and it executes automatically when on-chain best ask satisfies the trigger.
+2. User creates auto sell rule and it executes automatically when on-chain best bid satisfies the trigger.
+3. Order book watcher runs every 3 seconds while running.
+4. Frozen/delisted symbols do not execute auto trades.
+5. Execution log shows trigger price, executed tx hash, and timestamp.
 
 ---
 
@@ -139,16 +172,25 @@ Add behavior:
 
 Capture:
 
-1. symbol onboarding from local list
-2. freeze/delist lifecycle behavior in UI
-3. auction run with before/after order book snapshots
-4. resulting user transaction records
+1. auto buy rule creation and triggered execution
+2. auto sell rule creation and triggered execution
+3. order book watcher tick evidence at 3-second cadence
+4. freeze/delist pause behavior for auto rules
 
 ---
 
 ## 13.7 Out of Scope
 
+- basket ETF
+- call auction
 - execution-quality metrics module
 - session-aware market mode module
 - stock split corporate action
 
+---
+
+## 13.8 Award Link
+
+Award upgrade planning is moved to:
+
+- `docs/stages/stage13.5-Award-Plan.md`

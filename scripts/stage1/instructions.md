@@ -28,7 +28,7 @@ Leave this process running so the other terminals can connect to `localhost:8545
    ```
 2. **Run the Stage 1 deployment script against your chosen network:**
    ```bash
-   npx hardhat run scripts/stage1/deploy.js --network localhost
+   npx hardhat run scripts/deploy-ttoken.js --network localhost
    ```
 3. **What to look for:**
    - The console logs the deployer address and its balance.
@@ -75,7 +75,7 @@ The script checks whether the wallet has already claimed the TToken airdrop and,
 
 1. **Execute the Stage 1 test suite only:**
    ```bash
-   npx hardhat test test/stage1_TToken.test.js
+   npx hardhat test test/ttoken.test.js
    ```
 2. **Full test run (if you want everything):**
    ```bash

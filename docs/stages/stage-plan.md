@@ -13,9 +13,9 @@ Implement the base ERC-20 TToken stable token with capped supply, role-based min
 **Key Files:**
 
 * `contracts/TToken.sol`
-* `scripts/stage1/deploy.js`
+* `scripts/deploy-ttoken.js`
 * `scripts/stage1/instructions.md`
-* `test/stage1_TToken.test.js`
+* `test/ttoken.test.js`
 
 **Approval Criteria:**
 
@@ -71,7 +71,7 @@ Develop the on-chain decentralised exchange supporting limit orders, partial fil
 **Key Files:**
 
 * `contracts/OrderBookDEX.sol`
-* `test/stage4_OrderBookDEX.test.js`
+* `test/orderbook-dex.test.js`
 
 **Approval Criteria:**
 
@@ -90,7 +90,7 @@ Allow admin to declare dividends for listed stocks, distributing TToken proporti
 **Key Files:**
 
 * `contracts/Dividends.sol`
-* `test/stage5_Dividends.test.js`
+* `test/dividends.test.js`
 
 **Approval Criteria:**
 
@@ -128,7 +128,7 @@ Aggregate user holdings and compute total portfolio value using live on-chain pr
 **Key Files:**
 
 * `contracts/PortfolioAggregator.sol`
-* `test/stage7_Aggregator.test.js`
+* `test/portfolio-aggregator.test.js`
 
 **Approval Criteria:**
 
@@ -150,7 +150,7 @@ Deliver Yahoo Finance-style UI with wallet connection, admin control, live chart
 
 **Approval Criteria:**
 
-* Admin can list top 10 LSE companies
+* Admin can list top 10 companies
 * Airdrop and trading flows functional
 * Live charts and holder breakdown displayed
 * UI passes manual testing on local Hardhat network

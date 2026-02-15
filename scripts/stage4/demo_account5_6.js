@@ -57,7 +57,7 @@ async function main() {
   const equityAddr = await registry.getListing("AAPL");
 
   if (equityAddr === ethers.ZeroAddress) {
-    throw new Error("AAPL not listed. Run scripts/deployStage2.js first.");
+    throw new Error("AAPL not listed. Run scripts/deploy-listings.js first.");
   }
 
   const equity = await ethers.getContractAt("EquityToken", equityAddr);

@@ -13,7 +13,7 @@ Use this guide to deploy and demo Stage 4 locally. Commands assume you are in th
 export TTOKEN_ADDRESS=0xYourTTokenAddress
 export LISTINGS_REGISTRY=0xYourListingsRegistryAddress
 export PRICE_FEED_ADDRESS=0xYourPriceFeedAddress
-npx hardhat run scripts/stage4/deploy.js --network localhost
+npx hardhat run scripts/deploy-orderbook.js --network localhost
 ```
 
 The deployed address is saved to `deployments/localhost.json` as `orderBookDex`.
@@ -37,5 +37,5 @@ If `EQUITY_TOKEN_ADDRESS` is not set, the demo deploys a fresh EquityToken.
 ## Tests
 
 ```bash
-npx hardhat test test/stage4_OrderBookDEX.test.js
+npx hardhat test test/orderbook-dex.test.js
 ```

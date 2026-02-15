@@ -236,6 +236,40 @@
     </div>
 
     <div class="section">
+      <h2 class="section-title">Stock controls</h2>
+      <div class="form-grid">
+        <div>
+          <label for="lifecycle-symbol">Symbol</label>
+          <select id="lifecycle-symbol"></select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="symbol-freeze-btn" type="button">Freeze</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="symbol-unfreeze-btn" type="button">Unfreeze</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="symbol-delist-btn" type="button">Delist</button>
+        </div>
+      </div>
+      <div id="lifecycle-status" class="status">Ready</div>
+      <table style="margin-top:12px">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Status</th>
+            <th>Visible On Markets</th>
+            <th>Tradable</th>
+          </tr>
+        </thead>
+        <tbody id="lifecycle-table-body"></tbody>
+      </table>
+    </div>
+
+    <div class="section">
       <h2 class="section-title">Order book (open)</h2>
       <!-- ongoing order thats looking to be filled -->
       <table>
@@ -288,6 +322,13 @@
     const levAdminLeverage = document.getElementById("lev-admin-leverage");
     const levAdminCreateBtn = document.getElementById("lev-admin-create-btn");
     const levAdminStatus = document.getElementById("lev-admin-status");
+    const lifecycleSymbol = document.getElementById("lifecycle-symbol");
+    const symbolFreezeBtn = document.getElementById("symbol-freeze-btn");
+    const symbolUnfreezeBtn = document.getElementById("symbol-unfreeze-btn");
+    const symbolDelistBtn = document.getElementById("symbol-delist-btn");
+    const lifecycleStatus = document.getElementById("lifecycle-status");
+    const lifecycleTableBody = document.getElementById("lifecycle-table-body");
+    let lifecycleBySymbol = {};
     // JSDOM
     const LISTABLE_STOCKS = [
       { symbol: "AAPL", name: "Apple Inc" },
@@ -350,6 +391,15 @@
       levAdminStatus.style.color = nextColor;
     }
 
+    function setLifecycleStatus(text, isError = false) {
+      lifecycleStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      lifecycleStatus.style.color = nextColor;
+    }
+
     async function loadDividendSymbols() {
       const res = await fetch("/api/registry/listings");
       const data = await res.json();
@@ -367,41 +417,88 @@
       }
     }
 
-    async function loadListableStocks() {
-      let listedSet = new Set();
-      try {
-        const res = await fetch("/api/registry/listings");
-        const data = await res.json();
-        let listed = [];
-        if (Array.isArray(data.listings)) {
-          listed = data.listings;
-        }
-        const listedSymbols = [];
-        for (let i = 0; i < listed.length; i += 1) {
-          const item = listed[i];
-          const itemSymbol = String(item.symbol || "").toUpperCase();
-          listedSymbols.push(itemSymbol);
-        }
-        listedSet = new Set(listedSymbols);
-      } catch {
-        listedSet = new Set();
+    async function loadLifecycleTable() {
+      const res = await fetch("/api/admin/symbols/status");
+      const data = await res.json();
+      lifecycleTableBody.innerHTML = "";
+      lifecycleSymbol.innerHTML = "";
+      lifecycleBySymbol = {};
+      const rows = Array.isArray(data.symbols) ? data.symbols : [];
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i];
+        lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
+        const opt = document.createElement("option");
+        opt.value = row.symbol;
+        opt.textContent = row.symbol;
+        lifecycleSymbol.appendChild(opt);
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${row.symbol}</td>
+          <td>${row.status}</td>
+          <td>${row.visibleOnMarkets}</td>
+          <td>${row.tradable}</td>
+        `;
+        lifecycleTableBody.appendChild(tr);
       }
+    }
 
+    async function changeSymbolLifecycle(action) {
+      try {
+        const symbol = String(lifecycleSymbol.value || "").toUpperCase();
+        if (!symbol) {
+          setLifecycleStatus("Select symbol first", true);
+          return;
+        }
+        setLifecycleStatus(`Submitting ${action}`);
+        const res = await fetch(`/api/admin/symbols/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ symbol }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Lifecycle update failed");
+        }
+        setLifecycleStatus(`${symbol} set to ${data.status}`);
+        await loadLifecycleTable();
+      } catch (err) {
+        setLifecycleStatus(err.message || "Lifecycle update failed", true);
+      }
+    }
+
+    async function loadListableStocks() {
       listStock.innerHTML = "";
       let firstUnlistedValue = "";
+      let firstRelistValue = "";
       for (const stock of LISTABLE_STOCKS) {
         const option = document.createElement("option");
         option.value = stock.symbol;
-        const isListed = listedSet.has(stock.symbol);
-        option.textContent = isListed
-          ? `${stock.name} (${stock.symbol}) — LISTED`
-          : `${stock.name} (${stock.symbol})`;
-        option.disabled = isListed;
-        if (!isListed && !firstUnlistedValue) {
+        const row = lifecycleBySymbol[String(stock.symbol).toUpperCase()];
+        let status = "";
+        if (row && row.status) {
+          status = String(row.status).toUpperCase();
+        }
+        if (status === "ACTIVE") {
+          option.textContent = `${stock.name} (${stock.symbol}) — LISTED`;
+          option.disabled = true;
+        } else if (status === "FROZEN" || status === "DELISTED") {
+          option.textContent = `${stock.name} (${stock.symbol}) — RELIST`;
+          option.disabled = false;
+          if (!firstRelistValue) {
+            firstRelistValue = stock.symbol;
+          }
+        } else {
+          option.textContent = `${stock.name} (${stock.symbol})`;
+          option.disabled = false;
+        }
+        if (!option.disabled && !firstUnlistedValue) {
           firstUnlistedValue = stock.symbol;
         }
         listStock.appendChild(option);
       }
+      if (firstRelistValue) {
+        listStock.value = firstRelistValue;
+      } else
       if (firstUnlistedValue) {
         listStock.value = firstUnlistedValue;
       }
@@ -441,21 +538,38 @@
           setListStatus("Please select a company", true);
           return;
         }
-        if (listStock.selectedOptions[0] && listStock.selectedOptions[0].disabled) {
+        const lifecycleRow = lifecycleBySymbol[symbol];
+        const lifecycleStatus = lifecycleRow ? String(lifecycleRow.status).toUpperCase() : "";
+        if (listStock.selectedOptions[0] && listStock.selectedOptions[0].disabled && lifecycleStatus === "ACTIVE") {
           setListStatus(`${symbol} is already listed`, true);
           return;
         }
-        setListStatus("Listing symbol");
-        const res = await fetch("/api/equity/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ symbol, name }),
-        });
+        let res;
+        if (lifecycleStatus === "DELISTED" || lifecycleStatus === "FROZEN") {
+          setListStatus("Reactivating symbol");
+          res = await fetch("/api/admin/symbols/list", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ symbol }),
+          });
+        } else {
+          setListStatus("Listing symbol");
+          res = await fetch("/api/equity/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ symbol, name }),
+          });
+        }
         const data = await res.json();
         if (!res.ok || data.error) {
           throw new Error(data.error || "Listing failed");
         }
-        setListStatus(`Listed ${symbol} Tx: ${data.txHash}`);
+        if (lifecycleStatus === "DELISTED" || lifecycleStatus === "FROZEN") {
+          setListStatus(`Relisted ${symbol}`);
+        } else {
+          setListStatus(`Listed ${symbol} Tx: ${data.txHash}`);
+        }
+        await loadLifecycleTable();
         await loadListableStocks();
         await loadDividendSymbols();
       } catch (err) {
@@ -486,10 +600,14 @@
     listCreateBtn.addEventListener("click", createListing);
     divDistributeBtn.addEventListener("click", distributeDividend);
     levAdminCreateBtn.addEventListener("click", createLeveragedProduct);
-
+    symbolFreezeBtn.addEventListener("click", () => changeSymbolLifecycle("freeze"));
+    symbolUnfreezeBtn.addEventListener("click", () => changeSymbolLifecycle("unfreeze"));
+    symbolDelistBtn.addEventListener("click", () => changeSymbolLifecycle("delist"));
     (async function () {
+      await loadLifecycleTable();
       await loadListableStocks();
       await loadDividendSymbols();
+      await loadLifecycleTable();
       const openRes = await fetch("/api/orderbook/open");
       const openData = await openRes.json();
       // rest api

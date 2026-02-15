@@ -12,9 +12,9 @@ Implement a capped ERC-20 stable token “TToken” serving as the base trading 
   * Defines roles: DEFAULT_ADMIN_ROLE, MINTER_ROLE
   * Implements `airdropOnce()` mapping to prevent repeat claims
   * Fixed cap set in constructor
-* `scripts/stage1/deploy.js`
+* `scripts/deploy-ttoken.js`
 * `scripts/stage1/instructions.md`
-* `test/stage1_TToken.test.js`
+* `test/ttoken.test.js`
 
 ## Tests
 

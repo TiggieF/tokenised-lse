@@ -82,8 +82,8 @@ describe("Stage 2 — Listings & Factory", function () {
     const registry = fixture.registry;
     const factory = fixture.factory;
 
-    await factory.connect(admin).createEquityToken("LSE", "London Stock Exchange");
-    const tokenAddress = await registry.getListing("LSE");
+    await factory.connect(admin).createEquityToken("NVDA", "NVIDIA Corp");
+    const tokenAddress = await registry.getListing("NVDA");
 
     expect(tokenAddress).to.not.equal(ethers.ZeroAddress);
   });
@@ -94,8 +94,8 @@ describe("Stage 2 — Listings & Factory", function () {
     const registry = fixture.registry;
     const factory = fixture.factory;
 
-    const symbol = "LSE";
-    const name = "London Stock Exchange";
+    const symbol = "NVDA";
+    const name = "NVIDIA Corp";
 
     await factory.connect(admin).createEquityToken(symbol, name);
 

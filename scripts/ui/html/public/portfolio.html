@@ -119,6 +119,17 @@
       color: var(--accent);
       font-weight: 600;
     }
+    .market-alert {
+      margin-top: 10px;
+      margin-bottom: 6px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: rgba(224, 76, 76, 0.12);
+      color: var(--accent);
+      font-weight: 700;
+      border: 1px solid rgba(224, 76, 76, 0.35);
+      font-size: 13px;
+    }
 
     table {
       width: 100%;
@@ -212,6 +223,7 @@
 
     <div class="summary-grid" id="summary-grid"></div>
     <div id="drift-status" class="status status-ok">Rebuild vs aggregator: pending</div>
+    <div id="market-alert" class="market-alert" style="display:none"></div>
 
     <div class="section-header">
       <h2 class="section-title">Holdings</h2>
@@ -224,10 +236,8 @@
           <th>Quantity</th>
           <th>Avg Cost</th>
           <th>Current</th>
-          <th>Source</th>
           <th>Cost Basis</th>
           <th>Market Value</th>
-          <th>Realized</th>
         </tr>
       </thead>
       <tbody id="positions-body"></tbody>
@@ -259,7 +269,6 @@
           <th>Base Price</th>
           <th>Qty</th>
           <th>Avg Entry NAV (value of one unit)</th>
-          <th>Current NAV(value of one unit)</th>
           <th>Current Value</th>
           <th>Action</th>
         </tr>
@@ -277,8 +286,10 @@
     const dividendsStatus = document.getElementById("dividends-status");
     const leveragedStatus = document.getElementById("leveraged-status");
     const driftStatus = document.getElementById("drift-status");
+    const marketAlert = document.getElementById("market-alert");
     const refreshBtn = document.getElementById("refresh-btn");
     const leveragedBody = document.getElementById("leveraged-body");
+    let lifecycleBySymbol = {};
 
     let currentWallet = "";
     let pollingEnabled = false;
@@ -294,26 +305,39 @@
       return `$${num.toFixed(2)}`;
     }
 
+    function formatUsdFromWeiExact(valueWei) {
+      let wei = BigInt(String(valueWei));
+      let negative = false;
+      if (wei < 0n) {
+        negative = true;
+        wei = -wei;
+      }
+      const dollars = wei / 1000000000000000000n;
+      const cents = (wei % 1000000000000000000n) / 10000000000000000n;
+      const centsText = String(cents).padStart(2, "0");
+      let text = `$${dollars.toString()}.${centsText}`;
+      if (negative) {
+        text = `-${text}`;
+      }
+      return text;
+    }
+
     function formatCents(cents) {
       const num = Number(cents) / 100;
       return `$${num.toFixed(2)}`;
     }
 
-    function gainClass(valueWei) {
-      const n = Number(valueWei);
-      if (n > 0) return "gain positive";
-      if (n < 0) return "gain negative";
-      return "gain neutral";
-    }
-
     function renderSummary(summary) {
+      const totalValueWei = BigInt(String(summary.totalValueWei));
+      const totalCostBasisWei = BigInt(String(summary.totalCostBasisWei));
+      const profitWei = totalValueWei - totalCostBasisWei;
       const cards = [
         ["Cash", formatUsdFromWei(summary.cashValueWei)],
         ["Stock Value", formatUsdFromWei(summary.stockValueWei)],
         ["Leveraged Value", formatUsdFromWei(summary.leveragedValueWei)],
         ["Total Value", formatUsdFromWei(summary.totalValueWei)],
         ["Cost Basis", formatUsdFromWei(summary.totalCostBasisWei)],
-        ["Realized PnL", formatUsdFromWei(summary.realizedPnlWei)],
+        // ["Profit", formatUsdFromWeiExact(profitWei.toString())],
       ];
       summaryGrid.innerHTML = "";
       for (const [label, value] of cards) {
@@ -328,27 +352,59 @@
       positionsBody.innerHTML = "";
       if (!positions.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="8" class="muted">No holdings yet</td>';
+        tr.innerHTML = '<td colspan="6" class="muted">No holdings yet</td>';
         positionsBody.appendChild(tr);
         return;
       }
 
       for (const p of positions) {
+        const lifecycleRow = lifecycleBySymbol[String(p.symbol).toUpperCase()];
+        let lifecycle = "ACTIVE";
+        if (lifecycleRow && lifecycleRow.status) {
+          lifecycle = String(lifecycleRow.status).toUpperCase();
+        }
+        const isTradable = lifecycle === "ACTIVE";
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${p.symbol}</td>
           <td>${formatWeiToToken(p.balanceWei, 2)}</td>
           <td>${formatCents(p.avgCostCents)}</td>
           <td>${formatCents(p.priceCents)}</td>
-          <td>${p.priceSource}</td>
           <td>${formatUsdFromWei(p.costBasisWei)}</td>
           <td>${formatUsdFromWei(p.currentValueWei)}</td>
-          <td class="${gainClass(p.realizedPnlWei)}">${formatUsdFromWei(p.realizedPnlWei)}</td>
         `;
-        tr.addEventListener("click", () => {
-          window.location.href = `/sell.html?symbol=${encodeURIComponent(p.symbol)}`;
-        });
+        if (isTradable) {
+          tr.style.cursor = "pointer";
+          tr.addEventListener("click", () => {
+            window.location.href = `/sell.html?symbol=${encodeURIComponent(p.symbol)}`;
+          });
+        } else {
+          tr.style.opacity = "0.75";
+          tr.title = `${p.symbol} is ${lifecycle} by admin and cannot be traded`;
+        }
         positionsBody.appendChild(tr);
+      }
+    }
+
+    function renderMarketAlert(positions) {
+      const blockedSymbols = [];
+      for (let i = 0; i < positions.length; i += 1) {
+        const p = positions[i];
+        const lifecycleRow = lifecycleBySymbol[String(p.symbol).toUpperCase()];
+        let lifecycle = "ACTIVE";
+        if (lifecycleRow && lifecycleRow.status) {
+          lifecycle = String(lifecycleRow.status).toUpperCase();
+        }
+        if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+          blockedSymbols.push(`${p.symbol} (${lifecycle})`);
+        }
+      }
+      if (blockedSymbols.length > 0) {
+        marketAlert.style.display = "block";
+        marketAlert.textContent = `Trading is blocked by admin for: ${blockedSymbols.join(", ")}`;
+      } else {
+        marketAlert.style.display = "none";
+        marketAlert.textContent = "";
       }
     }
 
@@ -456,7 +512,7 @@
       leveragedBody.innerHTML = "";
       if (!items.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="7" class="muted">No leveraged positions</td>';
+        tr.innerHTML = '<td colspan="6" class="muted">No leveraged positions</td>';
         leveragedBody.appendChild(tr);
         return;
       }
@@ -485,7 +541,6 @@
           <td>${formatCents(item.basePriceCents)}</td>
           <td>${formatWeiToToken(item.qtyWei, 6)}</td>
           <td>${formatCents(item.avgEntryPriceCents)}</td>
-          <td>${formatCents(item.navCents)}</td>
           <td>${formatUsdFromWei(item.currentValueWei)}</td>
         `;
         tr.appendChild(actionTd);
@@ -496,17 +551,25 @@
     async function refreshPortfolio() {
       holdingsStatus.textContent = "Loading";
 
-      const [summaryRes, positionsRes, claimablesRes, leveragedRes] = await Promise.all([
+      const [summaryRes, positionsRes, claimablesRes, leveragedRes, lifecycleRes] = await Promise.all([
         fetch(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
         fetch(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
         fetch(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
         fetch(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
+        fetch("/api/admin/symbols/status"),
       ]);
 
       const summaryData = await summaryRes.json();
       const positionsData = await positionsRes.json();
       const claimablesData = await claimablesRes.json();
       const leveragedData = await leveragedRes.json();
+      const lifecycleData = await lifecycleRes.json();
+      const lifecycleRows = Array.isArray(lifecycleData.symbols) ? lifecycleData.symbols : [];
+      lifecycleBySymbol = {};
+      for (let i = 0; i < lifecycleRows.length; i += 1) {
+        const row = lifecycleRows[i];
+        lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
+      }
 
       if (!summaryRes.ok || summaryData.error) {
         holdingsStatus.textContent = summaryData.error;
@@ -519,6 +582,7 @@
 
       renderSummary(summaryData);
       renderPositions(positionsData.positions);
+      renderMarketAlert(positionsData.positions);
       renderClaimables(claimablesData.claimables);
       renderLeveragedPositions(leveragedData.positions);
       if (summaryData.drift) {
@@ -567,6 +631,18 @@
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       currentWallet = accounts[0];
       walletEl.textContent = `Wallet: ${currentWallet}`;
+      try {
+        const lifecycleRes = await fetch("/api/admin/symbols/status");
+        const lifecycleData = await lifecycleRes.json();
+        const rows = Array.isArray(lifecycleData.symbols) ? lifecycleData.symbols : [];
+        lifecycleBySymbol = {};
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
+        }
+      } catch {
+        lifecycleBySymbol = {};
+      }
       await refreshPortfolio();
       setPolling(pollingEnabled);
     })();

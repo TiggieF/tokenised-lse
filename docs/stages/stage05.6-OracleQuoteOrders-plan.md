@@ -98,7 +98,7 @@ This plan assumes **constructor injection**.
   - implement `tokenToSymbol` reverse mapping + getter
 
 ### Tests
-- `test/stage5_6_OracleQuoteOrders.test.js`
+- `test/oracle-quote-orders.test.js`
 
 ### Docs
 - This plan file: `stage05.6-OracleQuoteOrders-plan.md`
@@ -204,7 +204,7 @@ Emit once per `buyExactQuoteAtOracle` call.
 
 ## 5.6.9 Test plan
 
-Create `test/stage5_6_OracleQuoteOrders.test.js`.
+Create `test/oracle-quote-orders.test.js`.
 
 ### 5.6.9.1 Fixture setup
 - Deploy:

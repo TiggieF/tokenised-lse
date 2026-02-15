@@ -158,6 +158,20 @@
       color: var(--muted);
       margin-top: 8px;
     }
+    .price-change {
+      margin-left: 8px;
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .price-change.positive {
+      color: #1b8b8b;
+    }
+    .price-change.negative {
+      color: #e04c4c;
+    }
+    .price-change.neutral {
+      color: var(--muted);
+    }
 
     .status-error {
       color: #e04c4c;
@@ -222,6 +236,18 @@
       font-size: 14px;
       background: #fff;
     }
+    .admin-lock {
+      margin-top: 10px;
+      margin-bottom: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(224, 76, 76, 0.14);
+      border: 1px solid rgba(224, 76, 76, 0.35);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 13px;
+      display: none;
+    }
 
   </style>
 </head>
@@ -235,6 +261,7 @@
         <!-- auto buy placeholder -->
       </div>
     </div>
+    <div id="admin-lock-banner" class="admin-lock"></div>
 
     <div class="grid">
       <div class="card">
@@ -262,7 +289,7 @@
           </div>
           <div class="qty">
             <button type="button">-</button>
-            <div>1000</div>
+            <div>100</div>
             <button type="button">+</button>
           </div>
           <div class="stat-row">
@@ -283,11 +310,13 @@
           </div>
           <div class="input-row">
             <label>Order size</label>
-            <input type="text" id="auto-qty" value="1000" />
+            <input type="text" id="auto-qty" value="100" />
           </div>
-          <div class="actions">
+        <div class="actions">
             <button class="btn btn-buy" id="auto-buy-btn" type="button">Set Auto Buy</button>
           </div>
+          <div class="muted-note" id="auto-rules-title">Auto buy rules</div>
+          <div id="auto-rules-list"></div>
           <div class="muted-note" id="auto-status">Ready</div>
         </div>
 
@@ -308,15 +337,17 @@
         <span class="muted">Base live price</span>
         <strong>
           <span id="lev-base-price">-</span>
+          <span id="lev-base-change" class="price-change neutral">-</span>
         </strong>
       </div>
       <div class="input-row">
         <label>Buy amount in TToken</label>
-        <input type="text" id="lev-ttoken-in" value="1000" />
+        <input type="text" id="lev-ttoken-in" value="100" />
       </div>
       <div class="actions">
         <button class="btn btn-buy" id="lev-mint-btn" type="button">Buy</button>
       </div>
+      <div class="muted-note" id="lev-token-address" style="display:none"></div>
       <div class="muted-note" id="lev-status">Ready</div>
     </div>
   </div>
@@ -339,15 +370,20 @@
     const autoQtyInput = document.getElementById("auto-qty");
     const autoStatus = document.getElementById("auto-status");
     const autoButton = document.getElementById("auto-buy-btn");
+    const adminLockBanner = document.getElementById("admin-lock-banner");
+    const autoRulesList = document.getElementById("auto-rules-list");
     const levProduct = document.getElementById("lev-product");
     const levSymbolEl = document.getElementById("lev-symbol");
     const levBasePriceEl = document.getElementById("lev-base-price");
+    const levBaseChangeEl = document.getElementById("lev-base-change");
     const levTtokenIn = document.getElementById("lev-ttoken-in");
     const levMintBtn = document.getElementById("lev-mint-btn");
+    const levTokenAddress = document.getElementById("lev-token-address");
     const levStatus = document.getElementById("lev-status");
     let currentAccount = "";
     let ttokenBalance = 0;
     let leveragedProducts = [];
+    let lifecycleBySymbol = {};
 
     function setWalletAddress(address) {
       currentAccount = address;
@@ -411,6 +447,25 @@
       return raw;
     }
 
+    function updateSelectedLeveragedTokenAddressHint() {
+      const selected = String(levProduct.value).toUpperCase();
+      let tokenAddress = "";
+      for (let i = 0; i < leveragedProducts.length; i += 1) {
+        const item = leveragedProducts[i];
+        const itemSymbol = String(item.productSymbol).toUpperCase();
+        if (itemSymbol === selected) {
+          tokenAddress = String(item.token || "");
+        }
+      }
+      if (tokenAddress) {
+        levTokenAddress.style.display = "block";
+        levTokenAddress.textContent = `token address: ${tokenAddress}`;
+      } else {
+        levTokenAddress.style.display = "none";
+        levTokenAddress.textContent = "";
+      }
+    }
+
     function renderLeveragedProductOptions() {
       levProduct.innerHTML = "";
       for (let i = 0; i < leveragedProducts.length; i += 1) {
@@ -427,6 +482,7 @@
         levProduct.appendChild(emptyOpt);
       }
       getSelectedLeveragedSymbol();
+      updateSelectedLeveragedTokenAddressHint();
     }
 
     async function loadLeveragedBaseQuote() {
@@ -434,6 +490,8 @@
       const parsed = readProductFields(productSymbol);
       if (!parsed.baseSymbol) {
         levBasePriceEl.textContent = "-";
+        levBaseChangeEl.textContent = "-";
+        levBaseChangeEl.className = "price-change neutral";
         return;
       }
       try {
@@ -441,6 +499,8 @@
         const data = await res.json();
         if (!res.ok) {
           levBasePriceEl.textContent = "-";
+          levBaseChangeEl.textContent = "-";
+          levBaseChangeEl.className = "price-change neutral";
           return;
         }
         let priceText = "-";
@@ -448,8 +508,26 @@
           priceText = formatUsd(data.regularMarketPrice);
         }
         levBasePriceEl.textContent = priceText;
+        let pct = 0;
+        if (data.regularMarketChangePercent !== undefined) {
+          pct = Number(data.regularMarketChangePercent);
+        }
+        if (!Number.isFinite(pct)) {
+          pct = 0;
+        }
+        const sign = pct > 0 ? "+" : "";
+        levBaseChangeEl.textContent = `${sign}${pct.toFixed(2)}%`;
+        if (pct > 0) {
+          levBaseChangeEl.className = "price-change positive";
+        } else if (pct < 0) {
+          levBaseChangeEl.className = "price-change negative";
+        } else {
+          levBaseChangeEl.className = "price-change neutral";
+        }
       } catch {
         levBasePriceEl.textContent = "-";
+        levBaseChangeEl.textContent = "-";
+        levBaseChangeEl.className = "price-change neutral";
       }
     }
 
@@ -467,6 +545,7 @@
               productSymbol: fields.productSymbol,
               baseSymbol: fields.baseSymbol,
               leverage: fields.leverage,
+              token: fromApi.token,
             };
           }
         }
@@ -541,10 +620,10 @@
     function updateBuyQty(nextValue) {
       let value = Number(nextValue);
       if (Number.isNaN(value)) {
-        value = 1000;
+        value = 100;
       }
-      if (value < 1000) {
-        value = 1000;
+      if (value < 100) {
+        value = 100;
       }
       buyQtyValue.textContent = String(value);
       updateEstimatedCost(value);
@@ -598,6 +677,83 @@
       ttokenBalanceEl.textContent = balance.toFixed(2);
     }
 
+    async function loadAutoRules() {
+      if (!currentAccount) {
+        autoRulesList.innerHTML = "";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/autotrade/rules?wallet=${encodeURIComponent(currentAccount)}`);
+        const data = await res.json();
+        autoRulesList.innerHTML = "";
+        const rows = Array.isArray(data.rules) ? data.rules : [];
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          if (String(row.side).toUpperCase() !== "BUY") {
+            continue;
+          }
+          const block = document.createElement("div");
+          block.className = "stat-row";
+          const left = document.createElement("span");
+          left.className = "muted";
+          left.textContent = `${row.symbol} <= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
+          const rightButton = document.createElement("button");
+          rightButton.className = "btn btn-buy";
+          rightButton.style.padding = "6px 10px";
+          rightButton.style.fontSize = "12px";
+          rightButton.textContent = "Cancel";
+          rightButton.addEventListener("click", async () => {
+            await fetch("/api/autotrade/rules/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ruleId: row.id }),
+            });
+            await loadAutoRules();
+          });
+          block.appendChild(left);
+          block.appendChild(rightButton);
+          autoRulesList.appendChild(block);
+        }
+      } catch {
+        autoRulesList.innerHTML = "";
+      }
+    }
+
+    function updateLifecycleUi() {
+      const symbol = getSymbolFromSelect();
+      const row = lifecycleBySymbol[String(symbol).toUpperCase()];
+      let lifecycle = "ACTIVE";
+      if (row && row.status) {
+        lifecycle = String(row.status).toUpperCase();
+      }
+      const blocked = lifecycle === "FROZEN" || lifecycle === "DELISTED";
+      if (blocked) {
+        adminLockBanner.style.display = "block";
+        adminLockBanner.textContent = `${symbol} is ${lifecycle} by admin. Buying is disabled`;
+      } else {
+        adminLockBanner.style.display = "none";
+        adminLockBanner.textContent = "";
+      }
+      buyButton.style.display = blocked ? "none" : "block";
+      autoButton.style.display = blocked ? "none" : "block";
+    }
+
+    async function loadLifecycleStatuses() {
+      try {
+        const res = await fetch("/api/admin/symbols/status");
+        const data = await res.json();
+        const rows = Array.isArray(data.symbols) ? data.symbols : [];
+        lifecycleBySymbol = {};
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
+        }
+      } catch {
+        lifecycleBySymbol = {};
+      }
+      updateLifecycleUi();
+    }
+
     function showNoFunds(messageEl) {
       messageEl.textContent = "no enough fund";
       messageEl.classList.add("status-error");
@@ -640,13 +796,13 @@
 
     buyMinusButton.addEventListener("click", () => {
       const currentValue = Number(buyQtyValue.textContent);
-      const nextValue = currentValue - 1000;
+      const nextValue = currentValue - 100;
       updateBuyQty(nextValue);
     });
 
     buyPlusButton.addEventListener("click", () => {
       const currentValue = Number(buyQtyValue.textContent);
-      const nextValue = currentValue + 1000;
+      const nextValue = currentValue + 100;
       updateBuyQty(nextValue);
     });
 
@@ -657,6 +813,16 @@
 
     buyButton.addEventListener("click", async () => {
       const symbol = getSymbolFromSelect();
+      const lifecycleRow = lifecycleBySymbol[String(symbol).toUpperCase()];
+      let lifecycle = "ACTIVE";
+      if (lifecycleRow && lifecycleRow.status) {
+        lifecycle = String(lifecycleRow.status).toUpperCase();
+      }
+      if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+        showNoFunds(buyStatus);
+        buyStatus.textContent = `${symbol} is ${lifecycle} by admin`;
+        return;
+      }
       if (!symbol) {
         showNoFunds(buyStatus);
         buyStatus.textContent = "No listed symbol selected";
@@ -677,26 +843,54 @@
 
     autoButton.addEventListener("click", async () => {
       const symbol = getSymbolFromSelect();
+      const lifecycleRow = lifecycleBySymbol[String(symbol).toUpperCase()];
+      let lifecycle = "ACTIVE";
+      if (lifecycleRow && lifecycleRow.status) {
+        lifecycle = String(lifecycleRow.status).toUpperCase();
+      }
+      if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+        showNoFunds(autoStatus);
+        autoStatus.textContent = `${symbol} is ${lifecycle} by admin`;
+        return;
+      }
       if (!symbol) {
         showNoFunds(autoStatus);
         autoStatus.textContent = "No listed symbol selected";
         return;
       }
       const priceCents = parsePriceToCents(autoPriceInput.value);
-      const qty = Number(autoQtyInput.value);
-      if (qty > ttokenBalance) {
+      const qtyWei = tokenTextToWei(autoQtyInput.value);
+      showStatus(autoStatus, "Submitting");
+      const res = await fetch("/api/autotrade/rules/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wallet: currentAccount,
+          symbol,
+          side: "BUY",
+          triggerPriceCents: priceCents,
+          qtyWei,
+          maxSlippageBps: 0,
+          enabled: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
         showNoFunds(autoStatus);
+        autoStatus.textContent = data.error || "Rule create failed";
         return;
       }
-      showStatus(autoStatus, "Submitting");
-      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
-      showStatus(autoStatus, `Auto buy set: ${String(hash)}`);
-      await loadTTokenBalance();
+      showStatus(autoStatus, "Auto buy rule set");
+      await loadAutoRules();
     });
 
     levProduct.addEventListener("change", async () => {
       getSelectedLeveragedSymbol();
+      updateSelectedLeveragedTokenAddressHint();
       await loadLeveragedBaseQuote();
+    });
+    tradeSymbol.addEventListener("change", () => {
+      updateLifecycleUi();
     });
 
 
@@ -724,6 +918,10 @@
           return;
         }
         levStatus.textContent = `Bought leveraged tx ${data.txHash}`;
+        if (data.productToken) {
+          levTokenAddress.style.display = "block";
+          levTokenAddress.textContent = `token address: ${data.productToken}`;
+        }
         await loadTTokenBalance();
       } catch (err) {
         levStatus.textContent = err.message;
@@ -732,7 +930,9 @@
 
     (async function () {
       await loadListedSymbols();
+      await loadLifecycleStatuses();
       await loadLeveragedProducts();
+      updateBuyQty(100);
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",
@@ -740,13 +940,16 @@
       );
       setWalletAddress(accounts[0]);
       await loadTTokenBalance();
+      await loadAutoRules();
       await loadLeveragedBaseQuote();
     })();
     window.ethereum.on("accountsChanged", (accounts) => {
       setWalletAddress(accounts[0]);
       loadTTokenBalance();
+      loadAutoRules();
       loadLeveragedBaseQuote();
     });
+    setInterval(loadLifecycleStatuses, 5000);
   </script>
 </body>
 </html>

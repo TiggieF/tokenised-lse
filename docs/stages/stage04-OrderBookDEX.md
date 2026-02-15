@@ -25,7 +25,7 @@ This document locks Stage 4 design choices and expands the spec into a contract 
 ## 0) Deliverables
 
 - `contracts/OrderBookDEX.sol`
-- `test/stage4_OrderBookDEX.test.js`
+- `test/orderbook-dex.test.js`
 
 ---
 

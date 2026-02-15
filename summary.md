@@ -220,12 +220,12 @@ Key demo scripts:
 ## Tests
 
 Key test suites:
-- `test/stage1_TToken.test.js`
-- `test/stage2_Listings.test.js`
-- `test/stage3_PriceFeed.test.js`
-- `test/stage4_OrderBookDEX.test.js`
-- `test/stage5_Dividends.test.js`
-- `test/stage5_5_QuoteBoundedOrders.test.js`
-- `test/stage5_6_OracleQuoteOrders.test.js`
-- `test/stage6_Award.test.js`
-- `test/stage7_Aggregator.test.js`
+- `test/ttoken.test.js`
+- `test/listings-factory.test.js`
+- `test/pricefeed.test.js`
+- `test/orderbook-dex.test.js`
+- `test/dividends.test.js`
+- `test/quote-bounded-orders.test.js`
+- `test/oracle-quote-orders.test.js`
+- `test/award.test.js`
+- `test/portfolio-aggregator.test.js`
