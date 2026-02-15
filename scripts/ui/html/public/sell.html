@@ -199,6 +199,17 @@
       font-size: 12px;
       color: var(--muted);
     }
+    .admin-lock {
+      margin-bottom: 12px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: rgba(224, 76, 76, 0.14);
+      border: 1px solid rgba(224, 76, 76, 0.35);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 13px;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -211,6 +222,7 @@
         <!-- auto sell placeholder -->
       </div>
     </div>
+    <div id="admin-lock-banner" class="admin-lock"></div>
 
     <div class="grid">
       <div class="card" id="sell-panel">
@@ -223,7 +235,7 @@
         </div>
         <div class="stat-row">
           <span class="muted">Owned</span>
-          <strong>1000.00</strong>
+          <strong>100.00</strong>
         </div>
         <div class="stat-row">
           <span class="muted">Live price</span>
@@ -235,7 +247,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" id="sell-now-panel">
         <h2 class="card-title">Sell now</h2>
         <div class="input-row">
           <label>Limit price (USD)</label>
@@ -243,7 +255,7 @@
         </div>
         <div class="qty">
           <button type="button">-</button>
-          <div>1000</div>
+          <div>100</div>
           <button type="button">+</button>
         </div>
         <div class="stat-row">
@@ -265,11 +277,13 @@
         </div>
         <div class="input-row">
           <label>Order size</label>
-          <input type="text" id="auto-qty" value="1000" />
+          <input type="text" id="auto-qty" value="100" />
         </div>
         <div class="actions">
           <button class="btn btn-auto" id="auto-sell-btn" type="button">Set Auto Sell</button>
         </div>
+        <div class="muted-note">Auto sell rules</div>
+        <div id="auto-rules-list"></div>
         <div class="muted-note" id="auto-status">Ready</div>
       </div>
     </div>
@@ -291,7 +305,10 @@
     const autoQtyInput = document.getElementById("auto-qty");
     const autoButton = document.getElementById("auto-sell-btn");
     const autoStatus = document.getElementById("auto-status");
+    const autoRulesList = document.getElementById("auto-rules-list");
+    const adminLockBanner = document.getElementById("admin-lock-banner");
     let currentAccount = "";
+    let symbolLifecycle = "ACTIVE";
 
     function setWalletAddress(address) {
       currentAccount = address;
@@ -302,6 +319,7 @@
     const modeSell = document.getElementById("mode-sell");
     const modeAuto = document.getElementById("mode-auto");
     const sellPanel = document.getElementById("sell-panel");
+    const sellNowPanel = document.getElementById("sell-now-panel");
     const autoPanel = document.getElementById("auto-panel");
 
     function setMode(mode) {
@@ -309,12 +327,14 @@
         modeSell.classList.add("active");
         modeAuto.classList.remove("active");
         sellPanel.classList.remove("panel-hidden");
+        sellNowPanel.classList.remove("panel-hidden");
         autoPanel.classList.add("panel-hidden");
         return;
       }
       modeSell.classList.remove("active");
       modeAuto.classList.add("active");
       sellPanel.classList.add("panel-hidden");
+      sellNowPanel.classList.add("panel-hidden");
       autoPanel.classList.remove("panel-hidden");
     }
 
@@ -329,10 +349,10 @@
     function updateSellQty(nextValue) {
       let value = Number(nextValue);
       if (Number.isNaN(value)) {
-        value = 1000;
+        value = 100;
       }
-      if (value < 1000) {
-        value = 1000;
+      if (value < 100) {
+        value = 100;
       }
       sellQtyValue.textContent = String(value);
       updateEstimatedProceeds(value);
@@ -352,13 +372,13 @@
 
     sellMinusButton.addEventListener("click", () => {
       const currentValue = Number(sellQtyValue.textContent);
-      const nextValue = currentValue - 1000;
+      const nextValue = currentValue - 100;
       updateSellQty(nextValue);
     });
 
     sellPlusButton.addEventListener("click", () => {
       const currentValue = Number(sellQtyValue.textContent);
-      const nextValue = currentValue + 1000;
+      const nextValue = currentValue + 100;
       updateSellQty(nextValue);
     });
 
@@ -374,9 +394,12 @@
         }
       );
       setWalletAddress(accounts[0]);
+      await loadAutoRules();
+      updateSellQty(100);
     })();
     window.ethereum.on("accountsChanged", (accounts) => {
       setWalletAddress(accounts[0]);
+      loadAutoRules();
     });
 
     const symbolTitle = document.getElementById("symbol-title");
@@ -392,11 +415,112 @@
       symbolLabel.textContent = "AAPL";
     }
 
+    function updateLifecycleUi() {
+      const blocked = symbolLifecycle === "FROZEN" || symbolLifecycle === "DELISTED";
+      if (blocked) {
+        adminLockBanner.style.display = "block";
+        adminLockBanner.textContent = `${symbolLabel.textContent} is ${symbolLifecycle} by admin. Selling is disabled`;
+      } else {
+        adminLockBanner.style.display = "none";
+        adminLockBanner.textContent = "";
+      }
+      sellButton.style.display = blocked ? "none" : "block";
+      autoButton.style.display = blocked ? "none" : "block";
+    }
+
+    async function loadLifecycleForCurrentSymbol() {
+      try {
+        const res = await fetch("/api/admin/symbols/status");
+        const data = await res.json();
+        const rows = Array.isArray(data.symbols) ? data.symbols : [];
+        symbolLifecycle = "ACTIVE";
+        const currentSymbol = String(symbolLabel.textContent).toUpperCase();
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          if (String(row.symbol).toUpperCase() === currentSymbol) {
+            symbolLifecycle = String(row.status || "ACTIVE").toUpperCase();
+          }
+        }
+      } catch {
+        symbolLifecycle = "ACTIVE";
+      }
+      updateLifecycleUi();
+    }
+
     function parsePriceToCents(text) {
       const cleaned = text.replace("$", "").replace(",", "");
       const value = Number(cleaned);
       const cents = Math.round(value * 100);
       return cents;
+    }
+
+    function tokenTextToWei(textValue) {
+      const raw = String(textValue).trim();
+      if (!raw) {
+        return "0";
+      }
+      const parts = raw.split(".");
+      const wholePart = parts[0].replace(/[^0-9]/g, "");
+      let fractionPart = "";
+      if (parts.length > 1) {
+        fractionPart = parts[1].replace(/[^0-9]/g, "");
+      }
+      let whole = wholePart;
+      if (!whole) {
+        whole = "0";
+      }
+      let fraction = fractionPart;
+      if (fraction.length > 18) {
+        fraction = fraction.slice(0, 18);
+      }
+      while (fraction.length < 18) {
+        fraction += "0";
+      }
+      const wei = (BigInt(whole) * 1000000000000000000n) + BigInt(fraction);
+      return wei.toString();
+    }
+
+    async function loadAutoRules() {
+      if (!currentAccount) {
+        autoRulesList.innerHTML = "";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/autotrade/rules?wallet=${encodeURIComponent(currentAccount)}`);
+        const data = await res.json();
+        autoRulesList.innerHTML = "";
+        const rows = Array.isArray(data.rules) ? data.rules : [];
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          if (String(row.side).toUpperCase() !== "SELL") {
+            continue;
+          }
+          const block = document.createElement("div");
+          block.className = "stat-row";
+          const left = document.createElement("span");
+          left.className = "muted";
+          left.textContent = `${row.symbol} >= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
+          const rightButton = document.createElement("button");
+          rightButton.className = "btn btn-auto";
+          rightButton.style.padding = "6px 10px";
+          rightButton.style.fontSize = "12px";
+          rightButton.textContent = row.enabled ? "Disable" : "Enable";
+          rightButton.addEventListener("click", async () => {
+            const url = row.enabled ? "/api/autotrade/rules/disable" : "/api/autotrade/rules/enable";
+            await fetch(url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ruleId: row.id }),
+            });
+            await loadAutoRules();
+          });
+          block.appendChild(left);
+          block.appendChild(rightButton);
+          autoRulesList.appendChild(block);
+        }
+      } catch {
+        autoRulesList.innerHTML = "";
+      }
     }
 
     async function placeLimitOrder(side, priceCents, qty) {
@@ -421,6 +545,10 @@
     }
 
     sellButton.addEventListener("click", async () => {
+      if (symbolLifecycle === "FROZEN" || symbolLifecycle === "DELISTED") {
+        sellStatus.textContent = `${symbolLabel.textContent} is ${symbolLifecycle} by admin`;
+        return;
+      }
       const priceCents = parsePriceToCents(sellPriceInput.value);
       const qtyText = document.querySelector("#sell-panel + .card .qty div").textContent;
       const qty = Number(qtyText);
@@ -430,12 +558,38 @@
     });
 
     autoButton.addEventListener("click", async () => {
+      if (symbolLifecycle === "FROZEN" || symbolLifecycle === "DELISTED") {
+        autoStatus.textContent = `${symbolLabel.textContent} is ${symbolLifecycle} by admin`;
+        return;
+      }
       const priceCents = parsePriceToCents(autoPriceInput.value);
-      const qty = Number(autoQtyInput.value);
+      const qtyWei = tokenTextToWei(autoQtyInput.value);
       autoStatus.textContent = "Submitting";
-      const hash = await placeLimitOrder("SELL", priceCents, qty);
-      autoStatus.textContent = `Auto sell set: ${String(hash)}`;
+      const res = await fetch("/api/autotrade/rules/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wallet: currentAccount,
+          symbol: symbolLabel.textContent,
+          side: "SELL",
+          triggerPriceCents: priceCents,
+          qtyWei,
+          maxSlippageBps: 0,
+          enabled: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        autoStatus.textContent = data.error || "Rule create failed";
+        return;
+      }
+      autoStatus.textContent = `Auto sell rule set id ${String(data.rule.id)}`;
+      await loadAutoRules();
     });
+
+    loadLifecycleForCurrentSymbol();
+    setInterval(loadLifecycleForCurrentSymbol, 5000);
+
   </script>
 </body>
 </html>

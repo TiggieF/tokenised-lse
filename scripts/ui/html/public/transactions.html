@@ -170,6 +170,7 @@
       <button class="pill" data-type="FILLS" type="button">Fills</button>
       <button class="pill" data-type="CASHFLOW" type="button">Cashflow</button>
       <button class="pill" data-type="TRANSFERS" type="button">Transfers</button>
+      <button class="pill" data-type="LEVERAGE" type="button">Leverage</button>
     </div>
 
     <table>
@@ -256,6 +257,15 @@
       }
       if (item.kind === "TRANSFER") {
         return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.from} -> ${item.to})`;
+      }
+      if (item.kind === "LEVERAGE_MINT") {
+        return `mint ${formatWeiToToken(item.productQtyWei)} with ${formatWeiToToken(item.ttokenInWei)} ttoken`;
+      }
+      if (item.kind === "LEVERAGE_UNWIND") {
+        return `unwind ${formatWeiToToken(item.productQtyWei)} for ${formatWeiToToken(item.ttokenOutWei)} ttoken`;
+      }
+      if (item.kind === "LEVERAGE_BURN") {
+        return `burn ${formatWeiToToken(item.productQtyWei)} leveraged token`;
       }
       return "-";
     }

@@ -402,7 +402,7 @@
         } else {
           for (const item of listings) {
             const symbol = String(item.symbol || "").toUpperCase();
-            if (!symbol || symbol === "LSE") continue;
+            if (!symbol) continue;
             const opt = document.createElement("option");
             opt.value = symbol;
             opt.textContent = symbol;

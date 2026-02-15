@@ -516,24 +516,24 @@ This document is a precise, technical handover of what is implemented and what i
 ## 6) Deploy Scripts
 
 ### 6.1 Stage 1: TToken
-**File**: `scripts/stage1/deploy.js`
+**File**: `scripts/deploy-ttoken.js`
 - Deploys TToken.
 - Writes `deployments/localhost.json` with `ttoken`.
 
 ### 6.2 Stage 2: Registry, Factory, PriceFeed
-**File**: `scripts/deployStage2.js`
+**File**: `scripts/deploy-listings.js`
 - Deploys `ListingsRegistry`, `EquityTokenFactory`, `PriceFeed`.
 - Grants factory role on registry.
 - Optionally creates default listings.
 - Writes: `listingsRegistry`, `equityTokenFactory`, `priceFeed`, `admin`, `defaultMinter`.
 
 ### 6.3 Stage 4: OrderBookDEX
-**File**: `scripts/stage4/deploy.js`
+**File**: `scripts/deploy-orderbook.js`
 - Reads `ttoken`, `listingsRegistry`, `priceFeed` from deployments.
 - Deploys `OrderBookDEX` and writes `orderBookDex`.
 
 ### 6.4 Stage 5: Dividends
-**File**: `scripts/stage5/deploy.js`
+**File**: `scripts/deploy-dividends.js`
 - Reads `ttoken` and `listingsRegistry` from deployments.
 - Deploys `Dividends` and writes `dividends`.
 

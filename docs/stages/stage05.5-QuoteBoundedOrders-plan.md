@@ -61,8 +61,8 @@ Enable users to execute a buy that is **bounded by a quote budget** (`quoteWei`)
   - Add internal helper(s) for best sell selection (reuse existing)
 
 ### Tests
-- `test/stage5_5_QuoteBoundedOrders.test.js` *(recommended filename)*  
-  or extend your existing `stage4_OrderBookDEX.test.js` with a new describe block:
+- `test/quote-bounded-orders.test.js` *(recommended filename)*  
+  or extend your existing `orderbook-dex.test.js` with a new describe block:
   - `describe("Stage 5.5 — buyExactQuote", ...)`
 
 ### Docs
@@ -304,4 +304,3 @@ The user may use PriceFeed off-chain to pick a reasonable `maxPriceCents`, but t
 This separation keeps:
 - oracle risk decoupled from execution,
 - order book as the source of executable price.
-

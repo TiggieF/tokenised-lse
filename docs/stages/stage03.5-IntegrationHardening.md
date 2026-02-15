@@ -135,7 +135,7 @@ function isFresh(string calldata symbol) external view returns (bool) {
 You identified these missing pieces, and they are worth doing now because Stage 4 will depend on them daily.
 
 ### 3.5.3a — Stage 2 deployment script (must-have)
-Create: `scripts/deployStage2.js`
+Create: `scripts/deploy-listings.js`
 
 **Responsibilities**
 - Deploy `ListingsRegistry(admin)`
@@ -172,13 +172,13 @@ You already have `updatePriceFromFinnhub.js`. Consider:
 You requested “do 5” (testing gaps). Here’s the exact set that improves Stage 4 readiness.
 
 ### 3.5.4a — ListingsRegistry tests (2A)
-Add to `stage2_Listings.test.js`:
+Add to `listings-factory.test.js`:
 - `getListingFull` returns `(token, symbol, name)`
 - `isListed(symbol)` returns true/false correctly
 - Behavior for missing symbols is defined (either returns 0/empty or reverts)
 
 ### 3.5.4b — PriceFeed tests (2C)
-Add to `stage3_PriceFeed.test.js`:
+Add to `pricefeed.test.js`:
 - `freshnessWindowSeconds` default is 60
 - admin can set window
 - non-admin cannot
@@ -226,4 +226,3 @@ These tests are small but prevent catastrophic integration mistakes later.
 - A reliable way to fetch token addresses (ListingsRegistry full view)
 - Clear unit conventions for escrow and settlement math (18dp + 2dp price)
 - Scripts to deploy a consistent environment quickly
-

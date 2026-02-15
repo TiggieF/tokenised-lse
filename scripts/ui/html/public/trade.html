@@ -62,6 +62,12 @@
       gap: 18px;
     }
 
+    .stack-col {
+      display: grid;
+      gap: 18px;
+      align-content: start;
+    }
+
     .card {
       background: rgba(255, 255, 255, 0.85);
       border-radius: 16px;
@@ -129,7 +135,7 @@
 
     .actions {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr;
       gap: 12px;
       margin-top: 8px;
     }
@@ -152,11 +158,26 @@
       color: var(--muted);
       margin-top: 8px;
     }
+    .price-change {
+      margin-left: 8px;
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .price-change.positive {
+      color: #1b8b8b;
+    }
+    .price-change.negative {
+      color: #e04c4c;
+    }
+    .price-change.neutral {
+      color: var(--muted);
+    }
 
     .status-error {
       color: #e04c4c;
       font-weight: 600;
     }
+
 
     .panel-hidden {
       display: none;
@@ -215,6 +236,19 @@
       font-size: 14px;
       background: #fff;
     }
+    .admin-lock {
+      margin-top: 10px;
+      margin-bottom: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(224, 76, 76, 0.14);
+      border: 1px solid rgba(224, 76, 76, 0.35);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 13px;
+      display: none;
+    }
+
   </style>
 </head>
 <body>
@@ -227,6 +261,7 @@
         <!-- auto buy placeholder -->
       </div>
     </div>
+    <div id="admin-lock-banner" class="admin-lock"></div>
 
     <div class="grid">
       <div class="card">
@@ -245,42 +280,75 @@
         </div>
       </div>
 
-      <div class="card" id="buy-panel">
-        <h2 class="card-title">Order size</h2>
-        <div class="input-row">
-          <label>Limit price (USD)</label>
-          <input type="text" id="buy-price" value="$395.00" />
+      <div class="stack-col">
+        <div class="card" id="buy-panel">
+          <h2 class="card-title">Order size</h2>
+          <div class="input-row">
+            <label>Limit price (USD)</label>
+            <input type="text" id="buy-price" value="$395.00" />
+          </div>
+          <div class="qty">
+            <button type="button">-</button>
+            <div>100</div>
+            <button type="button">+</button>
+          </div>
+          <div class="stat-row">
+            <span class="muted">Estimated cost</span>
+            <strong id="estimated-cost">1,000 TToken</strong>
+          </div>
+          <div class="actions">
+            <button class="btn btn-buy" id="buy-btn" type="button">Buy</button>
+          </div>
+          <div class="muted-note" id="buy-status">Ready</div>
         </div>
-        <div class="qty">
-          <button type="button">-</button>
-          <div>1000</div>
-          <button type="button">+</button>
-        </div>
-        <div class="stat-row">
-          <span class="muted">Estimated cost</span>
-          <strong id="estimated-cost">1,000 TToken</strong>
-        </div>
-        <div class="actions">
-          <button class="btn btn-buy" id="buy-btn" type="button">Buy</button>
-        </div>
-        <div class="muted-note" id="buy-status">Ready</div>
-      </div>
 
-      <div class="card panel-hidden" id="auto-panel">
-        <h2 class="card-title">Auto buy setup</h2>
-        <div class="input-row">
-          <label>Target buy price</label>
-          <input type="text" id="auto-price" value="$395.00" />
-        </div>
-        <div class="input-row">
-          <label>Order size</label>
-          <input type="text" id="auto-qty" value="1000" />
-        </div>
+        <div class="card panel-hidden" id="auto-panel">
+          <h2 class="card-title">Auto buy setup</h2>
+          <div class="input-row">
+            <label>Target buy price</label>
+            <input type="text" id="auto-price" value="$395.00" />
+          </div>
+          <div class="input-row">
+            <label>Order size</label>
+            <input type="text" id="auto-qty" value="100" />
+          </div>
         <div class="actions">
-          <button class="btn btn-buy" id="auto-buy-btn" type="button">Set Auto Buy</button>
+            <button class="btn btn-buy" id="auto-buy-btn" type="button">Set Auto Buy</button>
+          </div>
+          <div class="muted-note" id="auto-rules-title">Auto buy rules</div>
+          <div id="auto-rules-list"></div>
+          <div class="muted-note" id="auto-status">Ready</div>
         </div>
-        <div class="muted-note" id="auto-status">Ready</div>
+
       </div>
+    </div>
+
+    <div class="card" style="margin-top:18px">
+      <h2 class="card-title">Leveraged</h2>
+      <div class="input-row">
+        <label>Leveraged token</label>
+        <select class="select" id="lev-product"></select>
+      </div>
+      <div class="stat-row">
+        <span class="muted">Product</span>
+        <strong id="lev-symbol">-</strong>
+      </div>
+      <div class="stat-row">
+        <span class="muted">Base live price</span>
+        <strong>
+          <span id="lev-base-price">-</span>
+          <span id="lev-base-change" class="price-change neutral">-</span>
+        </strong>
+      </div>
+      <div class="input-row">
+        <label>Buy amount in TToken</label>
+        <input type="text" id="lev-ttoken-in" value="100" />
+      </div>
+      <div class="actions">
+        <button class="btn btn-buy" id="lev-mint-btn" type="button">Buy</button>
+      </div>
+      <div class="muted-note" id="lev-token-address" style="display:none"></div>
+      <div class="muted-note" id="lev-status">Ready</div>
     </div>
   </div>
 
@@ -302,13 +370,205 @@
     const autoQtyInput = document.getElementById("auto-qty");
     const autoStatus = document.getElementById("auto-status");
     const autoButton = document.getElementById("auto-buy-btn");
+    const adminLockBanner = document.getElementById("admin-lock-banner");
+    const autoRulesList = document.getElementById("auto-rules-list");
+    const levProduct = document.getElementById("lev-product");
+    const levSymbolEl = document.getElementById("lev-symbol");
+    const levBasePriceEl = document.getElementById("lev-base-price");
+    const levBaseChangeEl = document.getElementById("lev-base-change");
+    const levTtokenIn = document.getElementById("lev-ttoken-in");
+    const levMintBtn = document.getElementById("lev-mint-btn");
+    const levTokenAddress = document.getElementById("lev-token-address");
+    const levStatus = document.getElementById("lev-status");
     let currentAccount = "";
     let ttokenBalance = 0;
+    let leveragedProducts = [];
+    let lifecycleBySymbol = {};
 
     function setWalletAddress(address) {
       currentAccount = address;
       tradeWallet.textContent = address;
       // set wallet address for display
+    }
+
+    function readProductFields(productSymbol) {
+      const upper = String(productSymbol).toUpperCase();
+      const match = upper.match(/^([A-Z0-9]+)([35])L$/);
+      let baseSymbol = "";
+      let leverage = 5;
+      if (match) {
+        baseSymbol = match[1];
+        leverage = Number(match[2]);
+      }
+      return {
+        productSymbol: upper,
+        baseSymbol: baseSymbol,
+        leverage: leverage,
+      };
+    }
+
+    function formatUsd(value) {
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        return `$${n.toFixed(2)}`;
+      }
+      return "-";
+    }
+
+    function tokenTextToWei(textValue) {
+      const raw = String(textValue).trim();
+      if (!raw) {
+        return "0";
+      }
+      const parts = raw.split(".");
+      const wholePart = parts[0].replace(/[^0-9]/g, "");
+      let fractionPart = "";
+      if (parts.length > 1) {
+        fractionPart = parts[1].replace(/[^0-9]/g, "");
+      }
+      let whole = wholePart;
+      if (!whole) {
+        whole = "0";
+      }
+      let fraction = fractionPart;
+      if (fraction.length > 18) {
+        fraction = fraction.slice(0, 18);
+      }
+      while (fraction.length < 18) {
+        fraction += "0";
+      }
+      const wei = (BigInt(whole) * 1000000000000000000n) + BigInt(fraction);
+      return wei.toString();
+    }
+
+    function getSelectedLeveragedSymbol() {
+      const raw = String(levProduct.value).toUpperCase();
+      levSymbolEl.textContent = raw;
+      return raw;
+    }
+
+    function updateSelectedLeveragedTokenAddressHint() {
+      const selected = String(levProduct.value).toUpperCase();
+      let tokenAddress = "";
+      for (let i = 0; i < leveragedProducts.length; i += 1) {
+        const item = leveragedProducts[i];
+        const itemSymbol = String(item.productSymbol).toUpperCase();
+        if (itemSymbol === selected) {
+          tokenAddress = String(item.token || "");
+        }
+      }
+      if (tokenAddress) {
+        levTokenAddress.style.display = "block";
+        levTokenAddress.textContent = `token address: ${tokenAddress}`;
+      } else {
+        levTokenAddress.style.display = "none";
+        levTokenAddress.textContent = "";
+      }
+    }
+
+    function renderLeveragedProductOptions() {
+      levProduct.innerHTML = "";
+      for (let i = 0; i < leveragedProducts.length; i += 1) {
+        const item = leveragedProducts[i];
+        const opt = document.createElement("option");
+        opt.value = item.productSymbol;
+        opt.textContent = item.productSymbol;
+        levProduct.appendChild(opt);
+      }
+      if (leveragedProducts.length === 0) {
+        const emptyOpt = document.createElement("option");
+        emptyOpt.value = "";
+        emptyOpt.textContent = "No leveraged product";
+        levProduct.appendChild(emptyOpt);
+      }
+      getSelectedLeveragedSymbol();
+      updateSelectedLeveragedTokenAddressHint();
+    }
+
+    async function loadLeveragedBaseQuote() {
+      const productSymbol = getSelectedLeveragedSymbol();
+      const parsed = readProductFields(productSymbol);
+      if (!parsed.baseSymbol) {
+        levBasePriceEl.textContent = "-";
+        levBaseChangeEl.textContent = "-";
+        levBaseChangeEl.className = "price-change neutral";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/quote?symbol=${encodeURIComponent(parsed.baseSymbol)}`);
+        const data = await res.json();
+        if (!res.ok) {
+          levBasePriceEl.textContent = "-";
+          levBaseChangeEl.textContent = "-";
+          levBaseChangeEl.className = "price-change neutral";
+          return;
+        }
+        let priceText = "-";
+        if (data.regularMarketPrice) {
+          priceText = formatUsd(data.regularMarketPrice);
+        }
+        levBasePriceEl.textContent = priceText;
+        let pct = 0;
+        if (data.regularMarketChangePercent !== undefined) {
+          pct = Number(data.regularMarketChangePercent);
+        }
+        if (!Number.isFinite(pct)) {
+          pct = 0;
+        }
+        const sign = pct > 0 ? "+" : "";
+        levBaseChangeEl.textContent = `${sign}${pct.toFixed(2)}%`;
+        if (pct > 0) {
+          levBaseChangeEl.className = "price-change positive";
+        } else if (pct < 0) {
+          levBaseChangeEl.className = "price-change negative";
+        } else {
+          levBaseChangeEl.className = "price-change neutral";
+        }
+      } catch {
+        levBasePriceEl.textContent = "-";
+        levBaseChangeEl.textContent = "-";
+        levBaseChangeEl.className = "price-change neutral";
+      }
+    }
+
+    async function loadLeveragedProducts() {
+      const productMap = {};
+
+      try {
+        const res = await fetch("/api/leveraged/products");
+        const data = await res.json();
+        if (Array.isArray(data.products)) {
+          for (let i = 0; i < data.products.length; i += 1) {
+            const fromApi = data.products[i];
+            const fields = readProductFields(fromApi.productSymbol);
+            productMap[fields.productSymbol] = {
+              productSymbol: fields.productSymbol,
+              baseSymbol: fields.baseSymbol,
+              leverage: fields.leverage,
+              token: fromApi.token,
+            };
+          }
+        }
+      } catch {
+      }
+
+      const keys = Object.keys(productMap);
+      const items = [];
+      for (let i = 0; i < keys.length; i += 1) {
+        const key = keys[i];
+        items.push(productMap[key]);
+      }
+      items.sort((a, b) => {
+        if (a.productSymbol < b.productSymbol) {
+          return -1;
+        }
+        if (a.productSymbol > b.productSymbol) {
+          return 1;
+        }
+        return 0;
+      });
+      leveragedProducts = items;
+      renderLeveragedProductOptions();
     }
 
     async function loadListedSymbols() {
@@ -360,10 +620,10 @@
     function updateBuyQty(nextValue) {
       let value = Number(nextValue);
       if (Number.isNaN(value)) {
-        value = 1000;
+        value = 100;
       }
-      if (value < 1000) {
-        value = 1000;
+      if (value < 100) {
+        value = 100;
       }
       buyQtyValue.textContent = String(value);
       updateEstimatedCost(value);
@@ -417,6 +677,83 @@
       ttokenBalanceEl.textContent = balance.toFixed(2);
     }
 
+    async function loadAutoRules() {
+      if (!currentAccount) {
+        autoRulesList.innerHTML = "";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/autotrade/rules?wallet=${encodeURIComponent(currentAccount)}`);
+        const data = await res.json();
+        autoRulesList.innerHTML = "";
+        const rows = Array.isArray(data.rules) ? data.rules : [];
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          if (String(row.side).toUpperCase() !== "BUY") {
+            continue;
+          }
+          const block = document.createElement("div");
+          block.className = "stat-row";
+          const left = document.createElement("span");
+          left.className = "muted";
+          left.textContent = `${row.symbol} <= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
+          const rightButton = document.createElement("button");
+          rightButton.className = "btn btn-buy";
+          rightButton.style.padding = "6px 10px";
+          rightButton.style.fontSize = "12px";
+          rightButton.textContent = "Cancel";
+          rightButton.addEventListener("click", async () => {
+            await fetch("/api/autotrade/rules/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ruleId: row.id }),
+            });
+            await loadAutoRules();
+          });
+          block.appendChild(left);
+          block.appendChild(rightButton);
+          autoRulesList.appendChild(block);
+        }
+      } catch {
+        autoRulesList.innerHTML = "";
+      }
+    }
+
+    function updateLifecycleUi() {
+      const symbol = getSymbolFromSelect();
+      const row = lifecycleBySymbol[String(symbol).toUpperCase()];
+      let lifecycle = "ACTIVE";
+      if (row && row.status) {
+        lifecycle = String(row.status).toUpperCase();
+      }
+      const blocked = lifecycle === "FROZEN" || lifecycle === "DELISTED";
+      if (blocked) {
+        adminLockBanner.style.display = "block";
+        adminLockBanner.textContent = `${symbol} is ${lifecycle} by admin. Buying is disabled`;
+      } else {
+        adminLockBanner.style.display = "none";
+        adminLockBanner.textContent = "";
+      }
+      buyButton.style.display = blocked ? "none" : "block";
+      autoButton.style.display = blocked ? "none" : "block";
+    }
+
+    async function loadLifecycleStatuses() {
+      try {
+        const res = await fetch("/api/admin/symbols/status");
+        const data = await res.json();
+        const rows = Array.isArray(data.symbols) ? data.symbols : [];
+        lifecycleBySymbol = {};
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
+        }
+      } catch {
+        lifecycleBySymbol = {};
+      }
+      updateLifecycleUi();
+    }
+
     function showNoFunds(messageEl) {
       messageEl.textContent = "no enough fund";
       messageEl.classList.add("status-error");
@@ -459,13 +796,13 @@
 
     buyMinusButton.addEventListener("click", () => {
       const currentValue = Number(buyQtyValue.textContent);
-      const nextValue = currentValue - 1000;
+      const nextValue = currentValue - 100;
       updateBuyQty(nextValue);
     });
 
     buyPlusButton.addEventListener("click", () => {
       const currentValue = Number(buyQtyValue.textContent);
-      const nextValue = currentValue + 1000;
+      const nextValue = currentValue + 100;
       updateBuyQty(nextValue);
     });
 
@@ -476,6 +813,16 @@
 
     buyButton.addEventListener("click", async () => {
       const symbol = getSymbolFromSelect();
+      const lifecycleRow = lifecycleBySymbol[String(symbol).toUpperCase()];
+      let lifecycle = "ACTIVE";
+      if (lifecycleRow && lifecycleRow.status) {
+        lifecycle = String(lifecycleRow.status).toUpperCase();
+      }
+      if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+        showNoFunds(buyStatus);
+        buyStatus.textContent = `${symbol} is ${lifecycle} by admin`;
+        return;
+      }
       if (!symbol) {
         showNoFunds(buyStatus);
         buyStatus.textContent = "No listed symbol selected";
@@ -496,25 +843,96 @@
 
     autoButton.addEventListener("click", async () => {
       const symbol = getSymbolFromSelect();
+      const lifecycleRow = lifecycleBySymbol[String(symbol).toUpperCase()];
+      let lifecycle = "ACTIVE";
+      if (lifecycleRow && lifecycleRow.status) {
+        lifecycle = String(lifecycleRow.status).toUpperCase();
+      }
+      if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+        showNoFunds(autoStatus);
+        autoStatus.textContent = `${symbol} is ${lifecycle} by admin`;
+        return;
+      }
       if (!symbol) {
         showNoFunds(autoStatus);
         autoStatus.textContent = "No listed symbol selected";
         return;
       }
       const priceCents = parsePriceToCents(autoPriceInput.value);
-      const qty = Number(autoQtyInput.value);
-      if (qty > ttokenBalance) {
+      const qtyWei = tokenTextToWei(autoQtyInput.value);
+      showStatus(autoStatus, "Submitting");
+      const res = await fetch("/api/autotrade/rules/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wallet: currentAccount,
+          symbol,
+          side: "BUY",
+          triggerPriceCents: priceCents,
+          qtyWei,
+          maxSlippageBps: 0,
+          enabled: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
         showNoFunds(autoStatus);
+        autoStatus.textContent = data.error || "Rule create failed";
         return;
       }
-      showStatus(autoStatus, "Submitting");
-      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
-      showStatus(autoStatus, `Auto buy set: ${String(hash)}`);
-      await loadTTokenBalance();
+      showStatus(autoStatus, "Auto buy rule set");
+      await loadAutoRules();
+    });
+
+    levProduct.addEventListener("change", async () => {
+      getSelectedLeveragedSymbol();
+      updateSelectedLeveragedTokenAddressHint();
+      await loadLeveragedBaseQuote();
+    });
+    tradeSymbol.addEventListener("change", () => {
+      updateLifecycleUi();
+    });
+
+
+    levMintBtn.addEventListener("click", async () => {
+      try {
+        const productSymbol = getSelectedLeveragedSymbol();
+        if (!productSymbol) {
+          levStatus.textContent = "No leveraged product deployed";
+          return;
+        }
+        const ttokenInWei = tokenTextToWei(levTtokenIn.value);
+        if (!(BigInt(ttokenInWei) > 0n)) {
+          levStatus.textContent = "Buy amount must be greater than 0";
+          return;
+        }
+        levStatus.textContent = "Buying leveraged";
+        const res = await fetch("/api/leveraged/mint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallet: currentAccount, productSymbol, ttokenInWei, minOutWei: "0" }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          levStatus.textContent = data.error;
+          return;
+        }
+        levStatus.textContent = `Bought leveraged tx ${data.txHash}`;
+        if (data.productToken) {
+          levTokenAddress.style.display = "block";
+          levTokenAddress.textContent = `token address: ${data.productToken}`;
+        }
+        await loadTTokenBalance();
+      } catch (err) {
+        levStatus.textContent = err.message;
+      }
     });
 
     (async function () {
       await loadListedSymbols();
+      await loadLifecycleStatuses();
+      await loadLeveragedProducts();
+      updateBuyQty(100);
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",
@@ -522,11 +940,16 @@
       );
       setWalletAddress(accounts[0]);
       await loadTTokenBalance();
+      await loadAutoRules();
+      await loadLeveragedBaseQuote();
     })();
     window.ethereum.on("accountsChanged", (accounts) => {
       setWalletAddress(accounts[0]);
       loadTTokenBalance();
+      loadAutoRules();
+      loadLeveragedBaseQuote();
     });
+    setInterval(loadLifecycleStatuses, 5000);
   </script>
 </body>
 </html>

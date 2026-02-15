@@ -5,7 +5,7 @@ const { ethers, network } = require("hardhat");
 const DEFAULT_LISTINGS = [
   { symbol: "AAPL", name: "Apple Inc" },
   { symbol: "TSLA", name: "Tesla Inc" },
-  { symbol: "LSE", name: "London Stock Exchange" },
+  { symbol: "NVDA", name: "NVIDIA Corp" },
 ];
 
 async function ensureDir(dirPath) {

@@ -296,7 +296,7 @@
         listedStocks = [];
         for (const item of listings) {
           const symbol = String(item.symbol || "").toUpperCase();
-          if (!symbol || symbol === "LSE") continue;
+          if (!symbol) continue;
           listedStocks.push({ symbol });
         }
         if (!listedStocks.length) {
