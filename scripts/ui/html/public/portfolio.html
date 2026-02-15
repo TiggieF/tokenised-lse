@@ -165,6 +165,33 @@
       font-size: 12px;
     }
 
+    .sell-btn {
+      border: none;
+      border-radius: 10px;
+      padding: 7px 10px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .action-stack {
+      display: grid;
+      gap: 6px;
+      min-width: 130px;
+    }
+
+    .action-stack input {
+      width: 100%;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      font-family: inherit;
+      font-size: 12px;
+      background: #fff;
+    }
+
     .muted { color: var(--muted); }
 
     @media (max-width: 780px) {
@@ -201,8 +228,6 @@
           <th>Cost Basis</th>
           <th>Market Value</th>
           <th>Realized</th>
-          <th>Unrealized</th>
-          <th>% Change</th>
         </tr>
       </thead>
       <tbody id="positions-body"></tbody>
@@ -222,6 +247,25 @@
       </thead>
       <tbody id="dividends-body"></tbody>
     </table>
+
+    <div class="section-header">
+      <h2 class="section-title">Leveraged Positions</h2>
+      <div id="leveraged-status" class="status">Ready</div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th>Base Price</th>
+          <th>Qty</th>
+          <th>Avg Entry NAV (value of one unit)</th>
+          <th>Current NAV(value of one unit)</th>
+          <th>Current Value</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="leveraged-body"></tbody>
+    </table>
   </div>
 
   <script>
@@ -231,8 +275,10 @@
     const dividendsBody = document.getElementById("dividends-body");
     const holdingsStatus = document.getElementById("holdings-status");
     const dividendsStatus = document.getElementById("dividends-status");
+    const leveragedStatus = document.getElementById("leveraged-status");
     const driftStatus = document.getElementById("drift-status");
     const refreshBtn = document.getElementById("refresh-btn");
+    const leveragedBody = document.getElementById("leveraged-body");
 
     let currentWallet = "";
     let pollingEnabled = false;
@@ -264,10 +310,10 @@
       const cards = [
         ["Cash", formatUsdFromWei(summary.cashValueWei)],
         ["Stock Value", formatUsdFromWei(summary.stockValueWei)],
+        ["Leveraged Value", formatUsdFromWei(summary.leveragedValueWei)],
         ["Total Value", formatUsdFromWei(summary.totalValueWei)],
         ["Cost Basis", formatUsdFromWei(summary.totalCostBasisWei)],
         ["Realized PnL", formatUsdFromWei(summary.realizedPnlWei)],
-        ["Unrealized PnL", formatUsdFromWei(summary.unrealizedPnlWei)],
       ];
       summaryGrid.innerHTML = "";
       for (const [label, value] of cards) {
@@ -282,15 +328,13 @@
       positionsBody.innerHTML = "";
       if (!positions.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="10" class="muted">No holdings yet</td>';
+        tr.innerHTML = '<td colspan="8" class="muted">No holdings yet</td>';
         positionsBody.appendChild(tr);
         return;
       }
 
       for (const p of positions) {
         const tr = document.createElement("tr");
-        const pctNumber = Number(p.unrealizedPnlPct);
-        const pct = `${pctNumber.toFixed(2)}%`;
         tr.innerHTML = `
           <td>${p.symbol}</td>
           <td>${formatWeiToToken(p.balanceWei, 2)}</td>
@@ -300,8 +344,6 @@
           <td>${formatUsdFromWei(p.costBasisWei)}</td>
           <td>${formatUsdFromWei(p.currentValueWei)}</td>
           <td class="${gainClass(p.realizedPnlWei)}">${formatUsdFromWei(p.realizedPnlWei)}</td>
-          <td class="${gainClass(p.unrealizedPnlWei)}">${formatUsdFromWei(p.unrealizedPnlWei)}</td>
-          <td class="${gainClass(p.unrealizedPnlWei)}">${pct}</td>
         `;
         tr.addEventListener("click", () => {
           window.location.href = `/sell.html?symbol=${encodeURIComponent(p.symbol)}`;
@@ -377,18 +419,94 @@
       }
     }
 
+    async function sellLeveragedPosition(productSymbol, qtyWei) {
+      try {
+        if (!currentWallet) {
+          leveragedStatus.textContent = "Wallet not connected";
+          return;
+        }
+        const qtyNumber = Number(qtyWei);
+        if (!(qtyNumber > 0)) {
+          leveragedStatus.textContent = "qty must be greater than 0";
+          return;
+        }
+        leveragedStatus.textContent = `Selling ${productSymbol}`;
+        const res = await fetch("/api/leveraged/unwind", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            wallet: currentWallet,
+            productSymbol: productSymbol,
+            qtyWei: qtyWei,
+            minOutWei: "0",
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Sell failed");
+        }
+        leveragedStatus.textContent = `Sold ${productSymbol} Tx: ${data.txHash}`;
+        await refreshPortfolio();
+      } catch (err) {
+        leveragedStatus.textContent = err.message || "Sell failed";
+      }
+    }
+
+    function renderLeveragedPositions(items) {
+      leveragedBody.innerHTML = "";
+      if (!items.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = '<td colspan="7" class="muted">No leveraged positions</td>';
+        leveragedBody.appendChild(tr);
+        return;
+      }
+      for (const item of items) {
+        const tr = document.createElement("tr");
+        const actionTd = document.createElement("td");
+        const actionWrap = document.createElement("div");
+        actionWrap.className = "action-stack";
+
+        const sellBtn = document.createElement("button");
+        sellBtn.type = "button";
+        sellBtn.className = "sell-btn";
+        sellBtn.textContent = "Sell";
+        sellBtn.addEventListener("click", async () => {
+          try {
+            await sellLeveragedPosition(item.productSymbol, item.qtyWei);
+          } catch (err) {
+            leveragedStatus.textContent = err.message || "Sell failed";
+          }
+        });
+
+        actionWrap.appendChild(sellBtn);
+        actionTd.appendChild(actionWrap);
+        tr.innerHTML = `
+          <td>${item.productSymbol}</td>
+          <td>${formatCents(item.basePriceCents)}</td>
+          <td>${formatWeiToToken(item.qtyWei, 6)}</td>
+          <td>${formatCents(item.avgEntryPriceCents)}</td>
+          <td>${formatCents(item.navCents)}</td>
+          <td>${formatUsdFromWei(item.currentValueWei)}</td>
+        `;
+        tr.appendChild(actionTd);
+        leveragedBody.appendChild(tr);
+      }
+    }
+
     async function refreshPortfolio() {
       holdingsStatus.textContent = "Loading";
 
-      const [summaryRes, positionsRes, claimablesRes] = await Promise.all([
+      const [summaryRes, positionsRes, claimablesRes, leveragedRes] = await Promise.all([
         fetch(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
         fetch(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
         fetch(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
+        fetch(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
       ]);
 
       const summaryData = await summaryRes.json();
       const positionsData = await positionsRes.json();
       const claimablesData = await claimablesRes.json();
+      const leveragedData = await leveragedRes.json();
 
       if (!summaryRes.ok || summaryData.error) {
         holdingsStatus.textContent = summaryData.error;
@@ -402,6 +520,7 @@
       renderSummary(summaryData);
       renderPositions(positionsData.positions);
       renderClaimables(claimablesData.claimables);
+      renderLeveragedPositions(leveragedData.positions);
       if (summaryData.drift) {
         if (summaryData.drift.withinTolerance) {
           driftStatus.className = "status status-ok";
@@ -422,6 +541,7 @@
       }
       holdingsStatus.textContent = `Loaded ${positionsData.positions.length} positions`;
       dividendsStatus.textContent = "Ready";
+      leveragedStatus.textContent = "Ready";
     }
 
     function setPolling(enabled) {

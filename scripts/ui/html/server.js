@@ -141,6 +141,24 @@ const aggregatorInterface = new ethers.Interface([
 const priceFeedInterface = new ethers.Interface([
   'function getPrice(string symbol) view returns (uint256 priceCents, uint256 timestamp)',
 ]);
+const priceFeedAdminInterface = new ethers.Interface([
+  'function setPrice(string symbol, uint256 priceCents)',
+]);
+const leveragedFactoryInterface = new ethers.Interface([
+  'function createLongProduct(string baseSymbol, uint8 leverage) returns (address)',
+  'function getProductBySymbol(string productSymbol) view returns (address)',
+  'function productCount() view returns (uint256)',
+  'function getProductAt(uint256 index) view returns (tuple(string productSymbol,string baseSymbol,address baseToken,uint8 leverage,bool isLong,address token))',
+]);
+const leveragedRouterInterface = new ethers.Interface([
+  'function mintLong(address productToken, uint256 ttokenInWei, uint256 minProductOutWei) returns (uint256,uint256)',
+  'function unwindLong(address productToken, uint256 productQtyWei, uint256 minTTokenOutWei) returns (uint256,uint256)',
+  'function previewMint(address productToken, uint256 ttokenInWei) view returns (uint256,uint256)',
+  'function previewUnwind(address account, address productToken, uint256 productQtyWei) view returns (uint256,uint256)',
+  'function positions(address account, address productToken) view returns (uint256 qtyWei, uint256 avgEntryPriceCents)',
+  'event LeveragedMinted(address indexed user,address indexed productToken,string baseSymbol,uint8 leverage,uint256 ttokenInWei,uint256 productOutWei,uint256 navCents)',
+  'event LeveragedUnwound(address indexed user,address indexed productToken,string baseSymbol,uint8 leverage,uint256 productInWei,uint256 ttokenOutWei,uint256 navCents)',
+]);
 
 const INDEXER_DIR = path.join(__dirname, '../../..', 'cache', 'indexer');
 const INDEXER_STATE_FILE = path.join(INDEXER_DIR, 'state.json');
@@ -149,6 +167,7 @@ const INDEXER_FILLS_FILE = path.join(INDEXER_DIR, 'fills.json');
 const INDEXER_CANCELLATIONS_FILE = path.join(INDEXER_DIR, 'cancellations.json');
 const INDEXER_CASHFLOWS_FILE = path.join(INDEXER_DIR, 'cashflows.json');
 const INDEXER_TRANSFERS_FILE = path.join(INDEXER_DIR, 'transfers.json');
+const INDEXER_LEVERAGED_FILE = path.join(INDEXER_DIR, 'leveraged.json');
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
@@ -240,6 +259,136 @@ function normalizeAddress(address) {
   }
 }
 
+function parseLeveragedProductSymbol(productSymbol) {
+  const upper = String(productSymbol).toUpperCase();
+  const match = upper.match(/^([A-Z0-9]+)([35])L$/);
+  let baseSymbol = '';
+  let leverage = 0;
+  if (match) {
+    baseSymbol = match[1];
+    leverage = Number(match[2]);
+  }
+  return {
+    productSymbol: upper,
+    baseSymbol,
+    leverage,
+  };
+}
+
+async function ensureOnchainPriceForSymbol(symbolRaw) {
+  const symbol = String(symbolRaw).toUpperCase();
+  if (!symbol) {
+    return { ok: false, error: 'invalid symbol' };
+  }
+  const deployments = loadDeployments();
+  const priceFeedAddress = deployments.priceFeed;
+  if (!priceFeedAddress) {
+    return { ok: false, error: 'pricefeed not deployed' };
+  }
+
+  let fetchedPrice = 0;
+  try {
+    const quote = await fetchQuote(symbol);
+    if (quote.regularMarketPrice) {
+      fetchedPrice = Number(quote.regularMarketPrice);
+    }
+  } catch {
+  }
+  if (!(fetchedPrice > 0)) {
+    const cached = quoteCache.get(symbol);
+    if (cached && cached.data && cached.data.regularMarketPrice) {
+      const cachedPrice = Number(cached.data.regularMarketPrice);
+      if (cachedPrice > 0) {
+        fetchedPrice = cachedPrice;
+      }
+    }
+  }
+  if (!(fetchedPrice > 0)) {
+    try {
+      const todayEt = getETDateString();
+      let dateEt = todayEt;
+      const marketOpen = isTradingDay(todayEt);
+      if (!marketOpen) {
+        dateEt = previousTradingDay(todayEt);
+      }
+      const candles = await fetchIntradayCandles(symbol, '5m', dateEt);
+      if (candles.length > 0) {
+        const last = candles[candles.length - 1];
+        if (last && last.close) {
+          const candlePrice = Number(last.close);
+          if (candlePrice > 0) {
+            fetchedPrice = candlePrice;
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  if (fetchedPrice > 0) {
+    const livePriceCents = Math.round(fetchedPrice * 100);
+    const setResult = await setOnchainPriceForSymbol(symbol, livePriceCents);
+    if (!setResult.ok) {
+      return setResult;
+    }
+    return { ok: true, priceCents: livePriceCents };
+  }
+
+  try {
+    const readData = priceFeedInterface.encodeFunctionData('getPrice', [symbol]);
+    const readResult = await hardhatRpc('eth_call', [{ to: priceFeedAddress, data: readData }, 'latest']);
+    const [priceCentsRaw] = priceFeedInterface.decodeFunctionResult('getPrice', readResult);
+    const existingPrice = Number(priceCentsRaw);
+    if (existingPrice > 0) {
+      return { ok: true, priceCents: existingPrice };
+    }
+  } catch {
+  }
+
+  return { ok: false, error: `price unavailable for ${symbol}` };
+}
+
+async function setOnchainPriceForSymbol(symbolRaw, priceCentsRaw) {
+  const symbol = String(symbolRaw).toUpperCase();
+  const priceCents = Number(priceCentsRaw);
+  if (!symbol) {
+    return { ok: false, error: 'invalid symbol' };
+  }
+  if (!(priceCents > 0)) {
+    return { ok: false, error: 'price must be > 0' };
+  }
+
+  const deployments = loadDeployments();
+  const priceFeedAddress = deployments.priceFeed;
+  if (!priceFeedAddress) {
+    return { ok: false, error: 'pricefeed not deployed' };
+  }
+
+  let sender = '';
+  if (deployments.admin) {
+    sender = deployments.admin;
+  } else {
+    const accounts = await hardhatRpc('eth_accounts', []);
+    if (Array.isArray(accounts) && accounts.length > 0) {
+      sender = accounts[0];
+    }
+  }
+  if (!sender) {
+    return { ok: false, error: 'admin account missing for price update' };
+  }
+
+  try {
+    const writeData = priceFeedAdminInterface.encodeFunctionData('setPrice', [symbol, BigInt(priceCents)]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: sender,
+      to: priceFeedAddress,
+      data: writeData,
+    }]);
+    await waitForReceipt(txHash);
+    return { ok: true, priceCents };
+  } catch {
+    return { ok: false, error: `cannot update onchain price for ${symbol}` };
+  }
+}
 function addCashflow(cashflows, input) {
   cashflows.push({
     id: `${input.txHash}:${input.logIndex}:${input.wallet}:${input.reason}`,
@@ -296,6 +445,30 @@ async function ensureIndexerSynced() {
     const cancellations = readJsonFile(INDEXER_CANCELLATIONS_FILE, []);
     const cashflows = readJsonFile(INDEXER_CASHFLOWS_FILE, []);
     const transfers = readJsonFile(INDEXER_TRANSFERS_FILE, []);
+    const leveragedEvents = readJsonFile(INDEXER_LEVERAGED_FILE, []);
+
+    if (Number(state.lastIndexedBlock) > latestBlock) {
+      const orderIds = Object.keys(orders);
+      for (let i = 0; i < orderIds.length; i += 1) {
+        const id = orderIds[i];
+        delete orders[id];
+      }
+      fills.length = 0;
+      cancellations.length = 0;
+      cashflows.length = 0;
+      transfers.length = 0;
+      leveragedEvents.length = 0;
+      state.lastIndexedBlock = -1;
+      state.latestKnownBlock = -1;
+      state.lastSyncAtMs = Date.now();
+      writeJsonFile(INDEXER_STATE_FILE, state);
+      writeJsonFile(INDEXER_ORDERS_FILE, orders);
+      writeJsonFile(INDEXER_FILLS_FILE, fills);
+      writeJsonFile(INDEXER_CANCELLATIONS_FILE, cancellations);
+      writeJsonFile(INDEXER_CASHFLOWS_FILE, cashflows);
+      writeJsonFile(INDEXER_TRANSFERS_FILE, transfers);
+      writeJsonFile(INDEXER_LEVERAGED_FILE, leveragedEvents);
+    }
 
     const startBlock = Math.max(0, Number(state.lastIndexedBlock) + 1);
     if (startBlock > latestBlock) {
@@ -363,6 +536,29 @@ async function ensureIndexerSynced() {
     }
     const tokenAddresses = Array.from(addresses);
 
+    let leveragedLogs = [];
+    const leveragedRouterAddress = normalizeAddress(deployments.leveragedProductRouter);
+    if (leveragedRouterAddress) {
+      const leveragedTopics = [
+        ethers.id('LeveragedMinted(address,address,string,uint8,uint256,uint256,uint256)'),
+        ethers.id('LeveragedUnwound(address,address,string,uint8,uint256,uint256,uint256)'),
+      ];
+      leveragedLogs = await hardhatRpc('eth_getLogs', [{
+        fromBlock: fromHex,
+        toBlock: toHex,
+        address: leveragedRouterAddress,
+        topics: [leveragedTopics],
+      }]);
+      leveragedLogs.sort((a, b) => {
+        const blockA = Number(a.blockNumber);
+        const blockB = Number(b.blockNumber);
+        if (blockA !== blockB) {
+          return blockA - blockB;
+        }
+        return Number(a.logIndex) - Number(b.logIndex);
+      });
+    }
+
     let transferLogs = [];
     if (tokenAddresses.length > 0) {
       const transferTopic = ethers.id('Transfer(address,address,uint256)');
@@ -391,6 +587,9 @@ async function ensureIndexerSynced() {
       blocksNeeded.add(log.blockNumber);
     }
     for (const log of transferLogs) {
+      blocksNeeded.add(log.blockNumber);
+    }
+    for (const log of leveragedLogs) {
       blocksNeeded.add(log.blockNumber);
     }
 
@@ -648,6 +847,73 @@ async function ensureIndexerSynced() {
       }
     }
 
+    const existingLeveragedIds = new Set();
+    for (let i = 0; i < leveragedEvents.length; i += 1) {
+      const entry = leveragedEvents[i];
+      existingLeveragedIds.add(entry.id);
+    }
+    for (const log of leveragedLogs) {
+      const txHash = log.transactionHash;
+      const blockNumber = Number(log.blockNumber);
+      const logIndex = Number(log.logIndex);
+      const id = `${txHash}:${logIndex}`;
+      if (!existingLeveragedIds.has(id)) {
+        const parsed = leveragedRouterInterface.parseLog(log);
+        let timestampMs = Date.now();
+        const cachedTimestampMs = blockTimestampsMs.get(log.blockNumber);
+        if (cachedTimestampMs) {
+          timestampMs = cachedTimestampMs;
+        }
+        if (parsed.name === 'LeveragedMinted') {
+          leveragedEvents.push({
+            id,
+            kind: 'LEVERAGE_MINT',
+            wallet: normalizeAddress(parsed.args.user),
+            productToken: normalizeAddress(parsed.args.productToken),
+            baseSymbol: parsed.args.baseSymbol,
+            leverage: Number(parsed.args.leverage),
+            ttokenInWei: parsed.args.ttokenInWei.toString(),
+            productQtyWei: parsed.args.productOutWei.toString(),
+            navCents: parsed.args.navCents.toString(),
+            txHash,
+            blockNumber,
+            logIndex,
+            timestampMs,
+          });
+        } else if (parsed.name === 'LeveragedUnwound') {
+          leveragedEvents.push({
+            id,
+            kind: 'LEVERAGE_UNWIND',
+            wallet: normalizeAddress(parsed.args.user),
+            productToken: normalizeAddress(parsed.args.productToken),
+            baseSymbol: parsed.args.baseSymbol,
+            leverage: Number(parsed.args.leverage),
+            productQtyWei: parsed.args.productInWei.toString(),
+            ttokenOutWei: parsed.args.ttokenOutWei.toString(),
+            navCents: parsed.args.navCents.toString(),
+            txHash,
+            blockNumber,
+            logIndex,
+            timestampMs,
+          });
+          leveragedEvents.push({
+            id: `${id}:burn`,
+            kind: 'LEVERAGE_BURN',
+            wallet: normalizeAddress(parsed.args.user),
+            productToken: normalizeAddress(parsed.args.productToken),
+            baseSymbol: parsed.args.baseSymbol,
+            leverage: Number(parsed.args.leverage),
+            productQtyWei: parsed.args.productInWei.toString(),
+            txHash,
+            blockNumber,
+            logIndex: logIndex + 1,
+            timestampMs,
+          });
+        }
+        existingLeveragedIds.add(id);
+      }
+    }
+
     state.lastIndexedBlock = latestBlock;
     state.latestKnownBlock = latestBlock;
     state.lastSyncAtMs = Date.now();
@@ -658,6 +924,7 @@ async function ensureIndexerSynced() {
     writeJsonFile(INDEXER_CANCELLATIONS_FILE, cancellations);
     writeJsonFile(INDEXER_CASHFLOWS_FILE, cashflows);
     writeJsonFile(INDEXER_TRANSFERS_FILE, transfers);
+    writeJsonFile(INDEXER_LEVERAGED_FILE, leveragedEvents);
 
     return {
       synced: true,
@@ -665,6 +932,7 @@ async function ensureIndexerSynced() {
       latestBlock,
       processedLogs: logs.length,
       processedTransfers: transferLogs.length,
+      processedLeveragedLogs: leveragedLogs.length,
     };
   })()
     .catch((error) => ({ synced: false, error: error.message }))
@@ -683,6 +951,7 @@ function readIndexerSnapshot() {
     cancellations: readJsonFile(INDEXER_CANCELLATIONS_FILE, []),
     cashflows: readJsonFile(INDEXER_CASHFLOWS_FILE, []),
     transfers: readJsonFile(INDEXER_TRANSFERS_FILE, []),
+    leveragedEvents: readJsonFile(INDEXER_LEVERAGED_FILE, []),
   };
 }
 
@@ -1391,6 +1660,7 @@ app.get('/api/indexer/status', async (_req, res) => {
       cancellationCount: snapshot.cancellations.length,
       cashflowCount: snapshot.cashflows.length,
       transferCount: snapshot.transfers.length,
+      leveragedCount: snapshot.leveragedEvents.length,
       lastOrderIds,
       lastTransferIds,
     };
@@ -1405,6 +1675,7 @@ app.get('/api/indexer/status', async (_req, res) => {
         cancellations: snapshot.cancellations.length,
         cashflows: snapshot.cashflows.length,
         transfers: snapshot.transfers.length,
+        leveragedEvents: snapshot.leveragedEvents.length,
       },
     });
   } catch (err) {
@@ -1421,6 +1692,7 @@ app.post('/api/indexer/rebuild', async (_req, res) => {
     writeJsonFile(INDEXER_CANCELLATIONS_FILE, []);
     writeJsonFile(INDEXER_CASHFLOWS_FILE, []);
     writeJsonFile(INDEXER_TRANSFERS_FILE, []);
+    writeJsonFile(INDEXER_LEVERAGED_FILE, []);
     const sync = await ensureIndexerSynced();
     const snapshot = readIndexerSnapshot();
     const orderIds = [];
@@ -1449,6 +1721,7 @@ app.post('/api/indexer/rebuild', async (_req, res) => {
       cancellationCount: snapshot.cancellations.length,
       cashflowCount: snapshot.cashflows.length,
       transferCount: snapshot.transfers.length,
+      leveragedCount: snapshot.leveragedEvents.length,
       lastOrderIds,
       lastTransferIds,
     };
@@ -1464,6 +1737,7 @@ app.post('/api/indexer/rebuild', async (_req, res) => {
         cancellations: snapshot.cancellations.length,
         cashflows: snapshot.cashflows.length,
         transfers: snapshot.transfers.length,
+        leveragedEvents: snapshot.leveragedEvents.length,
       },
     });
   } catch (err) {
@@ -1627,7 +1901,7 @@ app.get('/api/txs', async (req, res) => {
   try {
     await ensureIndexerSynced();
     const snapshot = readIndexerSnapshot();
-    const { orders, fills, cancellations, cashflows, transfers } = snapshot;
+    const { orders, fills, cancellations, cashflows, transfers, leveragedEvents } = snapshot;
     const items = [];
 
     if (type === 'ALL' || type === 'ORDERS') {
@@ -1752,6 +2026,34 @@ app.get('/api/txs', async (req, res) => {
             blockNumber: transfer.blockNumber,
             timestampMs: transfer.timestampMs,
           });
+        }
+      }
+    }
+
+    if (type === 'ALL' || type === 'LEVERAGE') {
+      for (const entry of leveragedEvents) {
+        if (entry.wallet === wallet) {
+          const row = {
+            kind: entry.kind,
+            wallet,
+            symbol: entry.baseSymbol,
+            productToken: entry.productToken,
+            leverage: entry.leverage,
+            navCents: entry.navCents,
+            txHash: entry.txHash,
+            blockNumber: entry.blockNumber,
+            timestampMs: entry.timestampMs,
+          };
+          if (entry.kind === 'LEVERAGE_MINT') {
+            row.ttokenInWei = entry.ttokenInWei;
+            row.productQtyWei = entry.productQtyWei;
+          } else if (entry.kind === 'LEVERAGE_UNWIND') {
+            row.ttokenOutWei = entry.ttokenOutWei;
+            row.productQtyWei = entry.productQtyWei;
+          } else if (entry.kind === 'LEVERAGE_BURN') {
+            row.productQtyWei = entry.productQtyWei;
+          }
+          items.push(row);
         }
       }
     }
@@ -2435,7 +2737,29 @@ app.get('/api/portfolio/summary', async (req, res) => {
       realizedPnlWei += BigInt(p.realizedPnlWei);
       unrealizedPnlWei += BigInt(p.unrealizedPnlWei);
     }
-    const totalValueWei = cashWei + stockValueWei;
+    let leveragedValueWei = 0n;
+    if (deployments.leveragedTokenFactory && deployments.leveragedProductRouter) {
+      const countData = leveragedFactoryInterface.encodeFunctionData('productCount', []);
+      const countResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedTokenFactory, data: countData }, 'latest']);
+      const [countRaw] = leveragedFactoryInterface.decodeFunctionResult('productCount', countResult);
+      const count = Number(countRaw);
+      for (let i = 0; i < count; i += 1) {
+        const itemData = leveragedFactoryInterface.encodeFunctionData('getProductAt', [i]);
+        const itemResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedTokenFactory, data: itemData }, 'latest']);
+        const [item] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', itemResult);
+        const positionData = leveragedRouterInterface.encodeFunctionData('positions', [wallet, item.token]);
+        const positionResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedProductRouter, data: positionData }, 'latest']);
+        const [qtyWeiRaw] = leveragedRouterInterface.decodeFunctionResult('positions', positionResult);
+        const qtyWei = qtyWeiRaw.toString();
+        if (BigInt(qtyWei) > 0n) {
+          const quoteData = leveragedRouterInterface.encodeFunctionData('previewUnwind', [wallet, item.token, BigInt(qtyWei)]);
+          const quoteResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedProductRouter, data: quoteData }, 'latest']);
+          const [ttokenOutWeiRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', quoteResult);
+          leveragedValueWei += BigInt(ttokenOutWeiRaw.toString());
+        }
+      }
+    }
+    const totalValueWei = cashWei + stockValueWei + leveragedValueWei;
 
     let aggregator = null;
     let drift = null;
@@ -2485,6 +2809,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
       wallet,
       cashValueWei: cashWei.toString(),
       stockValueWei: stockValueWei.toString(),
+      leveragedValueWei: leveragedValueWei.toString(),
       totalValueWei: totalValueWei.toString(),
       totalCostBasisWei: totalCostBasisWei.toString(),
       realizedPnlWei: realizedPnlWei.toString(),
@@ -3041,6 +3366,410 @@ app.get('/api/aggregator/summary', async (req, res) => {
       stockValueWei: stockValueWei.toString(),
       totalValueWei: totalValueWei.toString(),
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/leveraged/products/create', async (req, res) => {
+  try {
+    const body = req.body;
+    const baseSymbol = String(body.baseSymbol).toUpperCase();
+    const leverage = Number(body.leverage);
+    if (!baseSymbol || !Number.isFinite(leverage)) {
+      return res.status(400).json({ error: 'baseSymbol and leverage are required' });
+    }
+
+    const deployments = loadDeployments();
+    const factoryAddress = deployments.leveragedTokenFactory;
+    if (!factoryAddress) {
+      return res.status(400).json({ error: 'leveraged factory not deployed' });
+    }
+
+    const data = leveragedFactoryInterface.encodeFunctionData('createLongProduct', [baseSymbol, leverage]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: deployments.admin,
+      to: factoryAddress,
+      data,
+    }]);
+    await waitForReceipt(txHash);
+
+    const lookupData = leveragedFactoryInterface.encodeFunctionData('getProductBySymbol', [`${baseSymbol}${leverage}L`]);
+    const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
+    const [productToken] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
+
+    res.json({
+      txHash,
+      baseSymbol,
+      leverage,
+      productSymbol: `${baseSymbol}${leverage}L`,
+      productToken,
+    });
+  } catch (err) {
+    const message = String(err.message || '');
+    let cleanedError = message;
+    const reasonMatch = message.match(/reverted with reason string '([^']+)'/);
+    if (reasonMatch) {
+      cleanedError = reasonMatch[1];
+    }
+    let statusCode = 500;
+    if (cleanedError.includes('product exists')) {
+      statusCode = 400;
+    } else if (cleanedError.includes('base not listed')) {
+      statusCode = 400;
+    } else if (cleanedError.includes('leverage not allowed')) {
+      statusCode = 400;
+    } else if (cleanedError.includes('router not set')) {
+      statusCode = 400;
+    }
+    res.status(statusCode).json({ error: cleanedError });
+  }
+});
+
+app.get('/api/leveraged/products', async (_req, res) => {
+  try {
+    const deployments = loadDeployments();
+    const factoryAddress = deployments.leveragedTokenFactory;
+    if (!factoryAddress) {
+      return res.json({ products: [] });
+    }
+
+    const countData = leveragedFactoryInterface.encodeFunctionData('productCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: countData }, 'latest']);
+    const [countRaw] = leveragedFactoryInterface.decodeFunctionResult('productCount', countResult);
+    const count = Number(countRaw);
+
+    const products = [];
+    for (let i = 0; i < count; i += 1) {
+      const itemData = leveragedFactoryInterface.encodeFunctionData('getProductAt', [i]);
+      const itemResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: itemData }, 'latest']);
+      const [item] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', itemResult);
+      products.push({
+        productSymbol: item.productSymbol,
+        baseSymbol: item.baseSymbol,
+        baseToken: item.baseToken,
+        leverage: Number(item.leverage),
+        isLong: item.isLong,
+        token: item.token,
+      });
+    }
+    res.json({ products });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/leveraged/mint', async (req, res) => {
+  try {
+    const body = req.body;
+    const wallet = normalizeAddress(String(body.wallet));
+    const productSymbol = String(body.productSymbol).toUpperCase();
+    const ttokenInWei = BigInt(String(body.ttokenInWei));
+    let minOutWei = 0n;
+    if (body.minOutWei) {
+      minOutWei = BigInt(String(body.minOutWei));
+    }
+    if (!wallet || !productSymbol || ttokenInWei <= 0n) {
+      return res.status(400).json({ error: 'wallet, productSymbol, ttokenInWei are required' });
+    }
+
+    const deployments = loadDeployments();
+    const factoryAddress = deployments.leveragedTokenFactory;
+    const routerAddress = deployments.leveragedProductRouter;
+    const ttokenAddress = getTTokenAddressFromDeployments();
+    if (!factoryAddress || !routerAddress || !ttokenAddress) {
+      return res.status(400).json({ error: 'leveraged contracts not deployed' });
+    }
+
+    const lookupData = leveragedFactoryInterface.encodeFunctionData('getProductBySymbol', [productSymbol]);
+    const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
+    const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
+    const productToken = normalizeAddress(productTokenRaw);
+    if (!productToken || productToken === ethers.ZeroAddress) {
+      return res.status(404).json({ error: 'product not found' });
+    }
+
+    const parsedProduct = parseLeveragedProductSymbol(productSymbol);
+    if (parsedProduct.baseSymbol) {
+      const ensurePriceResult = await ensureOnchainPriceForSymbol(parsedProduct.baseSymbol);
+      if (!ensurePriceResult.ok) {
+        return res.status(400).json({ error: ensurePriceResult.error });
+      }
+    }
+
+    const approveData = equityTokenInterface.encodeFunctionData('approve', [routerAddress, ttokenInWei]);
+    const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: ttokenAddress,
+      data: approveData,
+    }]);
+    await waitForReceipt(approveTxHash);
+
+    const mintData = leveragedRouterInterface.encodeFunctionData('mintLong', [productToken, ttokenInWei, minOutWei]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: routerAddress,
+      data: mintData,
+    }]);
+    await waitForReceipt(txHash);
+
+    res.json({ txHash, approveTxHash, wallet, productSymbol, productToken, ttokenInWei: ttokenInWei.toString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/leveraged/unwind', async (req, res) => {
+  try {
+    const body = req.body;
+    const wallet = normalizeAddress(String(body.wallet));
+    const productSymbol = String(body.productSymbol).toUpperCase();
+    const qtyWei = BigInt(String(body.qtyWei));
+    let minOutWei = 0n;
+    if (body.minOutWei) {
+      minOutWei = BigInt(String(body.minOutWei));
+    }
+    if (!wallet || !productSymbol || qtyWei <= 0n) {
+      return res.status(400).json({ error: 'wallet, productSymbol, qtyWei are required' });
+    }
+
+    const deployments = loadDeployments();
+    const factoryAddress = deployments.leveragedTokenFactory;
+    const routerAddress = deployments.leveragedProductRouter;
+    const ttokenAddress = getTTokenAddressFromDeployments();
+    if (!factoryAddress || !routerAddress || !ttokenAddress) {
+      return res.status(400).json({ error: 'leveraged contracts not deployed' });
+    }
+
+    const lookupData = leveragedFactoryInterface.encodeFunctionData('getProductBySymbol', [productSymbol]);
+    const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
+    const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
+    const productToken = normalizeAddress(productTokenRaw);
+    if (!productToken || productToken === ethers.ZeroAddress) {
+      return res.status(404).json({ error: 'product not found' });
+    }
+
+    const parsedProduct = parseLeveragedProductSymbol(productSymbol);
+    if (parsedProduct.baseSymbol) {
+      const ensurePriceResult = await ensureOnchainPriceForSymbol(parsedProduct.baseSymbol);
+      if (!ensurePriceResult.ok) {
+        return res.status(400).json({ error: ensurePriceResult.error });
+      }
+    }
+
+    const previewData = leveragedRouterInterface.encodeFunctionData('previewUnwind', [wallet, productToken, qtyWei]);
+    const previewResult = await hardhatRpc('eth_call', [{ to: routerAddress, data: previewData }, 'latest']);
+    const [ttokenOutWeiRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', previewResult);
+    const expectedOutWei = BigInt(ttokenOutWeiRaw.toString());
+
+    const routerBalanceData = equityTokenInterface.encodeFunctionData('balanceOf', [routerAddress]);
+    const routerBalanceResult = await hardhatRpc('eth_call', [{ to: ttokenAddress, data: routerBalanceData }, 'latest']);
+    const [routerBalanceRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', routerBalanceResult);
+    const routerBalanceWei = BigInt(routerBalanceRaw.toString());
+
+    if (routerBalanceWei < expectedOutWei) {
+      const topUpWei = expectedOutWei - routerBalanceWei;
+      const mintData = equityTokenInterface.encodeFunctionData('mint', [routerAddress, topUpWei]);
+      const mintTxHash = await hardhatRpc('eth_sendTransaction', [{
+        from: deployments.admin,
+        to: ttokenAddress,
+        data: mintData,
+      }]);
+      await waitForReceipt(mintTxHash);
+    }
+
+    const unwindData = leveragedRouterInterface.encodeFunctionData('unwindLong', [productToken, qtyWei, minOutWei]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: routerAddress,
+      data: unwindData,
+    }]);
+    await waitForReceipt(txHash);
+
+    res.json({ txHash, wallet, productSymbol, productToken, qtyWei: qtyWei.toString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/leveraged/quote', async (req, res) => {
+  try {
+    const mode = String(req.query.mode).toUpperCase();
+    const productSymbol = String(req.query.productSymbol).toUpperCase();
+    const deployments = loadDeployments();
+    const factoryAddress = deployments.leveragedTokenFactory;
+    const routerAddress = deployments.leveragedProductRouter;
+    if (!factoryAddress || !routerAddress) {
+      return res.status(400).json({ error: 'leveraged contracts not deployed' });
+    }
+
+    const lookupData = leveragedFactoryInterface.encodeFunctionData('getProductBySymbol', [productSymbol]);
+    const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
+    const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
+    const productToken = normalizeAddress(productTokenRaw);
+    if (!productToken || productToken === ethers.ZeroAddress) {
+      return res.status(404).json({ error: 'product not found' });
+    }
+
+    const parsedProduct = parseLeveragedProductSymbol(productSymbol);
+    if (parsedProduct.baseSymbol) {
+      const ensurePriceResult = await ensureOnchainPriceForSymbol(parsedProduct.baseSymbol);
+      if (!ensurePriceResult.ok) {
+        return res.status(400).json({ error: ensurePriceResult.error });
+      }
+    }
+
+    if (mode === 'MINT') {
+      const ttokenInWei = BigInt(String(req.query.ttokenInWei));
+      const data = leveragedRouterInterface.encodeFunctionData('previewMint', [productToken, ttokenInWei]);
+      const result = await hardhatRpc('eth_call', [{ to: routerAddress, data }, 'latest']);
+      const [productOutWei, navCents] = leveragedRouterInterface.decodeFunctionResult('previewMint', result);
+      return res.json({
+        mode: 'MINT',
+        productSymbol,
+        productToken,
+        productOutWei: productOutWei.toString(),
+        navCents: navCents.toString(),
+      });
+    }
+
+    if (mode === 'UNWIND') {
+      const wallet = normalizeAddress(String(req.query.wallet));
+      const qtyWei = BigInt(String(req.query.qtyWei));
+      const data = leveragedRouterInterface.encodeFunctionData('previewUnwind', [wallet, productToken, qtyWei]);
+      const result = await hardhatRpc('eth_call', [{ to: routerAddress, data }, 'latest']);
+      const [ttokenOutWei, navCents] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', result);
+      return res.json({
+        mode: 'UNWIND',
+        wallet,
+        productSymbol,
+        productToken,
+        ttokenOutWei: ttokenOutWei.toString(),
+        navCents: navCents.toString(),
+      });
+    }
+
+    return res.status(400).json({ error: 'mode must be MINT or UNWIND' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/leveraged/price-adjust', async (req, res) => {
+  try {
+    const body = req.body;
+    const productSymbol = String(body.productSymbol || '').toUpperCase();
+    const changePct = Number(body.changePct);
+    if (!productSymbol || !Number.isFinite(changePct)) {
+      return res.status(400).json({ error: 'productSymbol and changePct are required' });
+    }
+
+    const parsed = parseLeveragedProductSymbol(productSymbol);
+    if (!parsed.baseSymbol) {
+      return res.status(400).json({ error: 'invalid productSymbol' });
+    }
+
+    const currentPriceResult = await ensureOnchainPriceForSymbol(parsed.baseSymbol);
+    if (!currentPriceResult.ok) {
+      return res.status(400).json({ error: currentPriceResult.error });
+    }
+
+    const currentPriceCents = Number(currentPriceResult.priceCents);
+    const nextPriceFloat = currentPriceCents * (1 + (changePct / 100));
+    let nextPriceCents = Math.round(nextPriceFloat);
+    if (nextPriceCents < 1) {
+      nextPriceCents = 1;
+    }
+
+    const updateResult = await setOnchainPriceForSymbol(parsed.baseSymbol, nextPriceCents);
+    if (!updateResult.ok) {
+      return res.status(400).json({ error: updateResult.error });
+    }
+
+    res.json({
+      productSymbol,
+      baseSymbol: parsed.baseSymbol,
+      changePct,
+      previousPriceCents: currentPriceCents,
+      nextPriceCents,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/leveraged/positions', async (req, res) => {
+  try {
+    const wallet = normalizeAddress(String(req.query.wallet));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    const deployments = loadDeployments();
+    const factoryAddress = deployments.leveragedTokenFactory;
+    const routerAddress = deployments.leveragedProductRouter;
+    if (!factoryAddress || !routerAddress) {
+      return res.json({ wallet, positions: [] });
+    }
+
+    const countData = leveragedFactoryInterface.encodeFunctionData('productCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: countData }, 'latest']);
+    const [countRaw] = leveragedFactoryInterface.decodeFunctionResult('productCount', countResult);
+    const count = Number(countRaw);
+
+    const positions = [];
+    for (let i = 0; i < count; i += 1) {
+      const itemData = leveragedFactoryInterface.encodeFunctionData('getProductAt', [i]);
+      const itemResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: itemData }, 'latest']);
+      const [item] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', itemResult);
+
+      const positionData = leveragedRouterInterface.encodeFunctionData('positions', [wallet, item.token]);
+      const positionResult = await hardhatRpc('eth_call', [{ to: routerAddress, data: positionData }, 'latest']);
+      const [qtyWeiRaw, avgEntryPriceCentsRaw] = leveragedRouterInterface.decodeFunctionResult('positions', positionResult);
+      const qtyWei = qtyWeiRaw.toString();
+      const avgEntryPriceCents = avgEntryPriceCentsRaw.toString();
+      if (BigInt(qtyWei) > 0n) {
+        const quoteData = leveragedRouterInterface.encodeFunctionData('previewUnwind', [wallet, item.token, BigInt(qtyWei)]);
+        const quoteResult = await hardhatRpc('eth_call', [{ to: routerAddress, data: quoteData }, 'latest']);
+        const [ttokenOutWeiRaw, navCentsRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', quoteResult);
+        const currentValueWei = ttokenOutWeiRaw.toString();
+        const navCents = navCentsRaw.toString();
+        const costBasisWei = (BigInt(qtyWei) / BigInt(Number(item.leverage))).toString();
+        const unrealizedPnlWei = (BigInt(currentValueWei) - BigInt(costBasisWei)).toString();
+        const currentPriceWei = ((BigInt(currentValueWei) * 1000000000000000000n) / BigInt(qtyWei)).toString();
+        let basePriceCents = 0;
+        let baseChangePct = 0;
+        try {
+          const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
+          if (quote.regularMarketPrice) {
+            basePriceCents = Math.round(Number(quote.regularMarketPrice) * 100);
+          }
+          if (quote.regularMarketChangePercent) {
+            baseChangePct = Number(quote.regularMarketChangePercent) * 100;
+          }
+        } catch {
+        }
+        if (!(basePriceCents > 0)) {
+          basePriceCents = Number(navCents);
+        }
+        positions.push({
+          productSymbol: item.productSymbol,
+          baseSymbol: item.baseSymbol,
+          leverage: Number(item.leverage),
+          token: item.token,
+          qtyWei,
+          avgEntryPriceCents,
+          navCents,
+          currentValueWei,
+          currentPriceWei,
+          costBasisWei,
+          unrealizedPnlWei,
+          basePriceCents,
+          baseChangePct,
+        });
+      }
+    }
+
+    res.json({ wallet, positions });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

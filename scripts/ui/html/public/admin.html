@@ -214,6 +214,28 @@
     </div>
 
     <div class="section">
+      <h2 class="section-title">Leveraged products</h2>
+      <div class="form-grid">
+        <div>
+          <label for="lev-admin-symbol">Base symbol</label>
+          <select id="lev-admin-symbol"></select>
+        </div>
+        <div>
+          <label for="lev-admin-leverage">Leverage</label>
+          <select id="lev-admin-leverage">
+            <option value="3">3x</option>
+            <option value="5" selected>5x</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="lev-admin-create-btn" type="button">Create leveraged token</button>
+        </div>
+      </div>
+      <div id="lev-admin-status" class="status">Ready</div>
+    </div>
+
+    <div class="section">
       <h2 class="section-title">Order book (open)</h2>
       <!-- ongoing order thats looking to be filled -->
       <table>
@@ -262,6 +284,10 @@
     const divPerShare = document.getElementById("div-per-share");
     const divDistributeBtn = document.getElementById("div-distribute-btn");
     const divStatus = document.getElementById("div-status");
+    const levAdminSymbol = document.getElementById("lev-admin-symbol");
+    const levAdminLeverage = document.getElementById("lev-admin-leverage");
+    const levAdminCreateBtn = document.getElementById("lev-admin-create-btn");
+    const levAdminStatus = document.getElementById("lev-admin-status");
     // JSDOM
     const LISTABLE_STOCKS = [
       { symbol: "AAPL", name: "Apple Inc" },
@@ -315,15 +341,29 @@
       listStatus.style.color = nextColor;
     }
 
+    function setLeveragedStatus(text, isError = false) {
+      levAdminStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      levAdminStatus.style.color = nextColor;
+    }
+
     async function loadDividendSymbols() {
       const res = await fetch("/api/registry/listings");
       const data = await res.json();
       divSymbol.innerHTML = "";
+      levAdminSymbol.innerHTML = "";
       for (const item of data.listings || []) {
         const option = document.createElement("option");
         option.value = item.symbol;
         option.textContent = item.symbol;
         divSymbol.appendChild(option);
+        const levOption = document.createElement("option");
+        levOption.value = item.symbol;
+        levOption.textContent = item.symbol;
+        levAdminSymbol.appendChild(levOption);
       }
     }
 
@@ -423,8 +463,29 @@
       }
     }
 
+    async function createLeveragedProduct() {
+      try {
+        const baseSymbol = String(levAdminSymbol.value).toUpperCase();
+        const leverage = Number(levAdminLeverage.value);
+        setLeveragedStatus("Creating leveraged token");
+        const res = await fetch("/api/leveraged/products/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ baseSymbol, leverage }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Leveraged creation failed");
+        }
+        setLeveragedStatus(`Created ${data.productSymbol} Tx: ${data.txHash}`);
+      } catch (err) {
+        setLeveragedStatus(err.message || "Leveraged creation failed", true);
+      }
+    }
+
     listCreateBtn.addEventListener("click", createListing);
     divDistributeBtn.addEventListener("click", distributeDividend);
+    levAdminCreateBtn.addEventListener("click", createLeveragedProduct);
 
     (async function () {
       await loadListableStocks();
