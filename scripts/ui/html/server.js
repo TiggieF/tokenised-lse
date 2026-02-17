@@ -4724,7 +4724,7 @@ app.post('/api/equity/mint', async (req, res) => {
     return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
-  if (!amountIsNumber || amount < 1000) {
+  if (!amountIsNumber || amount < 100) {
     return res.status(400).json({ error: '' });
   }
 
@@ -4771,7 +4771,7 @@ app.post('/api/equity/create-mint', async (req, res) => {
     return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
-  if (!amountIsNumber || amount < 1000) {
+  if (!amountIsNumber || amount < 100) {
     return res.status(400).json({ error: '' });
   }
 
