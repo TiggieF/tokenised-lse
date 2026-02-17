@@ -31,7 +31,7 @@ interface IListingsRegistry {
 }
 
 interface IAward {
-    function recordTrade(address trader, uint256 quoteVolume)
+    function recordTradeQty(address trader, uint256 qtyWei)
         external;
 }
 
@@ -264,8 +264,8 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
 
             IERC20(equityToken).safeTransfer(taker, fillQty);
             ttoken.safeTransfer(maker.trader, tradeQuote);
-            recordTrade(maker.trader, tradeQuote);
-            recordTrade(taker, tradeQuote);
+            recordTradeQty(maker.trader, fillQty);
+            recordTradeQty(taker, fillQty);
 
             emit OrderFilled(maker.id, 0, equityToken, maker.price, fillQty);
         }
@@ -350,8 +350,8 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
 
             IERC20(equityToken).safeTransfer(taker.trader, fillQty);
             ttoken.safeTransfer(maker.trader, tradeValue);
-            recordTrade(maker.trader, tradeValue);
-            recordTrade(taker.trader, tradeValue);
+            recordTradeQty(maker.trader, fillQty);
+            recordTradeQty(taker.trader, fillQty);
             if (refund > 0) {
                 ttoken.safeTransfer(taker.trader, refund);
                 // refund the difference if the price is better than the taker expected
@@ -386,8 +386,8 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
 
             IERC20(equityToken).safeTransfer(maker.trader, fillQty);
             ttoken.safeTransfer(taker.trader, tradeValue);
-            recordTrade(maker.trader, tradeValue);
-            recordTrade(taker.trader, tradeValue);
+            recordTradeQty(maker.trader, fillQty);
+            recordTradeQty(taker.trader, fillQty);
 
             taker.remaining -= fillQty;
             maker.remaining -= fillQty;
@@ -458,10 +458,10 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         // returns quote amount based on qty and price
     }
 
-    function recordTrade(address trader, uint256 quoteVolume) internal {
-        // record trade for award (trading competition)
+    function recordTradeQty(address trader, uint256 qtyWei) internal {
+        // record traded quantity for award
         if (address(award) != address(0)) {
-            award.recordTrade(trader, quoteVolume);
+            award.recordTradeQty(trader, qtyWei);
         }
     }
 

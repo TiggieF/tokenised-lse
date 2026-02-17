@@ -4,15 +4,15 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-interface IStage12PriceFeed {
+interface ILeveragePriceFeed {
     function getPrice(string memory symbol) external view returns (uint256 priceCents, uint256 timestamp);
 }
 
-interface IStage12LeveragedFactory {
+interface ILeverageProductFactory {
     function isProductToken(address token) external view returns (bool);
 }
 
-interface IStage12LeveragedToken {
+interface ILeverageProductToken {
     function baseSymbol() external view returns (string memory);
     function leverage() external view returns (uint8);
     function mintFromRouter(address to, uint256 amountWei) external;
@@ -21,8 +21,8 @@ interface IStage12LeveragedToken {
 
 contract LeveragedProductRouter is AccessControl, ReentrancyGuard {
     IERC20 public immutable ttoken;
-    IStage12PriceFeed public immutable priceFeed;
-    IStage12LeveragedFactory public immutable factory;
+    ILeveragePriceFeed public immutable priceFeed;
+    ILeverageProductFactory public immutable factory;
 
     struct UserPosition {
         uint256 qtyWei;
@@ -58,8 +58,8 @@ contract LeveragedProductRouter is AccessControl, ReentrancyGuard {
         require(factoryAddress != address(0), "leveragedrouter: factory is zero");
 
         ttoken = IERC20(ttokenAddress);
-        priceFeed = IStage12PriceFeed(priceFeedAddress);
-        factory = IStage12LeveragedFactory(factoryAddress);
+        priceFeed = ILeveragePriceFeed(priceFeedAddress);
+        factory = ILeverageProductFactory(factoryAddress);
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
@@ -72,7 +72,7 @@ contract LeveragedProductRouter is AccessControl, ReentrancyGuard {
         require(factory.isProductToken(productToken), "leveragedrouter: unknown product");
         require(ttokenInWei > 0, "leveragedrouter: ttoken input is zero");
 
-        IStage12LeveragedToken token = IStage12LeveragedToken(productToken);
+        ILeverageProductToken token = ILeverageProductToken(productToken);
         string memory baseSymbol = token.baseSymbol();
         uint8 leverage = token.leverage();
 
@@ -123,7 +123,7 @@ contract LeveragedProductRouter is AccessControl, ReentrancyGuard {
         require(factory.isProductToken(productToken), "leveragedrouter: unknown product");
         require(productQtyWei > 0, "leveragedrouter: qty is zero");
 
-        IStage12LeveragedToken token = IStage12LeveragedToken(productToken);
+        ILeverageProductToken token = ILeverageProductToken(productToken);
         UserPosition storage position = positions[msg.sender][productToken];
         require(position.qtyWei >= productQtyWei, "leveragedrouter: insufficient position");
 
@@ -165,7 +165,7 @@ contract LeveragedProductRouter is AccessControl, ReentrancyGuard {
         returns (uint256 productOutWei, uint256 navCents)
     {
         require(factory.isProductToken(productToken), "leveragedrouter: unknown product");
-        IStage12LeveragedToken token = IStage12LeveragedToken(productToken);
+        ILeverageProductToken token = ILeverageProductToken(productToken);
         string memory baseSymbol = token.baseSymbol();
         uint8 leverage = token.leverage();
 
@@ -180,7 +180,7 @@ contract LeveragedProductRouter is AccessControl, ReentrancyGuard {
         returns (uint256 ttokenOutWei, uint256 navCents)
     {
         require(factory.isProductToken(productToken), "leveragedrouter: unknown product");
-        IStage12LeveragedToken token = IStage12LeveragedToken(productToken);
+        ILeverageProductToken token = ILeverageProductToken(productToken);
         string memory baseSymbol = token.baseSymbol();
         uint8 leverage = token.leverage();
         UserPosition storage position = positions[account][productToken];

@@ -25,7 +25,7 @@ async function main() {
 
   const isLocal = network.name === "localhost" || network.name === "hardhat";
   if (isLocal) {
-    const deploymentsPath = path.join(__dirname, "..", "..", "deployments", "localhost.json");
+    const deploymentsPath = path.join(__dirname, "..", "deployments", "localhost.json");
 
     let deployments = {};
     try {

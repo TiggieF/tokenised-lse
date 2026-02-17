@@ -8,21 +8,22 @@ interface ITTokenMintable {
 }
 
 contract Award is AccessControl {
-    uint256 public constant EPOCH_DURATION = 10;
-    uint256 public constant REWARD_AMOUNT = 1e18;
+    uint256 public constant EPOCH_DURATION = 60;
+    uint256 public constant REWARD_AMOUNT = 100e18;
 
     ITTokenMintable public immutable ttoken;
 
     address public dex;
 
-    mapping(uint256 => mapping(address => uint256)) public volumeByEpoch;
-    mapping(uint256 => address) public topTraderByEpoch;
-    mapping(uint256 => uint256) public topVolumeByEpoch;
-    mapping(uint256 => bool) public rewarded;
+    mapping(uint256 => mapping(address => uint256)) public qtyByEpochByTrader;
+    mapping(uint256 => uint256) public maxQtyByEpoch;
+    mapping(uint256 => mapping(address => bool)) public claimedByEpoch;
+    mapping(uint256 => address[]) private tradersByEpoch;
+    mapping(uint256 => mapping(address => bool)) private traderSeenByEpoch;
 
     event DexUpdated(address indexed previousDex, address indexed newDex);
-    event TradeRecorded(uint256 indexed epochId, address indexed trader, uint256 volume);
-    event EpochFinalized(uint256 indexed epochId, address indexed winner, uint256 reward);
+    event TradeQtyRecorded(uint256 indexed epochId, address indexed trader, uint256 qtyDeltaWei, uint256 qtyTotalWei, uint256 maxQtyWei);
+    event AwardClaimed(uint256 indexed epochId, address indexed trader, uint256 rewardWei);
 
     constructor(address ttokenAddress, address admin, address dexAddress) {
         require(ttokenAddress != address(0), "award: ttoken is zero");
@@ -46,46 +47,65 @@ contract Award is AccessControl {
         return epochId;
     }
 
-    function recordTrade(address trader, uint256 quoteVolume) external {
+    function recordTradeQty(address trader, uint256 qtyWei) external {
         require(msg.sender == dex, "award: only dex");
         require(trader != address(0), "award: trader is zero");
-        require(quoteVolume > 0, "award: volume is zero");
+        require(qtyWei > 0, "award: qty is zero");
 
         uint256 epochId = currentEpoch();
 
-        uint256 currentTraderVolume = volumeByEpoch[epochId][trader];
-        uint256 newTraderVolume = currentTraderVolume + quoteVolume;
-
-        volumeByEpoch[epochId][trader] = newTraderVolume;
-
-        uint256 currentTopVolume = topVolumeByEpoch[epochId];
-        if (newTraderVolume > currentTopVolume) {
-            topVolumeByEpoch[epochId] = newTraderVolume;
-            topTraderByEpoch[epochId] = trader;
+        if (!traderSeenByEpoch[epochId][trader]) {
+            traderSeenByEpoch[epochId][trader] = true;
+            tradersByEpoch[epochId].push(trader);
         }
 
-        emit TradeRecorded(epochId, trader, quoteVolume);
+        uint256 currentQty = qtyByEpochByTrader[epochId][trader];
+        uint256 newQty = currentQty + qtyWei;
+        qtyByEpochByTrader[epochId][trader] = newQty;
+
+        uint256 currentMaxQty = maxQtyByEpoch[epochId];
+        if (newQty > currentMaxQty) {
+            maxQtyByEpoch[epochId] = newQty;
+        }
+
+        emit TradeQtyRecorded(epochId, trader, qtyWei, newQty, maxQtyByEpoch[epochId]);
     }
 
-    function finalizeEpoch(uint256 epochId) external {
-        uint256 activeEpoch = currentEpoch();
+    function getEpochTraderCount(uint256 epochId) external view returns (uint256) {
+        return tradersByEpoch[epochId].length;
+    }
 
-        require(epochId < activeEpoch, "award: epoch not ended");
-        require(!rewarded[epochId], "award: already finalised");
+    function getEpochTraderAt(uint256 epochId, uint256 index) external view returns (address) {
+        return tradersByEpoch[epochId][index];
+    }
 
-        rewarded[epochId] = true;
-
-        address winner = topTraderByEpoch[epochId];
-        uint256 reward = 0;
-
-        uint256 topVolume = topVolumeByEpoch[epochId];
-        bool hasWinner = winner != address(0);
-
-        if (topVolume > 0 && hasWinner) {
-            reward = REWARD_AMOUNT;
-            ttoken.mint(winner, reward);
+    function isWinner(uint256 epochId, address trader) public view returns (bool) {
+        if (trader == address(0)) {
+            return false;
         }
+        if (epochId >= currentEpoch()) {
+            return false;
+        }
+        uint256 traderQty = qtyByEpochByTrader[epochId][trader];
+        uint256 maxQty = maxQtyByEpoch[epochId];
+        if (traderQty == 0 || maxQty == 0) {
+            return false;
+        }
+        return traderQty == maxQty;
+    }
 
-        emit EpochFinalized(epochId, winner, reward);
+    function hasClaimed(uint256 epochId, address trader) external view returns (bool) {
+        return claimedByEpoch[epochId][trader];
+    }
+
+    function claimAward(uint256 epochId) external {
+        require(epochId < currentEpoch(), "award: epoch not ended");
+        require(isWinner(epochId, msg.sender), "award: not winner");
+        require(!claimedByEpoch[epochId][msg.sender], "award: already claimed");
+
+        claimedByEpoch[epochId][msg.sender] = true;
+        ttoken.mint(msg.sender, REWARD_AMOUNT);
+
+        emit AwardClaimed(epochId, msg.sender, REWARD_AMOUNT);
     }
 }

@@ -495,34 +495,50 @@
         return;
       }
       try {
-        const res = await fetch(`/api/quote?symbol=${encodeURIComponent(parsed.baseSymbol)}`);
-        const data = await res.json();
-        if (!res.ok) {
+        const quoteRes = await fetch(`/api/fmp/quote-short?symbol=${encodeURIComponent(parsed.baseSymbol)}`);
+        const quoteData = await quoteRes.json();
+        if (!quoteRes.ok) {
           levBasePriceEl.textContent = "-";
           levBaseChangeEl.textContent = "-";
           levBaseChangeEl.className = "price-change neutral";
           return;
         }
         let priceText = "-";
-        if (data.regularMarketPrice) {
-          priceText = formatUsd(data.regularMarketPrice);
+        if (quoteData.price) {
+          priceText = formatUsd(quoteData.price);
         }
         levBasePriceEl.textContent = priceText;
-        let pct = 0;
-        if (data.regularMarketChangePercent !== undefined) {
-          pct = Number(data.regularMarketChangePercent);
+        let pct = null;
+        const currentPrice = Number(quoteData.price);
+        let previousClose = Number(quoteData.previousClose);
+        if (!(Number.isFinite(previousClose) && previousClose > 0)) {
+          const infoRes = await fetch(`/api/fmp/stock-info?symbol=${encodeURIComponent(parsed.baseSymbol)}`);
+          const infoData = await infoRes.json();
+          if (infoRes.ok && !infoData.error) {
+            previousClose = Number(infoData.previousClose);
+          }
         }
-        if (!Number.isFinite(pct)) {
-          pct = 0;
-        }
-        const sign = pct > 0 ? "+" : "";
-        levBaseChangeEl.textContent = `${sign}${pct.toFixed(2)}%`;
-        if (pct > 0) {
-          levBaseChangeEl.className = "price-change positive";
-        } else if (pct < 0) {
-          levBaseChangeEl.className = "price-change negative";
+        if (Number.isFinite(currentPrice) && currentPrice > 0 && Number.isFinite(previousClose) && previousClose > 0) {
+          pct = ((currentPrice - previousClose) / previousClose) * 100;
         } else {
+          const pctFromQuote = Number(quoteData.changePercent);
+          if (Number.isFinite(pctFromQuote)) {
+            pct = pctFromQuote * 100;
+          }
+        }
+        if (pct === null || !Number.isFinite(pct)) {
+          levBaseChangeEl.textContent = "-";
           levBaseChangeEl.className = "price-change neutral";
+        } else {
+          const sign = pct > 0 ? "+" : "";
+          levBaseChangeEl.textContent = `${sign}${pct.toFixed(2)}%`;
+          if (pct > 0) {
+            levBaseChangeEl.className = "price-change positive";
+          } else if (pct < 0) {
+            levBaseChangeEl.className = "price-change negative";
+          } else {
+            levBaseChangeEl.className = "price-change neutral";
+          }
         }
       } catch {
         levBasePriceEl.textContent = "-";

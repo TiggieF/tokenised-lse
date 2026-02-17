@@ -242,15 +242,43 @@
       return new Date(timestampMs).toLocaleString();
     }
 
+    function formatCentsToTTokenPerUnit(priceCents) {
+      const cents = Number(priceCents);
+      if (!Number.isFinite(cents)) {
+        return "0";
+      }
+      const whole = Math.trunc(cents / 100);
+      const fractionNumber = Math.abs(cents % 100);
+      let fraction = String(fractionNumber).padStart(2, "0");
+      while (fraction.endsWith("0") && fraction.length > 0) {
+        fraction = fraction.slice(0, -1);
+      }
+      if (fraction.length === 0) {
+        return String(whole);
+      }
+      return `${whole}.${fraction}`;
+    }
+
     function toDisplay(item) {
+      let sideWord = "";
+      if (item.side === "BUY") {
+        sideWord = "bought";
+      }
+      if (item.side === "SELL") {
+        sideWord = "sold";
+      }
+      if (!sideWord) {
+        sideWord = String(item.side || "").toLowerCase();
+      }
+
       if (item.kind === "ORDER_PLACED") {
-        return `${item.side} ${formatWeiToToken(item.qtyWei)} @ ${item.priceCents}c (${item.status})`;
+        return `${sideWord} ${formatWeiToToken(item.qtyWei)} unit at price ${formatCentsToTTokenPerUnit(item.priceCents)} ttoken per unit (${item.status})`;
       }
       if (item.kind === "ORDER_CANCELLED") {
-        return `${item.side} refund ${formatWeiToToken(item.refundWei)}`;
+        return `${sideWord} refund ${formatWeiToToken(item.refundWei)}`;
       }
       if (item.kind === "ORDER_FILLED") {
-        return `${item.side} ${formatWeiToToken(item.qtyWei)} @ ${item.priceCents}c`;
+        return `${sideWord} ${formatWeiToToken(item.qtyWei)} unit at price ${formatCentsToTTokenPerUnit(item.priceCents)} ttoken per unit`;
       }
       if (item.kind === "CASHFLOW") {
         return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.reason})`;
@@ -357,7 +385,9 @@
         const loadedCount = currentItems.length;
         const totalCount = data.total;
         const syncedBlock = data.indexerState.lastIndexedBlock;
-        setStatus(`Loaded ${loadedCount}/${totalCount} items  Synced block: ${syncedBlock}`, "ok");
+        setStatus(``, "");
+        // setStatus(`Loaded ${loadedCount}/${totalCount} items  Synced block: ${syncedBlock}`, "ok");
+
       } catch (err) {
         setStatus(err.message || "Failed to load transactions", "error");
       }

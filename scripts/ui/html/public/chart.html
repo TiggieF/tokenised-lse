@@ -579,21 +579,52 @@
         );
         const data = await res.json(
         );
-        const currentPrice = data.price;
-        const previousClose = latestStockInfo.previousClose;
-        const changeValue = Number((currentPrice - previousClose).toFixed(2));
-        const changePct = (currentPrice - previousClose) / previousClose;
+        const currentPrice = Number(data.price);
+        let previousClose = Number(data.previousClose);
+        if (!(Number.isFinite(previousClose) && previousClose > 0)) {
+          previousClose = Number(latestStockInfo.previousClose);
+        }
+        if (!(Number.isFinite(previousClose) && previousClose > 0)) {
+          const infoRes = await fetch(`/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`);
+          const infoData = await infoRes.json();
+          if (infoRes.ok && !infoData.error) {
+            latestStockInfo = infoData;
+            previousClose = Number(infoData.previousClose);
+          }
+        }
+        let changeValue = 0;
+        let changePct = 0;
+        let hasChange = false;
+        if (Number.isFinite(currentPrice) && currentPrice > 0 && Number.isFinite(previousClose) && previousClose > 0) {
+          changeValue = Number((currentPrice - previousClose).toFixed(2));
+          changePct = (currentPrice - previousClose) / previousClose;
+          hasChange = true;
+        } else {
+          const quoteChangePercent = Number(data.changePercent);
+          if (Number.isFinite(quoteChangePercent)) {
+            changePct = quoteChangePercent;
+            changeValue = currentPrice * quoteChangePercent;
+            hasChange = true;
+          }
+        }
 
         livePriceEl.textContent = formatPrice(currentPrice);
-        const pctValue = changePct * 100;
-        if (pctValue > 0) {
-          liveChangeEl.textContent = `+${pctValue.toFixed(2)}%`;
+        if (hasChange) {
+          const pctValue = changePct * 100;
+          if (pctValue > 0) {
+            liveChangeEl.textContent = `+${pctValue.toFixed(2)}%`;
+          } else {
+            liveChangeEl.textContent = `${pctValue.toFixed(2)}%`;
+          }
         } else {
-          liveChangeEl.textContent = `${pctValue.toFixed(2)}%`;
+          liveChangeEl.textContent = "-";
         }
         liveOpenEl.textContent = formatPrice(liveOpenPrice);
 
-        const direction = changeValue;
+        let direction = 0;
+        if (hasChange) {
+          direction = changeValue;
+        }
         applyChangeClass(liveChangeEl, direction);
         applyChangeClass(liveUpdatedEl, direction);
 
@@ -730,6 +761,7 @@
 
     (async function init() {
       await loadListedSymbols();
+      await loadStockInfo();
       await loadCandles();
       applyLiveUpdatesState(false);
     })();

@@ -129,10 +129,15 @@ const dividendsInterface = new ethers.Interface([
 ]);
 const awardInterface = new ethers.Interface([
   'function currentEpoch() view returns (uint256)',
-  'function topTraderByEpoch(uint256 epochId) view returns (address)',
-  'function topVolumeByEpoch(uint256 epochId) view returns (uint256)',
-  'function rewarded(uint256 epochId) view returns (bool)',
-  'function finalizeEpoch(uint256 epochId)',
+  'function EPOCH_DURATION() view returns (uint256)',
+  'function REWARD_AMOUNT() view returns (uint256)',
+  'function maxQtyByEpoch(uint256 epochId) view returns (uint256)',
+  'function qtyByEpochByTrader(uint256 epochId, address trader) view returns (uint256)',
+  'function getEpochTraderCount(uint256 epochId) view returns (uint256)',
+  'function getEpochTraderAt(uint256 epochId, uint256 index) view returns (address)',
+  'function isWinner(uint256 epochId, address trader) view returns (bool)',
+  'function hasClaimed(uint256 epochId, address trader) view returns (bool)',
+  'function claimAward(uint256 epochId)',
 ]);
 const aggregatorInterface = new ethers.Interface([
   'function getPortfolioSummary(address user) view returns (uint256 cashValueWei,uint256 stockValueWei,uint256 totalValueWei)',
@@ -438,7 +443,7 @@ async function ensureIndexerSynced() {
     if (!orderBookAddr || !registryAddr) {
       return {
         synced: false,
-        reason: 'missing deployments',
+        reason: '',
       };
     }
 
@@ -1532,14 +1537,19 @@ app.get('/api/fmp/quote-short', async (req, res) => {
       return res.json(cached.data);
     }
 
-    const url = getFmpUrl('quote-short', { symbol });
+    const url = getFmpUrl('quote', { symbol });
     const payload = await fetchFmpJson(url);
     let quote = payload;
     if (Array.isArray(payload)) {
       quote = payload[0];
     }
-    const price = quote.price;
+    const price = asNumber(pick(quote, ['price', 'regularMarketPrice']));
     const volume = quote.volume;
+    const previousClose = asNumber(pick(quote, ['previousClose', 'prevClose']));
+    let changePercent = asNumber(pick(quote, ['changesPercentage', 'changePercent']));
+    if (Number.isFinite(changePercent) && Math.abs(changePercent) > 1) {
+      changePercent = changePercent / 100;
+    }
     let responseSymbol = symbol;
     if (quote.symbol) {
       responseSymbol = quote.symbol;
@@ -1548,6 +1558,8 @@ app.get('/api/fmp/quote-short', async (req, res) => {
       symbol: responseSymbol,
       price,
       volume,
+      previousClose,
+      changePercent,
     };
     fmpQuoteCache.set(symbol, { data, timestamp: Date.now() });
     res.json(data);
@@ -1558,6 +1570,8 @@ app.get('/api/fmp/quote-short', async (req, res) => {
         symbol,
         price: fallbackQuote.regularMarketPrice,
         volume: fallbackQuote.regularMarketVolume,
+        previousClose: fallbackQuote.regularMarketPreviousClose,
+        changePercent: fallbackQuote.regularMarketChangePercent,
         stale: true,
         source: 'yahoo',
       };
@@ -1571,6 +1585,8 @@ app.get('/api/fmp/quote-short', async (req, res) => {
             symbol,
             price: candleData.close,
             volume: candleData.volume,
+            previousClose: candleData.open,
+            changePercent: asNumber((candleData.close - candleData.open) / candleData.open),
             stale: true,
             source: 'candles',
           };
@@ -3621,36 +3637,242 @@ app.post('/api/dividends/claim', async (req, res) => {
   }
 });
 
+async function buildAwardLeaderboardForEpoch(awardAddress, epochId) {
+  const maxData = awardInterface.encodeFunctionData('maxQtyByEpoch', [BigInt(epochId)]);
+  const maxResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: maxData }, 'latest']);
+  const [maxQtyRaw] = awardInterface.decodeFunctionResult('maxQtyByEpoch', maxResult);
+  const maxQtyWei = maxQtyRaw.toString();
+
+  const countData = awardInterface.encodeFunctionData('getEpochTraderCount', [BigInt(epochId)]);
+  const countResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: countData }, 'latest']);
+  const [countRaw] = awardInterface.decodeFunctionResult('getEpochTraderCount', countResult);
+  const count = Number(countRaw);
+
+  const items = [];
+  for (let i = 0; i < count; i += 1) {
+    const traderData = awardInterface.encodeFunctionData('getEpochTraderAt', [BigInt(epochId), BigInt(i)]);
+    const traderResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: traderData }, 'latest']);
+    const [traderRaw] = awardInterface.decodeFunctionResult('getEpochTraderAt', traderResult);
+    const trader = normalizeAddress(traderRaw);
+
+    const qtyData = awardInterface.encodeFunctionData('qtyByEpochByTrader', [BigInt(epochId), trader]);
+    const qtyResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: qtyData }, 'latest']);
+    const [qtyRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
+    const qtyWei = qtyRaw.toString();
+
+    const winnerData = awardInterface.encodeFunctionData('isWinner', [BigInt(epochId), trader]);
+    const winnerResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: winnerData }, 'latest']);
+    const [isWinner] = awardInterface.decodeFunctionResult('isWinner', winnerResult);
+
+    items.push({
+      epochId,
+      trader,
+      qtyWei,
+      isWinner,
+    });
+  }
+
+  items.sort((a, b) => {
+    const qtyDiff = BigInt(b.qtyWei) - BigInt(a.qtyWei);
+    if (qtyDiff > 0n) {
+      return 1;
+    }
+    if (qtyDiff < 0n) {
+      return -1;
+    }
+    return a.trader.localeCompare(b.trader);
+  });
+
+  for (let i = 0; i < items.length; i += 1) {
+    items[i].rank = i + 1;
+  }
+
+  return {
+    epochId,
+    maxQtyWei,
+    items,
+  };
+}
+
+app.get('/api/award/status', async (_req, res) => {
+  try {
+    const deployments = loadDeployments();
+    if (!deployments.award) {
+      return res.json({ available: false });
+    }
+
+    const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
+    const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
+    const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
+    const currentEpoch = Number(currentEpochRaw);
+
+    const epochDurationData = awardInterface.encodeFunctionData('EPOCH_DURATION', []);
+    const epochDurationResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochDurationData }, 'latest']);
+    const [epochDurationRaw] = awardInterface.decodeFunctionResult('EPOCH_DURATION', epochDurationResult);
+    const epochDurationSec = Number(epochDurationRaw);
+
+    const rewardData = awardInterface.encodeFunctionData('REWARD_AMOUNT', []);
+    const rewardResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: rewardData }, 'latest']);
+    const [rewardAmountRaw] = awardInterface.decodeFunctionResult('REWARD_AMOUNT', rewardResult);
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const currentEpochStartSec = currentEpoch * epochDurationSec;
+    const currentEpochEndSec = currentEpochStartSec + epochDurationSec;
+    let secondsRemaining = currentEpochEndSec - nowSec;
+    if (secondsRemaining < 0) {
+      secondsRemaining = 0;
+    }
+
+    res.json({
+      available: true,
+      currentEpoch,
+      epochDurationSec,
+      rewardAmountWei: rewardAmountRaw.toString(),
+      currentEpochStartSec,
+      currentEpochEndSec,
+      secondsRemaining,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/award/leaderboard', async (req, res) => {
+  try {
+    const deployments = loadDeployments();
+    if (!deployments.award) {
+      return res.json({ available: false, items: [] });
+    }
+
+    let epochId = Number(req.query.epochId);
+    const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
+    const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
+    const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
+    const currentEpoch = Number(currentEpochRaw);
+    if (!Number.isFinite(epochId) || epochId < 0) {
+      epochId = Math.max(0, currentEpoch - 1);
+    }
+
+    const leaderboard = await buildAwardLeaderboardForEpoch(deployments.award, epochId);
+    res.json({
+      available: true,
+      epochId,
+      currentEpoch,
+      maxQtyWei: leaderboard.maxQtyWei,
+      items: leaderboard.items,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/award/claimable', async (req, res) => {
+  try {
+    const wallet = normalizeAddress(String(req.query.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.award) {
+      return res.json({ available: false, wallet, items: [] });
+    }
+
+    const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
+    const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
+    const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
+    const currentEpoch = Number(currentEpochRaw);
+
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const startEpoch = Math.max(0, currentEpoch - limit);
+    const items = [];
+
+    for (let epochId = startEpoch; epochId < currentEpoch; epochId += 1) {
+      const winnerData = awardInterface.encodeFunctionData('isWinner', [BigInt(epochId), wallet]);
+      const winnerResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: winnerData }, 'latest']);
+      const [isWinner] = awardInterface.decodeFunctionResult('isWinner', winnerResult);
+
+      const claimedData = awardInterface.encodeFunctionData('hasClaimed', [BigInt(epochId), wallet]);
+      const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: claimedData }, 'latest']);
+      const [claimed] = awardInterface.decodeFunctionResult('hasClaimed', claimedResult);
+
+      if (isWinner || claimed) {
+        const qtyData = awardInterface.encodeFunctionData('qtyByEpochByTrader', [BigInt(epochId), wallet]);
+        const qtyResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: qtyData }, 'latest']);
+        const [qtyWeiRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
+
+        const maxData = awardInterface.encodeFunctionData('maxQtyByEpoch', [BigInt(epochId)]);
+        const maxResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: maxData }, 'latest']);
+        const [maxQtyWeiRaw] = awardInterface.decodeFunctionResult('maxQtyByEpoch', maxResult);
+
+        items.push({
+          epochId,
+          qtyWei: qtyWeiRaw.toString(),
+          maxQtyWei: maxQtyWeiRaw.toString(),
+          isWinner,
+          claimed,
+          canClaim: isWinner && !claimed,
+        });
+      }
+    }
+
+    items.sort((a, b) => b.epochId - a.epochId);
+    res.json({ available: true, wallet, currentEpoch, items });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/award/claim', async (req, res) => {
+  try {
+    const wallet = normalizeAddress(String(req.body.wallet || ''));
+    const epochId = Number(req.body.epochId);
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!Number.isFinite(epochId) || epochId < 0) {
+      return res.status(400).json({ error: 'epochId is required' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.award) {
+      return res.status(400).json({ error: 'award contract not deployed' });
+    }
+
+    const data = awardInterface.encodeFunctionData('claimAward', [BigInt(epochId)]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: deployments.award,
+      data,
+    }]);
+    await waitForReceipt(txHash);
+    res.json({ txHash, wallet, epochId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/award/current', async (_req, res) => {
   try {
     const deployments = loadDeployments();
     if (!deployments.award) {
       return res.json({ available: false });
     }
-    const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
-    const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
-    const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
-    const currentEpoch = Number(currentEpochRaw);
-    let targetEpoch = 0;
-    if (currentEpoch > 0) {
-      targetEpoch = currentEpoch - 1;
+    const statusRes = await fetch(`http://127.0.0.1:${PORT}/api/award/status`);
+    const statusData = await statusRes.json();
+    if (!statusRes.ok) {
+      return res.status(500).json({ error: statusData.error || 'failed to load status' });
     }
-    const topTraderData = awardInterface.encodeFunctionData('topTraderByEpoch', [targetEpoch]);
-    const topTraderResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: topTraderData }, 'latest']);
-    const [topTrader] = awardInterface.decodeFunctionResult('topTraderByEpoch', topTraderResult);
-    const topVolData = awardInterface.encodeFunctionData('topVolumeByEpoch', [targetEpoch]);
-    const topVolResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: topVolData }, 'latest']);
-    const [topVolume] = awardInterface.decodeFunctionResult('topVolumeByEpoch', topVolResult);
-    const rewardedData = awardInterface.encodeFunctionData('rewarded', [targetEpoch]);
-    const rewardedResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: rewardedData }, 'latest']);
-    const [rewarded] = awardInterface.decodeFunctionResult('rewarded', rewardedResult);
+    const leaderboardRes = await fetch(`http://127.0.0.1:${PORT}/api/award/leaderboard?epochId=${Math.max(0, statusData.currentEpoch - 1)}`);
+    const leaderboardData = await leaderboardRes.json();
+    const topRow = leaderboardData.items && leaderboardData.items.length > 0 ? leaderboardData.items[0] : null;
     res.json({
       available: true,
-      currentEpoch,
-      previousEpoch: targetEpoch,
-      topTrader: normalizeAddress(topTrader),
-      topVolumeWei: topVolume.toString(),
-      rewarded,
+      currentEpoch: statusData.currentEpoch,
+      previousEpoch: Math.max(0, statusData.currentEpoch - 1),
+      topTrader: topRow ? topRow.trader : ethers.ZeroAddress,
+      topVolumeWei: topRow ? topRow.qtyWei : "0",
+      rewarded: false,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -3663,61 +3885,31 @@ app.get('/api/award/history', async (req, res) => {
     if (!deployments.award) {
       return res.json({ available: false, items: [] });
     }
-    const limit = Math.min(100, Math.max(1, Number(req.query.limit)));
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
     const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
     const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
     const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
     const currentEpoch = Number(currentEpochRaw);
-    const items = [];
-    for (let epochId = Math.max(0, currentEpoch - limit); epochId < currentEpoch; epochId++) {
-      const topTraderData = awardInterface.encodeFunctionData('topTraderByEpoch', [epochId]);
-      const topTraderResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: topTraderData }, 'latest']);
-      const [topTrader] = awardInterface.decodeFunctionResult('topTraderByEpoch', topTraderResult);
-      const topVolData = awardInterface.encodeFunctionData('topVolumeByEpoch', [epochId]);
-      const topVolResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: topVolData }, 'latest']);
-      const [topVolume] = awardInterface.decodeFunctionResult('topVolumeByEpoch', topVolResult);
-      const rewardedData = awardInterface.encodeFunctionData('rewarded', [epochId]);
-      const rewardedResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: rewardedData }, 'latest']);
-      const [rewarded] = awardInterface.decodeFunctionResult('rewarded', rewardedResult);
-      items.push({
+    const rows = [];
+    for (let epochId = Math.max(0, currentEpoch - limit); epochId < currentEpoch; epochId += 1) {
+      const leaderboard = await buildAwardLeaderboardForEpoch(deployments.award, epochId);
+      const topRow = leaderboard.items.length > 0 ? leaderboard.items[0] : null;
+      rows.push({
         epochId,
-        topTrader: normalizeAddress(topTrader),
-        topVolumeWei: topVolume.toString(),
-        rewarded,
+        topTrader: topRow ? topRow.trader : ethers.ZeroAddress,
+        topVolumeWei: topRow ? topRow.qtyWei : "0",
+        rewarded: false,
       });
     }
-    items.sort((a, b) => b.epochId - a.epochId);
-    res.json({ available: true, items });
+    rows.sort((a, b) => b.epochId - a.epochId);
+    res.json({ available: true, items: rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/award/finalize', async (req, res) => {
-  try {
-    const deployments = loadDeployments();
-    if (!deployments.award) {
-      return res.status(400).json({ error: 'award contract not deployed' });
-    }
-    let epochIdRaw = 0;
-    if (req.body && req.body.epochId) {
-      epochIdRaw = req.body.epochId;
-    }
-    const epochId = Number(epochIdRaw);
-    if (!Number.isFinite(epochId) || epochId < 0) {
-      return res.status(400).json({ error: 'invalid epochId' });
-    }
-    const data = awardInterface.encodeFunctionData('finalizeEpoch', [BigInt(epochId)]);
-    const txHash = await hardhatRpc('eth_sendTransaction', [{
-      from: deployments.admin,
-      to: deployments.award,
-      data,
-    }]);
-    await waitForReceipt(txHash);
-    res.json({ txHash, epochId });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post('/api/award/finalize', async (_req, res) => {
+  return res.status(400).json({ error: 'finalize removed in stage 13.5 use /api/award/claim' });
 });
 
 app.get('/api/aggregator/summary', async (req, res) => {

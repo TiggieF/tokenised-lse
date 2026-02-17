@@ -222,7 +222,7 @@
     </div>
 
     <div class="summary-grid" id="summary-grid"></div>
-    <div id="drift-status" class="status status-ok">Rebuild vs aggregator: pending</div>
+    <div id="drift-status" class="status status-ok"></div>
     <div id="market-alert" class="market-alert" style="display:none"></div>
 
     <div class="section-header">
@@ -601,9 +601,12 @@
         }
       } else {
         driftStatus.className = "status";
-        driftStatus.textContent = "Rebuild vs aggregator: aggregator not available";
+        driftStatus.textContent = "";
       }
-      holdingsStatus.textContent = `Loaded ${positionsData.positions.length} positions`;
+      holdingsStatus.textContent = ``;
+      holdingsStatus.textContent = ``;
+      // Loaded ${positionsData.positions.length} positions
+
       dividendsStatus.textContent = "Ready";
       leveragedStatus.textContent = "Ready";
     }

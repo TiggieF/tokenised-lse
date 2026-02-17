@@ -4,7 +4,7 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 
 import "./LeveragedToken.sol";
 
-interface IStage12ListingsRegistry {
+interface IListingsRegistryForLeverage {
     function isListed(string memory symbol) external view returns (bool);
     function getListing(string memory symbol) external view returns (address);
 }
@@ -12,7 +12,7 @@ interface IStage12ListingsRegistry {
 contract LeveragedTokenFactory is AccessControl {
     bytes32 public constant PRODUCT_ADMIN_ROLE = keccak256("PRODUCT_ADMIN_ROLE");
 
-    IStage12ListingsRegistry public immutable registry;
+    IListingsRegistryForLeverage public immutable registry;
     address public router;
 
     struct Product {
@@ -42,7 +42,7 @@ contract LeveragedTokenFactory is AccessControl {
         require(admin != address(0), "leveragedfactory: admin is zero");
         require(registryAddress != address(0), "leveragedfactory: registry is zero");
 
-        registry = IStage12ListingsRegistry(registryAddress);
+        registry = IListingsRegistryForLeverage(registryAddress);
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PRODUCT_ADMIN_ROLE, admin);
