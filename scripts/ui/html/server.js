@@ -99,6 +99,11 @@ const equityTokenInterface = new ethers.Interface([
   'function balanceOf(address account) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
 ]);
+const equityTokenSnapshotInterface = new ethers.Interface([
+  'function snapshot() returns (uint256)',
+  'function balanceOfAt(address account, uint256 snapshotId) view returns (uint256)',
+  'event Snapshot(uint256 id)',
+]);
 const equityTokenRoleInterface = new ethers.Interface([
   'function SNAPSHOT_ROLE() view returns (bytes32)',
   'function hasRole(bytes32 role, address account) view returns (bool)',
@@ -126,6 +131,14 @@ const dividendsInterface = new ethers.Interface([
   'function isClaimed(address equityToken, uint256 epochId, address account) view returns (bool)',
   'function declareDividendPerShare(address equityToken, uint256 divPerShareWei) returns (uint256 epochId, uint256 snapshotId)',
   'function claimDividend(address equityToken, uint256 epochId) returns (uint256 mintedWei)',
+]);
+const dividendsMerkleInterface = new ethers.Interface([
+  'function merkleEpochCount() view returns (uint256)',
+  'function getEpoch(uint256 epochId) view returns ((address equityToken,bytes32 merkleRoot,uint256 declaredAt,uint256 totalEntitledWei,uint256 totalClaimedWei,bytes32 contentHash,string claimsUri))',
+  'function isClaimed(uint256 epochId, uint256 leafIndex) view returns (bool)',
+  'function previewLeaf(uint256 epochId, address account, uint256 amountWei, uint256 leafIndex, bytes32[] proof) view returns (bool,bool)',
+  'function declareMerkleDividend(address equityToken, bytes32 merkleRoot, uint256 totalEntitledWei, bytes32 contentHash, string claimsUri) returns (uint256)',
+  'function claim(uint256 epochId, address account, uint256 amountWei, uint256 leafIndex, bytes32[] proof) returns (uint256)',
 ]);
 const awardInterface = new ethers.Interface([
   'function currentEpoch() view returns (uint256)',
@@ -176,6 +189,9 @@ const INDEXER_LEVERAGED_FILE = path.join(INDEXER_DIR, 'leveraged.json');
 const AUTOTRADE_DIR = path.join(__dirname, '../../..', 'cache', 'autotrade');
 const AUTOTRADE_STATE_FILE = path.join(AUTOTRADE_DIR, 'state.json');
 const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
+const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
+const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
+const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
 const AUTOTRADE_POLL_INTERVAL_MS = 3000;
 
 let indexerSyncPromise = null;
@@ -211,6 +227,29 @@ function getTTokenAddressFromDeployments() {
 function isValidAddress(address) {
   return /^0x[a-fA-F0-9]{40}$/.test(address);
   // check valid address
+}
+
+function parseRpcInt(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value === 'bigint') {
+    return Number(value);
+  }
+  if (typeof value === 'string') {
+    if (value.startsWith('0x') || value.startsWith('0X')) {
+      const parsed = parseInt(value, 16);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+      return 0;
+    }
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
 }
 
 // connect to hardhat and contracts
@@ -976,10 +1015,184 @@ async function getListingBySymbol(registryAddr, symbol) {
   return normalizeAddress(tokenAddr);
 }
 
+async function getSymbolByToken(registryAddr, tokenAddress) {
+  const symbolData = listingsRegistryInterface.encodeFunctionData('getSymbolByToken', [tokenAddress]);
+  const symbolResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: symbolData }, 'latest']);
+  const [symbol] = listingsRegistryInterface.decodeFunctionResult('getSymbolByToken', symbolResult);
+  return String(symbol || '').toUpperCase();
+}
+
 function ensureAutoTradeDir() {
   if (!fs.existsSync(AUTOTRADE_DIR)) {
     fs.mkdirSync(AUTOTRADE_DIR, { recursive: true });
   }
+}
+
+function ensureAdminDir() {
+  if (!fs.existsSync(ADMIN_DIR)) {
+    fs.mkdirSync(ADMIN_DIR, { recursive: true });
+  }
+}
+
+function ensureDividendsMerkleDir() {
+  if (!fs.existsSync(DIVIDENDS_MERKLE_DIR)) {
+    fs.mkdirSync(DIVIDENDS_MERKLE_DIR, { recursive: true });
+  }
+}
+
+function getDefaultAwardSessionState() {
+  return {
+    nextAwardWindowSec: 60,
+    nextAwardWindowAppliesAtEpoch: -1,
+    terminateNextSession: false,
+    terminateAtEpoch: -1,
+    updatedAtMs: 0,
+  };
+}
+
+function readAwardSessionState() {
+  ensureAdminDir();
+  return readJsonFile(AWARD_SESSION_FILE, getDefaultAwardSessionState());
+}
+
+function writeAwardSessionState(state) {
+  ensureAdminDir();
+  writeJsonFile(AWARD_SESSION_FILE, state);
+}
+
+function merkleEpochClaimsFile(epochId) {
+  return path.join(DIVIDENDS_MERKLE_DIR, `epoch-${epochId}-claims.json`);
+}
+
+function merkleEpochTreeFile(epochId) {
+  return path.join(DIVIDENDS_MERKLE_DIR, `epoch-${epochId}-tree.json`);
+}
+
+function readMerkleClaims(epochId) {
+  ensureDividendsMerkleDir();
+  const file = merkleEpochClaimsFile(epochId);
+  return readJsonFile(file, { epochId, claims: [] });
+}
+
+function readMerkleTree(epochId) {
+  ensureDividendsMerkleDir();
+  const file = merkleEpochTreeFile(epochId);
+  return readJsonFile(file, {});
+}
+
+function writeMerkleClaims(epochId, claimsPayload) {
+  ensureDividendsMerkleDir();
+  const file = merkleEpochClaimsFile(epochId);
+  writeJsonFile(file, claimsPayload);
+}
+
+function writeMerkleTree(epochId, treePayload) {
+  ensureDividendsMerkleDir();
+  const file = merkleEpochTreeFile(epochId);
+  writeJsonFile(file, treePayload);
+}
+
+function buildMerkleLevelsLeftRight(leafHashes) {
+  const levels = [];
+  const firstLevel = [];
+  for (let i = 0; i < leafHashes.length; i += 1) {
+    firstLevel.push(leafHashes[i]);
+  }
+  levels.push(firstLevel);
+  let current = firstLevel;
+  while (current.length > 1) {
+    const next = [];
+    for (let i = 0; i < current.length; i += 2) {
+      const left = current[i];
+      let right = left;
+      if (i + 1 < current.length) {
+        right = current[i + 1];
+      }
+      const parent = ethers.keccak256(
+        ethers.solidityPacked(['bytes32', 'bytes32'], [left, right])
+      );
+      next.push(parent);
+    }
+    levels.push(next);
+    current = next;
+  }
+  return levels;
+}
+
+function buildMerkleProofLeftRight(levels, leafIndex) {
+  const proof = [];
+  let index = leafIndex;
+  for (let level = 0; level < levels.length - 1; level += 1) {
+    const rows = levels[level];
+    let siblingIndex = index + 1;
+    if (index % 2 === 1) {
+      siblingIndex = index - 1;
+    }
+    if (siblingIndex >= rows.length) {
+      siblingIndex = index;
+    }
+    proof.push(rows[siblingIndex]);
+    index = Math.floor(index / 2);
+  }
+  return proof;
+}
+
+function merkleLeafHash(epochId, tokenAddress, account, amountWei, leafIndex) {
+  const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+    ['uint256', 'address', 'address', 'uint256', 'uint256'],
+    [BigInt(epochId), tokenAddress, account, BigInt(amountWei), BigInt(leafIndex)]
+  );
+  return ethers.keccak256(encoded);
+}
+
+function tryParseSnapshotIdFromReceipt(receipt) {
+  if (!receipt || !Array.isArray(receipt.logs)) {
+    return 0;
+  }
+  for (let i = 0; i < receipt.logs.length; i += 1) {
+    const log = receipt.logs[i];
+    try {
+      const parsed = equityTokenSnapshotInterface.parseLog(log);
+      if (parsed && parsed.name === 'Snapshot') {
+        return Number(parsed.args.id);
+      }
+    } catch {
+    }
+  }
+  return 0;
+}
+
+async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
+  const transferTopic = ethers.id('Transfer(address,address,uint256)');
+  const logs = await hardhatRpc('eth_getLogs', [{
+    fromBlock: '0x0',
+    toBlock: toBlockHex,
+    address: tokenAddress,
+    topics: [transferTopic],
+  }]);
+  const seen = new Set();
+  for (let i = 0; i < logs.length; i += 1) {
+    const log = logs[i];
+    try {
+      const parsed = erc20Interface.parseLog(log);
+      const from = normalizeAddress(parsed.args.from);
+      const to = normalizeAddress(parsed.args.to);
+      if (from && from !== ethers.ZeroAddress) {
+        seen.add(from.toLowerCase());
+      }
+      if (to && to !== ethers.ZeroAddress) {
+        seen.add(to.toLowerCase());
+      }
+    } catch {
+    }
+  }
+  const rows = [];
+  const values = Array.from(seen.values());
+  for (let i = 0; i < values.length; i += 1) {
+    rows.push(normalizeAddress(values[i]));
+  }
+  rows.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  return rows;
 }
 
 function getDefaultAutoTradeState() {
@@ -1330,6 +1543,12 @@ async function runAutoTradeTick() {
     }
 
     writeAutoTradeState(state);
+  } catch (err) {
+    let msg = 'auto trade tick failed';
+    if (err && err.message) {
+      msg = err.message;
+    }
+    console.error('[autotrade]', msg);
   } finally {
     autoTradeLoopBusy = false;
   }
@@ -1822,7 +2041,10 @@ app.post('/api/orderbook/limit', async (req, res) => {
     const sideText = String(body.side).toUpperCase();
     const priceCents = Number(body.priceCents);
     const qty = Number(body.qty);
-    const from = String(body.from);
+    const from = normalizeAddress(String(body.from || ''));
+    if (!from) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
     const orderBookAddr = deployments.orderBookDex;
@@ -1835,6 +2057,9 @@ app.post('/api/orderbook/limit', async (req, res) => {
     let side = 0;
     if (sideText === 'SELL') {
       side = 1;
+    }
+    if (sideText !== 'BUY' && sideText !== 'SELL') {
+      return res.status(400).json({ error: 'side must be BUY or SELL' });
     }
 
     const qtyWei = BigInt(Math.round(qty)) * 10n ** 18n;
@@ -3392,6 +3617,511 @@ app.get('/api/dividends/epochs', async (req, res) => {
   }
 });
 
+app.post('/api/dividends/merkle/declare', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const symbol = String(body.symbol || '').toUpperCase();
+    const merkleRoot = String(body.merkleRoot || '');
+    const totalEntitledWei = String(body.totalEntitledWei || '');
+    const claimsUri = String(body.claimsUri || '');
+    const contentHash = String(body.contentHash || ethers.ZeroHash);
+    const claims = Array.isArray(body.claims) ? body.claims : [];
+
+    if (!symbol || !merkleRoot || !totalEntitledWei) {
+      return res.status(400).json({ error: 'symbol, merkleRoot, totalEntitledWei are required' });
+    }
+    if (!/^0x[a-fA-F0-9]{64}$/.test(merkleRoot)) {
+      return res.status(400).json({ error: 'merkleRoot must be 32-byte hex string' });
+    }
+    if (!/^0x[a-fA-F0-9]{64}$/.test(contentHash)) {
+      return res.status(400).json({ error: 'contentHash must be 32-byte hex string' });
+    }
+    if (!(BigInt(totalEntitledWei) > 0n)) {
+      return res.status(400).json({ error: 'totalEntitledWei must be > 0' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.status(400).json({ error: 'dividends merkle contract not deployed' });
+    }
+
+    const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
+    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+      return res.status(404).json({ error: 'symbol not listed' });
+    }
+
+    let rawTtokenAddr = '';
+    if (deployments.ttoken) {
+      rawTtokenAddr = deployments.ttoken;
+    } else if (deployments.ttokenAddress) {
+      rawTtokenAddr = deployments.ttokenAddress;
+    } else if (deployments.TTOKEN_ADDRESS) {
+      rawTtokenAddr = deployments.TTOKEN_ADDRESS;
+    }
+    const ttokenAddr = normalizeAddress(rawTtokenAddr);
+    if (!ttokenAddr) {
+      throw new Error('ttoken address missing in deployments');
+    }
+    const minterRoleData = ttokenRoleInterface.encodeFunctionData('MINTER_ROLE', []);
+    const minterRoleResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: minterRoleData }, 'latest']);
+    const [minterRole] = ttokenRoleInterface.decodeFunctionResult('MINTER_ROLE', minterRoleResult);
+    const hasMinterRoleData = ttokenRoleInterface.encodeFunctionData('hasRole', [minterRole, deployments.dividendsMerkle]);
+    const hasMinterRoleResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: hasMinterRoleData }, 'latest']);
+    const [hasMinterRole] = ttokenRoleInterface.decodeFunctionResult('hasRole', hasMinterRoleResult);
+    if (!hasMinterRole) {
+      const grantMinterData = ttokenRoleInterface.encodeFunctionData('grantRole', [minterRole, deployments.dividendsMerkle]);
+      const txHash = await hardhatRpc('eth_sendTransaction', [{
+        from: deployments.admin,
+        to: ttokenAddr,
+        data: grantMinterData,
+      }]);
+      await waitForReceipt(txHash);
+    }
+
+    const declareData = dividendsMerkleInterface.encodeFunctionData('declareMerkleDividend', [
+      tokenAddress,
+      merkleRoot,
+      BigInt(totalEntitledWei),
+      contentHash,
+      claimsUri,
+    ]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: deployments.admin,
+      to: deployments.dividendsMerkle,
+      data: declareData,
+    }]);
+    await waitForReceipt(txHash);
+
+    const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+    const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+    const epochId = Number(countRaw);
+
+    writeMerkleTree(epochId, {
+      epochId,
+      symbol,
+      tokenAddress,
+      merkleRoot,
+      totalEntitledWei: String(totalEntitledWei),
+      contentHash,
+      claimsUri,
+      txHash,
+      declaredAtMs: Date.now(),
+    });
+
+    const normalizedClaims = [];
+    for (let i = 0; i < claims.length; i += 1) {
+      const row = claims[i];
+      const account = normalizeAddress(String(row.account || ''));
+      const amountWei = String(row.amountWei || '0');
+      const leafIndex = Number(row.leafIndex);
+      const proof = Array.isArray(row.proof) ? row.proof : [];
+      if (!account) {
+        continue;
+      }
+      if (!(BigInt(amountWei) > 0n)) {
+        continue;
+      }
+      if (!Number.isFinite(leafIndex) || leafIndex < 0) {
+        continue;
+      }
+      normalizedClaims.push({
+        account,
+        amountWei,
+        leafIndex,
+        proof,
+      });
+    }
+    if (normalizedClaims.length > 0) {
+      writeMerkleClaims(epochId, {
+        epochId,
+        symbol,
+        tokenAddress,
+        merkleRoot,
+        claims: normalizedClaims,
+      });
+    }
+
+    res.json({
+      txHash,
+      epochId,
+      symbol,
+      tokenAddress,
+      merkleRoot,
+      totalEntitledWei: String(totalEntitledWei),
+      contentHash,
+      claimsUri,
+      claimCount: normalizedClaims.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const symbol = String(body.symbol || '').toUpperCase();
+    const divPerShareText = String(body.divPerShare || '').trim();
+    const claimsUri = String(body.claimsUri || '');
+    if (!symbol || !divPerShareText) {
+      return res.status(400).json({ error: 'symbol and divPerShare are required' });
+    }
+    const divPerShareWei = ethers.parseUnits(divPerShareText, 18);
+    if (!(divPerShareWei > 0n)) {
+      return res.status(400).json({ error: 'divPerShare must be > 0' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.status(400).json({ error: 'dividends merkle contract not deployed' });
+    }
+    const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
+    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+      return res.status(404).json({ error: 'symbol not listed' });
+    }
+
+    const snapshotData = equityTokenSnapshotInterface.encodeFunctionData('snapshot', []);
+    const snapshotTxHash = await hardhatRpc('eth_sendTransaction', [{
+      from: deployments.admin,
+      to: tokenAddress,
+      data: snapshotData,
+    }]);
+    const snapshotReceipt = await waitForReceipt(snapshotTxHash);
+    const snapshotId = tryParseSnapshotIdFromReceipt(snapshotReceipt);
+    if (!(snapshotId > 0)) {
+      throw new Error('could not parse snapshot id');
+    }
+
+    const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+    const holders = await collectHolderCandidatesFromChain(tokenAddress, latestBlockHex);
+
+    const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+    const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+    const nextEpochId = Number(countRaw) + 1;
+
+    const claims = [];
+    for (let i = 0; i < holders.length; i += 1) {
+      const account = holders[i];
+      const balData = equityTokenSnapshotInterface.encodeFunctionData('balanceOfAt', [account, BigInt(snapshotId)]);
+      const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
+      const [balanceRaw] = equityTokenSnapshotInterface.decodeFunctionResult('balanceOfAt', balResult);
+      const balanceWei = BigInt(balanceRaw.toString());
+      if (balanceWei <= 0n) {
+        continue;
+      }
+      const amountWei = (balanceWei * divPerShareWei) / (10n ** 18n);
+      if (amountWei <= 0n) {
+        continue;
+      }
+      claims.push({
+        account,
+        amountWei: amountWei.toString(),
+      });
+    }
+    claims.sort((a, b) => a.account.toLowerCase().localeCompare(b.account.toLowerCase()));
+    for (let i = 0; i < claims.length; i += 1) {
+      claims[i].leafIndex = i;
+    }
+    if (claims.length === 0) {
+      return res.status(400).json({ error: 'no eligible holders at snapshot for merkle declare' });
+    }
+
+    const leafHashes = [];
+    let totalEntitledWei = 0n;
+    for (let i = 0; i < claims.length; i += 1) {
+      const row = claims[i];
+      const leaf = merkleLeafHash(nextEpochId, tokenAddress, row.account, row.amountWei, row.leafIndex);
+      leafHashes.push(leaf);
+      totalEntitledWei += BigInt(row.amountWei);
+    }
+    const levels = buildMerkleLevelsLeftRight(leafHashes);
+    const root = levels[levels.length - 1][0];
+    for (let i = 0; i < claims.length; i += 1) {
+      claims[i].proof = buildMerkleProofLeftRight(levels, i);
+    }
+
+    const contentSource = JSON.stringify({
+      epochId: nextEpochId,
+      symbol,
+      tokenAddress,
+      snapshotId,
+      claims,
+    });
+    const contentHash = ethers.keccak256(ethers.toUtf8Bytes(contentSource));
+
+    let rawTtokenAddr = '';
+    if (deployments.ttoken) {
+      rawTtokenAddr = deployments.ttoken;
+    } else if (deployments.ttokenAddress) {
+      rawTtokenAddr = deployments.ttokenAddress;
+    } else if (deployments.TTOKEN_ADDRESS) {
+      rawTtokenAddr = deployments.TTOKEN_ADDRESS;
+    }
+    const ttokenAddr = normalizeAddress(rawTtokenAddr);
+    if (!ttokenAddr) {
+      throw new Error('ttoken address missing in deployments');
+    }
+    const minterRoleData = ttokenRoleInterface.encodeFunctionData('MINTER_ROLE', []);
+    const minterRoleResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: minterRoleData }, 'latest']);
+    const [minterRole] = ttokenRoleInterface.decodeFunctionResult('MINTER_ROLE', minterRoleResult);
+    const hasMinterRoleData = ttokenRoleInterface.encodeFunctionData('hasRole', [minterRole, deployments.dividendsMerkle]);
+    const hasMinterRoleResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: hasMinterRoleData }, 'latest']);
+    const [hasMinterRole] = ttokenRoleInterface.decodeFunctionResult('hasRole', hasMinterRoleResult);
+    if (!hasMinterRole) {
+      const grantMinterData = ttokenRoleInterface.encodeFunctionData('grantRole', [minterRole, deployments.dividendsMerkle]);
+      const txHash = await hardhatRpc('eth_sendTransaction', [{
+        from: deployments.admin,
+        to: ttokenAddr,
+        data: grantMinterData,
+      }]);
+      await waitForReceipt(txHash);
+    }
+
+    const declareData = dividendsMerkleInterface.encodeFunctionData('declareMerkleDividend', [
+      tokenAddress,
+      root,
+      totalEntitledWei,
+      contentHash,
+      claimsUri,
+    ]);
+    const declareTxHash = await hardhatRpc('eth_sendTransaction', [{
+      from: deployments.admin,
+      to: deployments.dividendsMerkle,
+      data: declareData,
+    }]);
+    await waitForReceipt(declareTxHash);
+
+    const epochId = nextEpochId;
+    writeMerkleTree(epochId, {
+      epochId,
+      symbol,
+      tokenAddress,
+      snapshotId,
+      merkleRoot: root,
+      totalEntitledWei: totalEntitledWei.toString(),
+      contentHash,
+      claimsUri,
+      txHash: declareTxHash,
+      declaredAtMs: Date.now(),
+      levelSizes: levels.map((rows) => rows.length),
+      levels,
+    });
+    writeMerkleClaims(epochId, {
+      epochId,
+      symbol,
+      tokenAddress,
+      snapshotId,
+      merkleRoot: root,
+      claims,
+    });
+
+    res.json({
+      txHash: declareTxHash,
+      epochId,
+      symbol,
+      tokenAddress,
+      snapshotId,
+      divPerShareWei: divPerShareWei.toString(),
+      merkleRoot: root,
+      totalEntitledWei: totalEntitledWei.toString(),
+      contentHash,
+      claimCount: claims.length,
+      levelSizes: levels.map((rows) => rows.length),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/dividends/merkle/epochs', async (req, res) => {
+  const symbol = String(req.query.symbol || '').toUpperCase();
+  try {
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.json({ epochs: [] });
+    }
+
+    const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+    const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+    const count = Number(countRaw);
+    const epochs = [];
+    for (let epochId = 1; epochId <= count; epochId += 1) {
+      const epochData = dividendsMerkleInterface.encodeFunctionData('getEpoch', [BigInt(epochId)]);
+      const epochResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: epochData }, 'latest']);
+      const [row] = dividendsMerkleInterface.decodeFunctionResult('getEpoch', epochResult);
+      const epochSymbol = await getSymbolByToken(deployments.listingsRegistry, row.equityToken);
+      if (symbol && epochSymbol !== symbol) {
+        continue;
+      }
+      epochs.push({
+        epochId,
+        symbol: epochSymbol,
+        tokenAddress: normalizeAddress(row.equityToken),
+        merkleRoot: row.merkleRoot,
+        declaredAt: Number(row.declaredAt),
+        totalEntitledWei: row.totalEntitledWei.toString(),
+        totalClaimedWei: row.totalClaimedWei.toString(),
+        contentHash: row.contentHash,
+        claimsUri: String(row.claimsUri),
+      });
+    }
+    res.json({ symbol, epochs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/dividends/merkle/tree', async (req, res) => {
+  const epochId = Number(req.query.epochId);
+  if (!Number.isFinite(epochId) || epochId <= 0) {
+    return res.status(400).json({ error: 'epochId is required' });
+  }
+  try {
+    const tree = readMerkleTree(epochId);
+    const claims = readMerkleClaims(epochId);
+    const levels = Array.isArray(tree.levels) ? tree.levels : [];
+    const levelSizes = Array.isArray(tree.levelSizes) ? tree.levelSizes : [];
+    const previewLevels = [];
+    for (let i = 0; i < levels.length; i += 1) {
+      const hashes = levels[i];
+      const levelRows = [];
+      for (let j = 0; j < hashes.length; j += 1) {
+        const hash = String(hashes[j]);
+        levelRows.push({
+          index: j,
+          hash,
+          shortHash: `${hash.slice(0, 10)}...${hash.slice(-8)}`,
+        });
+      }
+      previewLevels.push({
+        level: i,
+        size: hashes.length,
+        nodes: levelRows,
+      });
+    }
+    res.json({
+      epochId,
+      symbol: String(tree.symbol || ''),
+      tokenAddress: String(tree.tokenAddress || ''),
+      snapshotId: Number(tree.snapshotId || 0),
+      merkleRoot: String(tree.merkleRoot || ''),
+      totalEntitledWei: String(tree.totalEntitledWei || '0'),
+      contentHash: String(tree.contentHash || ethers.ZeroHash),
+      claimsUri: String(tree.claimsUri || ''),
+      claimCount: Array.isArray(claims.claims) ? claims.claims.length : 0,
+      levelSizes,
+      levels: previewLevels,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/dividends/merkle/claimable', async (req, res) => {
+  const wallet = normalizeAddress(String(req.query.wallet || ''));
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  try {
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.json({ wallet, claimables: [] });
+    }
+    const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+    const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+    const count = Number(countRaw);
+    const claimables = [];
+
+    for (let epochId = 1; epochId <= count; epochId += 1) {
+      const tree = readMerkleTree(epochId);
+      const claimsPayload = readMerkleClaims(epochId);
+      const rows = Array.isArray(claimsPayload.claims) ? claimsPayload.claims : [];
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i];
+        const account = normalizeAddress(String(row.account || ''));
+        if (account !== wallet) {
+          continue;
+        }
+        const leafIndex = Number(row.leafIndex);
+        const amountWei = String(row.amountWei || '0');
+        const proof = Array.isArray(row.proof) ? row.proof : [];
+        const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
+        const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
+        const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
+        claimables.push({
+          claimType: 'MERKLE',
+          epochId,
+          symbol: String(tree.symbol || ''),
+          tokenAddress: String(tree.tokenAddress || ''),
+          claimableWei: amountWei,
+          amountWei,
+          leafIndex,
+          proof,
+          claimed,
+          canClaim: !claimed && BigInt(amountWei) > 0n,
+          merkleRoot: String(tree.merkleRoot || ''),
+          contentHash: String(tree.contentHash || ethers.ZeroHash),
+          claimsUri: String(tree.claimsUri || ''),
+        });
+      }
+    }
+
+    res.json({ wallet, claimables });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/dividends/merkle/claim', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const wallet = normalizeAddress(String(body.wallet || ''));
+    const account = normalizeAddress(String(body.account || ''));
+    const epochId = Number(body.epochId);
+    const amountWei = String(body.amountWei || '0');
+    const leafIndex = Number(body.leafIndex);
+    const proof = Array.isArray(body.proof) ? body.proof : [];
+
+    if (!wallet || !account || wallet !== account) {
+      return res.status(400).json({ error: 'wallet and account must match and be valid address' });
+    }
+    if (!Number.isFinite(epochId) || epochId <= 0) {
+      return res.status(400).json({ error: 'epochId must be > 0' });
+    }
+    if (!(BigInt(amountWei) > 0n)) {
+      return res.status(400).json({ error: 'amountWei must be > 0' });
+    }
+    if (!Number.isFinite(leafIndex) || leafIndex < 0) {
+      return res.status(400).json({ error: 'leafIndex must be >= 0' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.status(400).json({ error: 'dividends merkle contract not deployed' });
+    }
+    const data = dividendsMerkleInterface.encodeFunctionData('claim', [
+      BigInt(epochId),
+      account,
+      BigInt(amountWei),
+      BigInt(leafIndex),
+      proof,
+    ]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: deployments.dividendsMerkle,
+      data,
+    }]);
+    await waitForReceipt(txHash);
+    res.json({ txHash, wallet, account, epochId, amountWei, leafIndex });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/dividends/claimables', async (req, res) => {
   const wallet = normalizeAddress(String(req.query.wallet));
   if (!wallet) {
@@ -3430,6 +4160,7 @@ app.get('/api/dividends/claimables', async (req, res) => {
         const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: claimedData }, 'latest']);
         const [claimed] = dividendsInterface.decodeFunctionResult('isClaimed', claimedResult);
         claimables.push({
+          claimType: 'SNAPSHOT',
           symbol: listing.symbol,
           tokenAddress: listing.tokenAddress,
           epochId,
@@ -3437,6 +4168,46 @@ app.get('/api/dividends/claimables', async (req, res) => {
           claimed,
           canClaim: BigInt(claimableWei) > 0n && !claimed,
         });
+      }
+    }
+
+    if (deployments.dividendsMerkle) {
+      const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+      const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+      const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+      const count = Number(countRaw);
+      for (let epochId = 1; epochId <= count; epochId += 1) {
+        const tree = readMerkleTree(epochId);
+        const claimsPayload = readMerkleClaims(epochId);
+        const rows = Array.isArray(claimsPayload.claims) ? claimsPayload.claims : [];
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          const account = normalizeAddress(String(row.account || ''));
+          if (account !== wallet) {
+            continue;
+          }
+          const amountWei = String(row.amountWei || '0');
+          const leafIndex = Number(row.leafIndex);
+          const proof = Array.isArray(row.proof) ? row.proof : [];
+          const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
+          const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
+          const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
+          claimables.push({
+            claimType: 'MERKLE',
+            symbol: String(tree.symbol || ''),
+            tokenAddress: String(tree.tokenAddress || ''),
+            epochId,
+            claimableWei: amountWei,
+            amountWei,
+            leafIndex,
+            proof,
+            claimed,
+            canClaim: BigInt(amountWei) > 0n && !claimed,
+            merkleRoot: String(tree.merkleRoot || ''),
+            contentHash: String(tree.contentHash || ethers.ZeroHash),
+            claimsUri: String(tree.claimsUri || ''),
+          });
+        }
       }
     }
 
@@ -3694,43 +4465,118 @@ async function buildAwardLeaderboardForEpoch(awardAddress, epochId) {
   };
 }
 
+async function getAwardStatusSnapshot() {
+  const deployments = loadDeployments();
+  if (!deployments.award) {
+    return { available: false };
+  }
+
+  const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
+  const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
+  const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
+  const chainCurrentEpoch = Number(currentEpochRaw);
+
+  const epochDurationData = awardInterface.encodeFunctionData('EPOCH_DURATION', []);
+  const epochDurationResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochDurationData }, 'latest']);
+  const [epochDurationRaw] = awardInterface.decodeFunctionResult('EPOCH_DURATION', epochDurationResult);
+  const chainEpochDurationSec = Number(epochDurationRaw);
+
+  const rewardData = awardInterface.encodeFunctionData('REWARD_AMOUNT', []);
+  const rewardResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: rewardData }, 'latest']);
+  const [rewardAmountRaw] = awardInterface.decodeFunctionResult('REWARD_AMOUNT', rewardResult);
+
+  const latestBlock = await hardhatRpc('eth_getBlockByNumber', ['latest', false]);
+  const chainNowSec = parseRpcInt(latestBlock.timestamp);
+  const wallNowSec = Math.floor(Date.now() / 1000);
+  let nowSec = wallNowSec;
+  if (chainNowSec > wallNowSec + 120) {
+    nowSec = chainNowSec;
+  }
+
+  const sessionState = readAwardSessionState();
+  let effectiveCurrentEpoch = chainCurrentEpoch;
+  if (chainEpochDurationSec > 0) {
+    const wallEpoch = Math.floor(nowSec / chainEpochDurationSec);
+    if (wallEpoch > effectiveCurrentEpoch) {
+      effectiveCurrentEpoch = wallEpoch;
+    }
+  }
+  let epochDurationSec = chainEpochDurationSec;
+  if (
+    Number.isFinite(sessionState.nextAwardWindowSec)
+    && sessionState.nextAwardWindowSec > 0
+    && Number.isFinite(sessionState.nextAwardWindowAppliesAtEpoch)
+    && sessionState.nextAwardWindowAppliesAtEpoch >= 0
+    && effectiveCurrentEpoch >= sessionState.nextAwardWindowAppliesAtEpoch
+  ) {
+    epochDurationSec = Number(sessionState.nextAwardWindowSec);
+  }
+
+  let secondsRemaining = 0;
+  if (epochDurationSec > 0) {
+    const elapsedSec = nowSec % epochDurationSec;
+    secondsRemaining = epochDurationSec - elapsedSec;
+    if (secondsRemaining === epochDurationSec) {
+      secondsRemaining = 0;
+    }
+  }
+
+  let sessionTerminated = false;
+  if (
+    sessionState.terminateNextSession === true
+    && Number.isFinite(sessionState.terminateAtEpoch)
+    && sessionState.terminateAtEpoch >= 0
+    && effectiveCurrentEpoch >= sessionState.terminateAtEpoch
+  ) {
+    sessionTerminated = true;
+    secondsRemaining = 0;
+  }
+
+  const currentEpochStartSec = effectiveCurrentEpoch * epochDurationSec;
+  const currentEpochEndSec = currentEpochStartSec + epochDurationSec;
+
+  return {
+    available: true,
+    deployments,
+    currentEpoch: effectiveCurrentEpoch,
+    chainCurrentEpoch,
+    nowSec,
+    epochDurationSec,
+    chainEpochDurationSec,
+    rewardAmountWei: rewardAmountRaw.toString(),
+    currentEpochStartSec,
+    currentEpochEndSec,
+    secondsRemaining,
+    sessionTerminated,
+    sessionControl: {
+      nextAwardWindowSec: Number(sessionState.nextAwardWindowSec),
+      nextAwardWindowAppliesAtEpoch: Number(sessionState.nextAwardWindowAppliesAtEpoch),
+      terminateNextSession: Boolean(sessionState.terminateNextSession),
+      terminateAtEpoch: Number(sessionState.terminateAtEpoch),
+      updatedAtMs: Number(sessionState.updatedAtMs || 0),
+    },
+  };
+}
+
 app.get('/api/award/status', async (_req, res) => {
   try {
-    const deployments = loadDeployments();
-    if (!deployments.award) {
+    const snapshot = await getAwardStatusSnapshot();
+    if (!snapshot.available) {
       return res.json({ available: false });
-    }
-
-    const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
-    const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
-    const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
-    const currentEpoch = Number(currentEpochRaw);
-
-    const epochDurationData = awardInterface.encodeFunctionData('EPOCH_DURATION', []);
-    const epochDurationResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochDurationData }, 'latest']);
-    const [epochDurationRaw] = awardInterface.decodeFunctionResult('EPOCH_DURATION', epochDurationResult);
-    const epochDurationSec = Number(epochDurationRaw);
-
-    const rewardData = awardInterface.encodeFunctionData('REWARD_AMOUNT', []);
-    const rewardResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: rewardData }, 'latest']);
-    const [rewardAmountRaw] = awardInterface.decodeFunctionResult('REWARD_AMOUNT', rewardResult);
-
-    const nowSec = Math.floor(Date.now() / 1000);
-    const currentEpochStartSec = currentEpoch * epochDurationSec;
-    const currentEpochEndSec = currentEpochStartSec + epochDurationSec;
-    let secondsRemaining = currentEpochEndSec - nowSec;
-    if (secondsRemaining < 0) {
-      secondsRemaining = 0;
     }
 
     res.json({
       available: true,
-      currentEpoch,
-      epochDurationSec,
-      rewardAmountWei: rewardAmountRaw.toString(),
-      currentEpochStartSec,
-      currentEpochEndSec,
-      secondsRemaining,
+      currentEpoch: snapshot.currentEpoch,
+      nowSec: snapshot.nowSec,
+      epochDurationSec: snapshot.epochDurationSec,
+      chainEpochDurationSec: snapshot.chainEpochDurationSec,
+      rewardAmountWei: snapshot.rewardAmountWei,
+      currentEpochStartSec: snapshot.currentEpochStartSec,
+      currentEpochEndSec: snapshot.currentEpochEndSec,
+      secondsRemaining: snapshot.secondsRemaining,
+      sessionTerminated: snapshot.sessionTerminated,
+      sessionControl: snapshot.sessionControl,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -3796,7 +4642,7 @@ app.get('/api/award/claimable', async (req, res) => {
       const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: claimedData }, 'latest']);
       const [claimed] = awardInterface.decodeFunctionResult('hasClaimed', claimedResult);
 
-      if (isWinner || claimed) {
+      if (isWinner && !claimed) {
         const qtyData = awardInterface.encodeFunctionData('qtyByEpochByTrader', [BigInt(epochId), wallet]);
         const qtyResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: qtyData }, 'latest']);
         const [qtyWeiRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
@@ -4411,6 +5257,66 @@ app.get('/api/admin/symbols/status', async (_req, res) => {
     }
     rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
     res.json({ symbols: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/award/session', async (_req, res) => {
+  try {
+    const snapshot = await getAwardStatusSnapshot();
+    const state = readAwardSessionState();
+    res.json({
+      available: Boolean(snapshot.available),
+      currentEpoch: Number(snapshot.currentEpoch || 0),
+      chainEpochDurationSec: Number(snapshot.chainEpochDurationSec || 0),
+      activeEpochDurationSec: Number(snapshot.epochDurationSec || 0),
+      sessionTerminated: Boolean(snapshot.sessionTerminated),
+      nextAwardWindowSec: Number(state.nextAwardWindowSec || 60),
+      nextAwardWindowAppliesAtEpoch: Number(state.nextAwardWindowAppliesAtEpoch || -1),
+      terminateNextSession: Boolean(state.terminateNextSession),
+      terminateAtEpoch: Number(state.terminateAtEpoch || -1),
+      updatedAtMs: Number(state.updatedAtMs || 0),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/award/session', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const snapshot = await getAwardStatusSnapshot();
+    if (!snapshot.available) {
+      return res.status(400).json({ error: 'award contract not deployed' });
+    }
+
+    const nextAwardWindowSecRaw = Number(body.nextAwardWindowSec);
+    const terminateNextSessionRaw = Boolean(body.terminateNextSession);
+    if (!Number.isFinite(nextAwardWindowSecRaw) || nextAwardWindowSecRaw <= 0 || nextAwardWindowSecRaw > 3600) {
+      return res.status(400).json({ error: 'nextAwardWindowSec must be between 1 and 3600' });
+    }
+
+    const state = readAwardSessionState();
+    state.nextAwardWindowSec = Math.floor(nextAwardWindowSecRaw);
+    state.nextAwardWindowAppliesAtEpoch = Number(snapshot.currentEpoch) + 1;
+    state.terminateNextSession = terminateNextSessionRaw;
+    if (terminateNextSessionRaw) {
+      state.terminateAtEpoch = Number(snapshot.currentEpoch) + 1;
+    } else {
+      state.terminateAtEpoch = -1;
+    }
+    state.updatedAtMs = Date.now();
+    writeAwardSessionState(state);
+
+    res.json({
+      ok: true,
+      nextAwardWindowSec: state.nextAwardWindowSec,
+      nextAwardWindowAppliesAtEpoch: state.nextAwardWindowAppliesAtEpoch,
+      terminateNextSession: state.terminateNextSession,
+      terminateAtEpoch: state.terminateAtEpoch,
+      updatedAtMs: state.updatedAtMs,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -5061,11 +5967,16 @@ app.get('/api/candles', async (req, res) => {
 ensureIndexerDir();
 ensureIndexerSynced();
 ensureAutoTradeDir();
+ensureAdminDir();
+ensureDividendsMerkleDir();
 if (!fs.existsSync(AUTOTRADE_STATE_FILE)) {
   writeAutoTradeState(getDefaultAutoTradeState());
 }
 if (!fs.existsSync(SYMBOL_STATUS_FILE)) {
   writeSymbolStatusState(getDefaultSymbolStatusState());
+}
+if (!fs.existsSync(AWARD_SESSION_FILE)) {
+  writeAwardSessionState(getDefaultAwardSessionState());
 }
 if (fs.existsSync(AUTOTRADE_STATE_FILE)) {
   const autoState = readAutoTradeState();
@@ -5076,7 +5987,13 @@ setInterval(() => {
   ensureIndexerSynced();
 }, INDEXER_SYNC_INTERVAL_MS);
 setInterval(() => {
-  runAutoTradeTick();
+  runAutoTradeTick().catch((err) => {
+    let msg = 'auto trade interval failed';
+    if (err && err.message) {
+      msg = err.message;
+    }
+    console.error('[autotrade]', msg);
+  });
 }, AUTOTRADE_POLL_INTERVAL_MS);
 
 app.use((_req, res) => {

@@ -143,41 +143,22 @@
 <body>
   <div class="panel">
     <h1 class="title">Award</h1>
+    <div id="award-suspended" class="status error" style="display:none; font-size:18px; margin-bottom:16px;">Award suspended</div>
+    <div id="award-active">
     <div class="cards">
       <div class="card">
-        <div class="card-label">Current Epoch</div>
-        <div class="card-value" id="cur-epoch">-</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Seconds Remaining</div>
-        <div class="card-value" id="seconds-remaining">-</div>
+        <div class="card-label">Window Seconds Remaining</div>
+        <div class="card-value" id="window-seconds-remaining">-</div>
       </div>
       <div class="card">
         <div class="card-label">Reward (TToken)</div>
         <div class="card-value" id="reward-amount">-</div>
       </div>
       <div class="card">
-        <div class="card-label">Epoch Max Qty</div>
-        <div class="card-value" id="epoch-max-qty">-</div>
+        <div class="card-label">Leading Volume</div>
+        <div class="card-value" id="leading-volume">-</div>
       </div>
     </div>
-
-    <div class="toolbar">
-      <div>
-        <label for="wallet-input">Wallet</label>
-        <input id="wallet-input" type="text" value="" />
-      </div>
-      <div>
-        <label for="epoch-input">Epoch To View</label>
-        <input id="epoch-input" type="number" min="0" step="1" value="0" />
-      </div>
-      <div>
-        <label for="limit-input">Claimable Window</label>
-        <input id="limit-input" type="number" min="1" step="1" value="50" />
-      </div>
-      <button id="refresh-btn" type="button">Refresh</button>
-    </div>
-    <div id="status" class="status">Ready</div>
 
     <h2 class="title" style="font-size:16px; margin-top:8px;">Leaderboard</h2>
     <table>
@@ -196,7 +177,6 @@
     <table>
       <thead>
         <tr>
-          <th>Epoch</th>
           <th>Your Qty</th>
           <th>Max Qty</th>
           <th>Status</th>
@@ -205,25 +185,25 @@
       </thead>
       <tbody id="claimable-body"></tbody>
     </table>
+    </div>
   </div>
 
   <script>
-    const curEpochEl = document.getElementById("cur-epoch");
-    const secondsRemainingEl = document.getElementById("seconds-remaining");
+    const windowSecondsRemainingEl = document.getElementById("window-seconds-remaining");
     const rewardAmountEl = document.getElementById("reward-amount");
-    const epochMaxQtyEl = document.getElementById("epoch-max-qty");
-    const walletInput = document.getElementById("wallet-input");
-    const epochInput = document.getElementById("epoch-input");
-    const limitInput = document.getElementById("limit-input");
-    const refreshBtn = document.getElementById("refresh-btn");
-    const statusEl = document.getElementById("status");
+    const leadingVolumeEl = document.getElementById("leading-volume");
     const leaderboardBody = document.getElementById("leaderboard-body");
     const claimableBody = document.getElementById("claimable-body");
-
-    function setStatus(text, isError = false) {
-      statusEl.textContent = text;
-      statusEl.className = isError ? "status error" : "status";
-    }
+    const awardSuspendedEl = document.getElementById("award-suspended");
+    const awardActiveEl = document.getElementById("award-active");
+    const CLAIMABLE_WINDOW = 50;
+    let currentWallet = "";
+    let currentEpochId = 0;
+    let liveSecondsRemaining = 0;
+    let liveEpochDurationSec = 60;
+    let liveSessionTerminated = false;
+    let lastStatusSyncAtMs = 0;
+    let statusTicker = null;
 
     function weiToToken(wei, decimals = 2) {
       const num = Number(wei) / 1e18;
@@ -235,23 +215,45 @@
       return num.toFixed(decimals);
     }
 
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
+          }
+        }
+      }
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
     async function loadWallet() {
       if (window.ethereum) {
         const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
         if (accounts && accounts.length > 0) {
-          walletInput.value = accounts[0];
+          currentWallet = chooseDisplayAccount(accounts);
         }
       }
     }
 
     async function claimEpoch(epochId) {
       try {
-        const wallet = String(walletInput.value).trim();
+        const wallet = String(currentWallet || "").trim();
         if (!wallet) {
-          setStatus("Wallet is required", true);
           return;
         }
-        setStatus(`Claiming epoch ${epochId}`);
         const res = await fetch("/api/award/claim", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -261,44 +263,78 @@
         if (!res.ok || data.error) {
           throw new Error(data.error || "Claim failed");
         }
-        setStatus(`Claimed epoch ${epochId} Tx: ${data.txHash}`);
         await refreshAward();
       } catch (err) {
-        setStatus(err.message || "Claim failed", true);
+        
       }
     }
 
     async function refreshAward() {
       try {
-        setStatus("Loading");
-        const wallet = String(walletInput.value).trim();
-        const limit = Math.max(1, Number(limitInput.value || 50));
-        const selectedEpoch = Math.max(0, Number(epochInput.value || 0));
-
-        const [statusRes, leaderboardRes, claimableRes] = await Promise.all([
-          fetch("/api/award/status"),
-          fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(selectedEpoch)}`),
-          fetch(`/api/award/claimable?wallet=${encodeURIComponent(wallet)}&limit=${encodeURIComponent(limit)}`),
-        ]);
-
-        const statusData = await statusRes.json();
-        const leaderboardData = await leaderboardRes.json();
-        const claimableData = await claimableRes.json();
-
-        if (!statusRes.ok || statusData.error) {
-          throw new Error(statusData.error);
+        if (window.ethereum) {
+          const accounts = await window.ethereum.request({ method: "eth_accounts" });
+          if (accounts && accounts.length > 0) {
+            currentWallet = chooseDisplayAccount(accounts);
+          }
         }
+        const wallet = String(currentWallet || "").trim();
+        const limit = CLAIMABLE_WINDOW;
+        const statusRes = await fetch("/api/award/status");
+        const statusData = await statusRes.json();
+        if (!statusRes.ok || statusData.error) {
+          throw new Error(statusData.error || "status failed");
+        }
+        currentEpochId = Number(statusData.currentEpoch || 0);
+        liveSecondsRemaining = Number(statusData.secondsRemaining || 0);
+        liveEpochDurationSec = Number(statusData.epochDurationSec || 60);
+        liveSessionTerminated = Boolean(statusData.sessionTerminated);
+        lastStatusSyncAtMs = Date.now();
+        if (!Number.isFinite(currentEpochId) || currentEpochId < 0) {
+          currentEpochId = 0;
+        }
+        if (!Number.isFinite(liveSecondsRemaining) || liveSecondsRemaining < 0) {
+          liveSecondsRemaining = 0;
+        }
+        if (!Number.isFinite(liveEpochDurationSec) || liveEpochDurationSec <= 0) {
+          liveEpochDurationSec = 60;
+        }
+        if (liveSecondsRemaining > liveEpochDurationSec) {
+          liveSecondsRemaining = liveEpochDurationSec;
+        }
+        if (liveSessionTerminated === true) {
+          awardSuspendedEl.style.display = "block";
+          awardActiveEl.style.display = "none";
+          awardSuspendedEl.textContent = "Award suspended";
+          return;
+        }
+        awardSuspendedEl.style.display = "none";
+        awardActiveEl.style.display = "block";
+        updateWindowCountdown();
+        rewardAmountEl.textContent = weiToToken(statusData.rewardAmountWei, 2);
+
+        let leaderboardEpoch = currentEpochId - 1;
+        if (!Number.isFinite(leaderboardEpoch) || leaderboardEpoch < 0) {
+          leaderboardEpoch = 0;
+        }
+
+        const leaderboardRes = await fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`);
+        let claimableRes = null;
+        if (wallet) {
+          claimableRes = await fetch(`/api/award/claimable?wallet=${encodeURIComponent(wallet)}&limit=${encodeURIComponent(limit)}`);
+        }
+        const leaderboardData = await leaderboardRes.json();
+        let claimableData = { items: [] };
+        if (claimableRes) {
+          claimableData = await claimableRes.json();
+        }
+
         if (!leaderboardRes.ok || leaderboardData.error) {
           throw new Error(leaderboardData.error);
         }
-        if (!claimableRes.ok || claimableData.error) {
+        if (claimableRes && (!claimableRes.ok || claimableData.error)) {
           throw new Error(claimableData.error);
         }
-
-        curEpochEl.textContent = String(statusData.currentEpoch);
-        secondsRemainingEl.textContent = String(statusData.secondsRemaining);
-        rewardAmountEl.textContent = weiToToken(statusData.rewardAmountWei, 2);
-        epochMaxQtyEl.textContent = weiToShares(leaderboardData.maxQtyWei || "0", 2);
+        leadingVolumeEl.textContent = weiToShares(leaderboardData.maxQtyWei || "0", 2);
 
         leaderboardBody.innerHTML = "";
         const boardRows = Array.isArray(leaderboardData.items) ? leaderboardData.items : [];
@@ -324,7 +360,7 @@
         const claimRows = Array.isArray(claimableData.items) ? claimableData.items : [];
         if (!claimRows.length) {
           const tr = document.createElement("tr");
-          tr.innerHTML = '<td colspan="5">No claimable rows</td>';
+          tr.innerHTML = '<td colspan="4">No claimable rows</td>';
           claimableBody.appendChild(tr);
         } else {
           for (let i = 0; i < claimRows.length; i += 1) {
@@ -351,7 +387,6 @@
             }
 
             tr.innerHTML = `
-              <td>${row.epochId}</td>
               <td>${weiToShares(row.qtyWei, 2)}</td>
               <td>${weiToShares(row.maxQtyWei, 2)}</td>
               <td>${statusText}</td>
@@ -360,21 +395,18 @@
             claimableBody.appendChild(tr);
           }
         }
-
-        setStatus("Ready");
       } catch (err) {
-        setStatus(err.message || "Load failed", true);
+        windowSecondsRemainingEl.textContent = "0";
       }
     }
 
-    refreshBtn.addEventListener("click", refreshAward);
-
     if (window.ethereum) {
       window.ethereum.on("accountsChanged", (accounts) => {
-        if (accounts && accounts.length > 0) {
-          walletInput.value = accounts[0];
-          refreshAward();
+        currentWallet = chooseDisplayAccount(accounts);
+        if (!currentWallet) {
+          currentWallet = "";
         }
+        refreshAward();
       });
     }
 
@@ -383,11 +415,41 @@
       const statusRes = await fetch("/api/award/status");
       const statusData = await statusRes.json();
       if (statusRes.ok && statusData && Number.isFinite(statusData.currentEpoch)) {
-        epochInput.value = String(Math.max(0, statusData.currentEpoch - 1));
+        currentEpochId = Number(statusData.currentEpoch);
       }
       await refreshAward();
       setInterval(refreshAward, 5000);
     })();
+
+    function updateWindowCountdown() {
+      if (!Number.isFinite(liveEpochDurationSec) || liveEpochDurationSec <= 0) {
+        liveEpochDurationSec = 60;
+      }
+      if (!Number.isFinite(liveSecondsRemaining) || liveSecondsRemaining < 0) {
+        liveSecondsRemaining = 0;
+      }
+      if (liveSessionTerminated === true) {
+        windowSecondsRemainingEl.textContent = "0";
+        return;
+      }
+      const secondsSinceSync = Math.floor((Date.now() - lastStatusSyncAtMs) / 1000);
+      let displayRemaining = liveSecondsRemaining - secondsSinceSync;
+      if (displayRemaining < 0) {
+        displayRemaining = 0;
+      }
+      if (displayRemaining > liveEpochDurationSec) {
+        displayRemaining = liveEpochDurationSec;
+      }
+      windowSecondsRemainingEl.textContent = String(Math.floor(displayRemaining));
+      if (displayRemaining === 0) {
+        refreshAward();
+      }
+    }
+
+    if (statusTicker) {
+      clearInterval(statusTicker);
+    }
+    statusTicker = setInterval(updateWindowCountdown, 1000);
   </script>
 </body>
 </html>

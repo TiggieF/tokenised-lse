@@ -295,6 +295,30 @@
     let pollingEnabled = false;
     let poller;
 
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
+          }
+        }
+      }
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
     function formatWeiToToken(valueWei, digits = 4) {
       const num = Number(valueWei) / 1e18;
       return num.toFixed(digits);
@@ -408,14 +432,32 @@
       }
     }
 
-    async function claimDividend(symbol, epochId) {
+    async function claimDividend(row) {
       try {
+        const symbol = String(row.symbol || "").toUpperCase();
+        const claimType = String(row.claimType || "SNAPSHOT").toUpperCase();
         dividendsStatus.textContent = `Claiming ${symbol} dividend`;
-        const res = await fetch("/api/dividends/claim", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wallet: currentWallet, symbol, epochId }),
-        });
+        let res;
+        if (claimType === "MERKLE") {
+          res = await fetch("/api/dividends/merkle/claim", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              wallet: currentWallet,
+              account: currentWallet,
+              epochId: row.epochId,
+              amountWei: row.amountWei,
+              leafIndex: row.leafIndex,
+              proof: row.proof,
+            }),
+          });
+        } else {
+          res = await fetch("/api/dividends/claim", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ wallet: currentWallet, symbol, epochId: row.epochId }),
+          });
+        }
         const data = await res.json();
         if (!res.ok || data.error) {
           throw new Error(data.error);
@@ -450,7 +492,7 @@
           btn.type = "button";
           btn.className = "claim-btn";
           btn.textContent = "Claim";
-          btn.addEventListener("click", () => claimDividend(row.symbol, row.epochId));
+          btn.addEventListener("click", () => claimDividend(row));
           actionTd.appendChild(btn);
         } else if (row.claimed) {
           actionTd.textContent = "Claimed";
@@ -461,7 +503,7 @@
         }
 
         tr.innerHTML = `
-          <td>${row.symbol}</td>
+          <td>${row.symbol} ${row.claimType === "MERKLE" ? "(M)" : ""}</td>
           <td>${formatWeiToToken(row.claimableWei, 2)}</td>
         `;
         tr.appendChild(actionTd);
@@ -625,14 +667,14 @@
     refreshBtn.addEventListener("click", refreshPortfolio);
 
     window.ethereum.on("accountsChanged", (accounts) => {
-      currentWallet = accounts[0];
+      currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
       refreshPortfolio();
     });
 
     (async function init() {
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-      currentWallet = accounts[0];
+      currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
       try {
         const lifecycleRes = await fetch("/api/admin/symbols/status");

@@ -148,6 +148,7 @@
 
     .form-grid select,
     .form-grid input,
+    .form-grid textarea,
     .form-grid button {
       width: 100%;
       padding: 10px 12px;
@@ -157,6 +158,11 @@
       font-size: 14px;
       background: #fff;
       color: var(--ink);
+    }
+
+    .form-grid textarea {
+      min-height: 84px;
+      resize: vertical;
     }
 
     .form-grid button {
@@ -214,6 +220,30 @@
     </div>
 
     <div class="section">
+      <h2 class="section-title">Merkle dividends</h2>
+      <div class="form-grid">
+        <div>
+          <label for="merkle-div-symbol">Symbol</label>
+          <select id="merkle-div-symbol"></select>
+        </div>
+        <div>
+          <label for="merkle-div-per-share">TToken per share</label>
+          <input id="merkle-div-per-share" type="text" value="0.10" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="merkle-div-auto-declare-btn" type="button">Auto Declare Merkle</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="merkle-tree-view-btn" type="button">View Latest Tree</button>
+        </div>
+      </div>
+      <div id="merkle-div-status" class="status">Ready</div>
+      <pre id="merkle-tree-preview" class="status" style="white-space:pre-wrap;max-height:260px;overflow:auto"></pre>
+    </div>
+
+    <div class="section">
       <h2 class="section-title">Leveraged products</h2>
       <div class="form-grid">
         <div>
@@ -233,6 +263,28 @@
         </div>
       </div>
       <div id="lev-admin-status" class="status">Ready</div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Award next session controls</h2>
+      <div class="form-grid">
+        <div>
+          <label for="award-next-window">Next window seconds</label>
+          <input id="award-next-window" type="number" min="1" max="3600" step="1" value="60" />
+        </div>
+        <div>
+          <label for="award-terminate-next">Terminate next session</label>
+          <select id="award-terminate-next">
+            <option value="false" selected>No</option>
+            <option value="true">Yes</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="award-session-save-btn" type="button">Save next session</button>
+        </div>
+      </div>
+      <div id="award-session-status" class="status">Ready</div>
     </div>
 
     <div class="section">
@@ -318,10 +370,20 @@
     const divPerShare = document.getElementById("div-per-share");
     const divDistributeBtn = document.getElementById("div-distribute-btn");
     const divStatus = document.getElementById("div-status");
+    const merkleDivSymbol = document.getElementById("merkle-div-symbol");
+    const merkleDivPerShare = document.getElementById("merkle-div-per-share");
+    const merkleDivAutoDeclareBtn = document.getElementById("merkle-div-auto-declare-btn");
+    const merkleTreeViewBtn = document.getElementById("merkle-tree-view-btn");
+    const merkleTreePreview = document.getElementById("merkle-tree-preview");
+    const merkleDivStatus = document.getElementById("merkle-div-status");
     const levAdminSymbol = document.getElementById("lev-admin-symbol");
     const levAdminLeverage = document.getElementById("lev-admin-leverage");
     const levAdminCreateBtn = document.getElementById("lev-admin-create-btn");
     const levAdminStatus = document.getElementById("lev-admin-status");
+    const awardNextWindow = document.getElementById("award-next-window");
+    const awardTerminateNext = document.getElementById("award-terminate-next");
+    const awardSessionSaveBtn = document.getElementById("award-session-save-btn");
+    const awardSessionStatus = document.getElementById("award-session-status");
     const lifecycleSymbol = document.getElementById("lifecycle-symbol");
     const symbolFreezeBtn = document.getElementById("symbol-freeze-btn");
     const symbolUnfreezeBtn = document.getElementById("symbol-unfreeze-btn");
@@ -373,6 +435,15 @@
       divStatus.style.color = nextColor;
     }
 
+    function setMerkleDivStatus(text, isError = false) {
+      merkleDivStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      merkleDivStatus.style.color = nextColor;
+    }
+
     function setListStatus(text, isError = false) {
       listStatus.textContent = text;
       let nextColor = "#5b6b7a";
@@ -400,16 +471,30 @@
       lifecycleStatus.style.color = nextColor;
     }
 
+    function setAwardSessionStatus(text, isError = false) {
+      awardSessionStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      awardSessionStatus.style.color = nextColor;
+    }
+
     async function loadDividendSymbols() {
       const res = await fetch("/api/registry/listings");
       const data = await res.json();
       divSymbol.innerHTML = "";
+      merkleDivSymbol.innerHTML = "";
       levAdminSymbol.innerHTML = "";
       for (const item of data.listings || []) {
         const option = document.createElement("option");
         option.value = item.symbol;
         option.textContent = item.symbol;
         divSymbol.appendChild(option);
+        const merkleOption = document.createElement("option");
+        merkleOption.value = item.symbol;
+        merkleOption.textContent = item.symbol;
+        merkleDivSymbol.appendChild(merkleOption);
         const levOption = document.createElement("option");
         levOption.value = item.symbol;
         levOption.textContent = item.symbol;
@@ -526,6 +611,84 @@
       }
     }
 
+    async function declareMerkleDividendAuto() {
+      try {
+        setMerkleDivStatus("Building snapshot and merkle tree");
+        const symbol = String(merkleDivSymbol.value || "").toUpperCase();
+        const divPerShare = String(merkleDivPerShare.value || "").trim();
+        const payload = {
+          symbol,
+          divPerShare,
+          claimsUri: "",
+        };
+        const res = await fetch("/api/dividends/merkle/declare-auto", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Auto merkle declaration failed");
+        }
+        setMerkleDivStatus(`Merkle epoch ${data.epochId} auto-declared for ${data.symbol} Tx: ${data.txHash}`);
+        await viewMerkleTree();
+      } catch (err) {
+        setMerkleDivStatus(err.message || "Auto merkle declaration failed", true);
+      }
+    }
+
+    async function viewMerkleTree() {
+      try {
+        const symbol = String(merkleDivSymbol.value || "").toUpperCase();
+        if (!symbol) {
+          setMerkleDivStatus("Select symbol first", true);
+          return;
+        }
+        const epochsRes = await fetch(`/api/dividends/merkle/epochs?symbol=${encodeURIComponent(symbol)}`);
+        const epochsData = await epochsRes.json();
+        if (!epochsRes.ok || epochsData.error) {
+          throw new Error(epochsData.error || "Could not load merkle epochs");
+        }
+        const rows = Array.isArray(epochsData.epochs) ? epochsData.epochs : [];
+        if (rows.length === 0) {
+          setMerkleDivStatus(`No merkle epochs found for ${symbol}`, true);
+          merkleTreePreview.textContent = "";
+          return;
+        }
+        let epochId = 0;
+        for (let i = 0; i < rows.length; i += 1) {
+          const nextEpoch = Number(rows[i].epochId);
+          if (nextEpoch > epochId) {
+            epochId = nextEpoch;
+          }
+        }
+        setMerkleDivStatus(`Loading tree for epoch ${epochId}`);
+        const res = await fetch(`/api/dividends/merkle/tree?epochId=${encodeURIComponent(epochId)}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Tree view failed");
+        }
+        const lines = [];
+        lines.push(`${data.claimCount} users eligible for claims on ${data.symbol}`);
+        lines.push(`Snapshot ${data.snapshotId}`);
+        lines.push(``);
+        const levels = Array.isArray(data.levels) ? data.levels : [];
+        for (let i = 0; i < levels.length; i += 1) {
+          const level = levels[i];
+          lines.push(`Level ${level.level} size ${level.size}`);
+          const nodes = Array.isArray(level.nodes) ? level.nodes : [];
+          for (let j = 0; j < nodes.length; j += 1) {
+            const node = nodes[j];
+            lines.push(`  [${node.index}] ${node.hash}`);
+          }
+        }
+        merkleTreePreview.textContent = lines.join("\n");
+        setMerkleDivStatus(`Tree loaded for epoch ${epochId}`);
+      } catch (err) {
+        setMerkleDivStatus(err.message || "Tree view failed", true);
+      }
+    }
+
     async function createListing() {
       try {
         const symbol = String(listStock.value || "").toUpperCase().trim();
@@ -597,9 +760,64 @@
       }
     }
 
+    async function loadAwardSessionControl() {
+      try {
+        const res = await fetch("/api/admin/award/session");
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to load award session controls");
+        }
+
+        awardNextWindow.value = String(data.nextAwardWindowSec || 60);
+        if (data.terminateNextSession) {
+          awardTerminateNext.value = "true";
+        } else {
+          awardTerminateNext.value = "false";
+        }
+
+        let text = "Ready";
+        if (Number(data.nextAwardWindowAppliesAtEpoch) >= 0) {
+          text = `Pending apply at epoch ${data.nextAwardWindowAppliesAtEpoch} with ${data.nextAwardWindowSec}s`;
+          if (data.terminateNextSession) {
+            text = `${text} and termination enabled`;
+          }
+        }
+        setAwardSessionStatus(text);
+      } catch (err) {
+        setAwardSessionStatus(err.message || "Failed to load award session controls", true);
+      }
+    }
+
+    async function saveAwardSessionControl() {
+      try {
+        const nextAwardWindowSec = Number(awardNextWindow.value);
+        const terminateNextSession = awardTerminateNext.value === "true";
+        setAwardSessionStatus("Saving next session controls");
+        const res = await fetch("/api/admin/award/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ nextAwardWindowSec, terminateNextSession }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to save next session controls");
+        }
+        let text = `${data.nextAwardWindowSec}s`;
+        if (data.terminateNextSession) {
+          text = `${text} and termination enabled`;
+        }
+        setAwardSessionStatus(text);
+      } catch (err) {
+        setAwardSessionStatus(err.message || "Failed to save next session controls", true);
+      }
+    }
+
     listCreateBtn.addEventListener("click", createListing);
     divDistributeBtn.addEventListener("click", distributeDividend);
+    merkleDivAutoDeclareBtn.addEventListener("click", declareMerkleDividendAuto);
+    merkleTreeViewBtn.addEventListener("click", viewMerkleTree);
     levAdminCreateBtn.addEventListener("click", createLeveragedProduct);
+    awardSessionSaveBtn.addEventListener("click", saveAwardSessionControl);
     symbolFreezeBtn.addEventListener("click", () => changeSymbolLifecycle("freeze"));
     symbolUnfreezeBtn.addEventListener("click", () => changeSymbolLifecycle("unfreeze"));
     symbolDelistBtn.addEventListener("click", () => changeSymbolLifecycle("delist"));
@@ -607,6 +825,7 @@
       await loadLifecycleTable();
       await loadListableStocks();
       await loadDividendSymbols();
+      await loadAwardSessionControl();
       await loadLifecycleTable();
       const openRes = await fetch("/api/orderbook/open");
       const openData = await openRes.json();
@@ -656,6 +875,9 @@
           day: "2-digit",
           hour: "2-digit",
           minute: "2-digit",
+          second: "2-digit",
+          hour12: true,
+          timeZoneName: "short",
         });
         const formatted = formatter.format(date);
         tr.innerHTML = `

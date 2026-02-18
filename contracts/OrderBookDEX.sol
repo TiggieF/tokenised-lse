@@ -237,7 +237,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         uint256 remainingQuote = quoteWei;
 
         while (remainingQuote > 0) {
-            (bool found, uint256 index) = findBestSell(equityToken, maxPriceCents);
+            (bool found, uint256 index) = findBestSell(equityToken, maxPriceCents, taker);
             if (!found) {
                 break;
             }
@@ -329,7 +329,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         // matching engine
         while (taker.remaining > 0) {
             // while not fulling filled
-            (bool found, uint256 index) = findBestSell(equityToken, taker.price);
+            (bool found, uint256 index) = findBestSell(equityToken, taker.price, taker.trader);
             // find the best sell
             if (!found) {
                 break;
@@ -373,7 +373,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
     function matchSell(address equityToken, Order storage taker) internal {
         // similar to match
         while (taker.remaining > 0) {
-            (bool found, uint256 index) = findBestBuy(equityToken, taker.price);
+            (bool found, uint256 index) = findBestBuy(equityToken, taker.price, taker.trader);
             if (!found) {
                 break;
             }
@@ -402,7 +402,7 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         }
     }
 
-    function findBestSell(address equityToken, uint256 maxPrice) internal view returns (bool found, uint256 index) {
+    function findBestSell(address equityToken, uint256 maxPrice, address excludedTrader) internal view returns (bool found, uint256 index) {
         // loops through and find the best sell order within the price liimit
         Order[] storage orders = sellOrders[equityToken];
         
@@ -411,7 +411,12 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
 
         for (uint256 i = 0; i < orders.length; i++) {
             Order storage order = orders[i];
-            if (!order.active || order.remaining == 0 || order.price > maxPrice) {
+            if (
+                !order.active ||
+                order.remaining == 0 ||
+                order.price > maxPrice ||
+                order.trader == excludedTrader
+            ) {
                 continue;
             }
             if (!found || order.price < bestPrice) {
@@ -424,14 +429,19 @@ contract OrderBookDEX is AccessControl, ReentrancyGuard {
         return (found, bestIndex);
     }
 
-    function findBestBuy(address equityToken, uint256 minPrice) internal view returns (bool found, uint256 index) {
+    function findBestBuy(address equityToken, uint256 minPrice, address excludedTrader) internal view returns (bool found, uint256 index) {
         Order[] storage orders = buyOrders[equityToken];
         uint256 bestPrice = 0;
         uint256 bestIndex = 0;
 
         for (uint256 i = 0; i < orders.length; i++) {
             Order storage order = orders[i];
-            if (!order.active || order.remaining == 0 || order.price < minPrice) {
+            if (
+                !order.active ||
+                order.remaining == 0 ||
+                order.price < minPrice ||
+                order.trader == excludedTrader
+            ) {
                 continue;
             }
             if (!found || order.price > bestPrice) {

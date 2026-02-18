@@ -206,6 +206,17 @@
     let nextCursor = null;
     let currentItems = [];
     const PAGE_SIZE = 50;
+    const usTimeFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+      timeZoneName: "short",
+    });
 
     function setStatus(text, tone = "") {
       statusEl.textContent = text;
@@ -239,7 +250,31 @@
 
     function formatTime(timestampMs) {
       if (!timestampMs) return "-";
-      return new Date(timestampMs).toLocaleString();
+      return usTimeFormatter.format(new Date(timestampMs));
+    }
+
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
+          }
+        }
+      }
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
     }
 
     function formatCentsToTTokenPerUnit(priceCents) {
@@ -421,7 +456,7 @@
 
     if (window.ethereum) {
       window.ethereum.on("accountsChanged", async (accounts) => {
-        currentWallet = accounts[0] || "";
+        currentWallet = chooseDisplayAccount(accounts);
         walletEl.textContent = currentWallet || "-";
         nextCursor = null;
         currentItems = [];
@@ -435,7 +470,7 @@
         return;
       }
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-      currentWallet = accounts[0] || "";
+      currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = currentWallet || "-";
       nextCursor = null;
       currentItems = [];

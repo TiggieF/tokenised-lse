@@ -316,6 +316,30 @@
       // wallet address dis
     }
 
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
+          }
+        }
+      }
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
     const modeSell = document.getElementById("mode-sell");
     const modeAuto = document.getElementById("mode-auto");
     const sellPanel = document.getElementById("sell-panel");
@@ -393,12 +417,12 @@
           method: "eth_requestAccounts",
         }
       );
-      setWalletAddress(accounts[0]);
+      setWalletAddress(chooseDisplayAccount(accounts));
       await loadAutoRules();
       updateSellQty(100);
     })();
     window.ethereum.on("accountsChanged", (accounts) => {
-      setWalletAddress(accounts[0]);
+      setWalletAddress(chooseDisplayAccount(accounts));
       loadAutoRules();
     });
 
@@ -541,6 +565,13 @@
       );
       const data = await res.json(
       );
+      if (!res.ok) {
+        let errorText = "Order failed";
+        if (data && data.error) {
+          errorText = String(data.error);
+        }
+        throw new Error(errorText);
+      }
       return data.txHash;
     }
 
@@ -549,12 +580,20 @@
         sellStatus.textContent = `${symbolLabel.textContent} is ${symbolLifecycle} by admin`;
         return;
       }
-      const priceCents = parsePriceToCents(sellPriceInput.value);
-      const qtyText = document.querySelector("#sell-panel + .card .qty div").textContent;
-      const qty = Number(qtyText);
-      sellStatus.textContent = "Submitting";
-      const hash = await placeLimitOrder("SELL", priceCents, qty);
-      sellStatus.textContent = `Order placed: ${String(hash)}`;
+      try {
+        const priceCents = parsePriceToCents(sellPriceInput.value);
+        const qtyText = document.querySelector("#sell-panel + .card .qty div").textContent;
+        const qty = Number(qtyText);
+        sellStatus.textContent = "Submitting";
+        const hash = await placeLimitOrder("SELL", priceCents, qty);
+        sellStatus.textContent = `Order placed: ${String(hash)}`;
+      } catch (err) {
+        if (err && err.message) {
+          sellStatus.textContent = err.message;
+        } else {
+          sellStatus.textContent = "Order failed";
+        }
+      }
     });
 
     autoButton.addEventListener("click", async () => {

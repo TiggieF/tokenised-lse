@@ -217,6 +217,30 @@
       equityWallet.textContent = address;
     }
 
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
+          }
+        }
+      }
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
     equityMinusBtn.addEventListener("click", () => {
       equityAmount = Math.max(100, equityAmount - STEP);
       renderEquityAmount();
@@ -318,10 +342,10 @@
           method: "eth_requestAccounts",
         }
       );
-      setWalletAddress(accounts[0]);
+      setWalletAddress(chooseDisplayAccount(accounts));
     })();
     window.ethereum.on("accountsChanged", (accounts) => {
-      setWalletAddress(accounts[0]);
+      setWalletAddress(chooseDisplayAccount(accounts));
     });
   </script>
 </body>

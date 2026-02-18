@@ -7,7 +7,7 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "coverage": "hardhat coverage",
-    "dev:chain": "sh -c 'npx hardhat node > logs/hardhat.log 2>&1 & sleep 1 && npx hardhat run scripts/deploy-ttoken.js --network localhost && npx hardhat run scripts/deploy-listings.js --network localhost && npx hardhat run scripts/deploy-orderbook.js --network localhost && npx hardhat run scripts/deploy-dividends.js --network localhost && npx hardhat run scripts/deploy-leveraged.js --network localhost && npx hardhat run scripts/deploy-award.js --network localhost'"
+    "dev:chain": "sh -c 'npx hardhat node > logs/hardhat.log 2>&1 & sleep 1 && npx hardhat run scripts/deploy-ttoken.js --network localhost && npx hardhat run scripts/deploy-listings.js --network localhost && npx hardhat run scripts/deploy-orderbook.js --network localhost && npx hardhat run scripts/deploy-dividends.js --network localhost && npx hardhat run scripts/deploy-dividends-merkle.js --network localhost && npx hardhat run scripts/deploy-leveraged.js --network localhost && npx hardhat run scripts/deploy-award.js --network localhost'"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
