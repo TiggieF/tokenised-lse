@@ -2,7 +2,7 @@
 
 ## 13.7.0 Purpose
 
-Add a verification pipeline that replays chain history deterministically and proves off-chain reconstructed state matches on-chain truth.
+Add an in-system reconciliation service that replays chain history deterministically and proves off-chain reconstructed state matches on-chain truth.
 
 This stage is verification only.
 
@@ -16,17 +16,20 @@ This stage is verification only.
 
 In scope:
 
-- deterministic replay script
-- reconciliation report generation
+- deterministic replay engine inside backend service
+- admin/API-triggered reconciliation run
+- optional scheduled background reconciliation run
+- latest status endpoint for UI
 - mismatch diff output
-- repeatability checksum
-- warn-only CI behavior
+- warn-only mismatch behavior
 
 Out of scope:
 
 - auto-healing indexer state
 - replacing existing indexer runtime
 - on-chain assertions
+- separate local-only verification toolchain for this stage
+- file-report pipeline as primary operator flow
 
 ---
 
@@ -122,29 +125,28 @@ Output mismatch format:
 
 ---
 
-## 13.7.5 Scripts and Commands
+## 13.7.5 System Endpoints and Service Behavior
 
-New script:
+System endpoints:
 
-- `scripts/verify/replay-reconcile.js`
+- `POST /api/reconcile/run`
+  - triggers one reconciliation run immediately
+- `GET /api/reconcile/status`
+  - returns latest run summary and mismatch count
+- `GET /api/reconcile/report`
+  - returns latest detailed report payload
 
-Config:
+Service behavior:
 
-- `scripts/verify/reconcile-config.json`
-  - contract addresses
-  - deployment block
-  - sample wallet list
-  - module toggles
-
-Command:
-
-- `npm run verify:reconcile`
+- backend computes reconciliation from deployment block to latest block
+- backend stores latest result in in-memory runtime state
+- optional interval run via server timer for ongoing monitoring
+- no local CLI script is required for stage acceptance
 
 Output:
 
-- `reports/reconcile/latest.json`
-- optional archived run:
-  - `reports/reconcile/history/<timestamp>.json`
+- latest summary + mismatches exposed via API and admin page
+- optional export/history endpoint can be added later, not required in this stage
 
 Report fields:
 
@@ -158,39 +160,48 @@ Report fields:
 
 ---
 
-## 13.7.6 CI and Exit Behavior
+## 13.7.6 UI and Admin Integration
 
-Decision locked:
+- Admin page section:
+  - Run reconciliation button
+  - Last run time
+  - Status badge (`OK` / `MISMATCH`)
+  - mismatch count
+  - view latest report details
 
-- warn-only CI mode
+No end-user pages are changed in this stage.
+
+---
+
+## 13.7.7 Exit Behavior
 
 Behavior:
 
-- command exits zero even with mismatches
-- mismatches still printed and saved in report
-- if status mismatch, add clear warning banner in console output
+- reconciliation run completes even if mismatches are present
+- status is set to `mismatch` and details are returned
+- service remains online and warns only
 
 ---
 
-## 13.7.7 Tests
+## 13.7.8 Tests
 
 New test file:
 
-- `test/reconcile.replay.test.js`
+- `test/reconcile.system.test.js`
 
 Required test scenarios:
 
-1. deterministic replay on fixed fixture gives zero mismatches
-2. running same replay twice gives identical checksum
-3. tampered expected state triggers mismatch detection
-4. mismatch report contains exact path-level diff entries
+1. endpoint run returns valid report schema
+2. unchanged state yields stable checksum
+3. injected mismatch path is detected and reported
+4. status endpoint returns latest summary after run
 
 ---
 
-## 13.7.8 Acceptance Criteria
+## 13.7.9 Acceptance Criteria
 
-1. `npm run verify:reconcile` produces deterministic report
+1. `POST /api/reconcile/run` produces deterministic report payload
 2. unchanged chain yields same checksum across repeated runs
-3. mismatch mode is correctly detected and surfaced
+3. mismatch mode is correctly detected and surfaced in admin endpoint/UI
 4. checker uses on-chain truth for all final comparisons
-5. CI remains warn-only, not hard fail
+5. run behavior is warn-only, not hard fail

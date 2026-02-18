@@ -271,22 +271,20 @@ Add Merkle-proof dividends while keeping existing snapshot dividends operational
 ### Stage 13.7 — Deterministic Replay and Reconciliation Checker
 
 **Objective:**
-Add a verification layer that deterministically replays chain events and reconciles against on-chain state.
+Add an in-system reconciliation service that deterministically replays chain events and reconciles against on-chain state.
 
 **Key Files:**
 
 * `docs/stages/stage13.7-Reconciliation-Checker.md` (new)
-* `scripts/verify/replay-reconcile.js` (new)
-* `scripts/verify/reconcile-config.json` (new)
-* `test/reconcile.replay.test.js` (new)
-* `reports/reconcile/*` (generated)
+* `scripts/ui/html/server.js`
+* `scripts/ui/html/public/admin.html`
 
 **Approval Criteria:**
 
-* One command runs deterministic replay from deployment block
-* Report includes pass/mismatch status with field-level diffs
-* On unchanged chain, repeat runs produce same checksum
-* Warn-only CI behavior is documented and active
+* Admin can trigger reconciliation from system UI/API
+* Backend can run reconciliation from API and update latest status in runtime state
+* Reconciliation output includes pass/mismatch status with field-level diffs
+* Warn-only behavior is active for mismatches
 
 ---
 

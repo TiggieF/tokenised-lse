@@ -15,11 +15,13 @@ const yahooFinance = new YahooFinance({
 const candleCache = new Map();
 const CANDLE_TTL_MS = 300000;
 const quoteCache = new Map();
-const QUOTE_TTL_MS = 5000;
+const QUOTE_TTL_MS = 2000;
 const fmpQuoteCache = new Map();
-const FMP_QUOTE_TTL_MS = 5000;
+const FMP_QUOTE_TTL_MS = 2000;
 const fmpInfoCache = new Map();
 const FMP_INFO_TTL_MS = 60000;
+const fmpDetailsCache = new Map();
+const FMP_DETAILS_TTL_MS = 30000;
 const INDEXER_SYNC_INTERVAL_MS = 5000;
 // fmp caches
 const FMP_API_KEY = process.env.FMP_API_KEY || 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
@@ -193,10 +195,19 @@ const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
 const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
 const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
 const AUTOTRADE_POLL_INTERVAL_MS = 3000;
+const GAS_WARN_THRESHOLD_PCT = 15;
+const GAS_AUTO_RUN_INTERVAL_MS = 60000;
+const GAS_PAGE_POLL_MS = 1500;
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
 let autoTradeLoopBusy = false;
+let gasRunInFlight = null;
+const gasRuntimeState = {
+  lastRunAtMs: 0,
+  latest: null,
+  baseline: {},
+};
 
 async function ensureContract(address) {
   const code = await hardhatRpc('eth_getCode', [address, 'latest']);
@@ -436,6 +447,646 @@ async function setOnchainPriceForSymbol(symbolRaw, priceCentsRaw) {
     return { ok: true, priceCents };
   } catch {
     return { ok: false, error: `cannot update onchain price for ${symbol}` };
+  }
+}
+
+function toBigIntSafe(value) {
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
+}
+
+function toEthString(weiValue) {
+  try {
+    return ethers.formatEther(weiValue);
+  } catch {
+    return '0';
+  }
+}
+
+function calcDeltaPct(gasUsed, baselineGasUsed) {
+  const current = Number(gasUsed);
+  const baseline = Number(baselineGasUsed);
+  if (!(baseline > 0)) {
+    return null;
+  }
+  return ((current - baseline) / baseline) * 100;
+}
+
+function getGasStatus(deltaPct) {
+  if (deltaPct === null) {
+    return 'OK';
+  }
+  if (deltaPct > GAS_WARN_THRESHOLD_PCT) {
+    return 'WARN';
+  }
+  return 'OK';
+}
+
+function toUserErrorMessage(messageRaw) {
+  const message = String(messageRaw || '');
+  if (message.includes('leveragedrouter: price unavailable')) {
+    return 'Base price is not available yet please wait for oracle update';
+  }
+  if (message.includes('0xe450d38c') || message.includes('ERC20InsufficientBalance')) {
+    return 'Insufficient token balance for this transaction';
+  }
+  if (message.includes('0xfb8f41b2') || message.includes('ERC20InsufficientAllowance')) {
+    return 'Token allowance is not enough please approve again';
+  }
+  if (message.includes('award: epoch not ended')) {
+    return 'Award claim is not available until the current epoch ends';
+  }
+  if (message.includes('product not found')) {
+    return 'Selected leveraged product does not exist';
+  }
+  return message;
+}
+
+async function sendMeasuredTx(input) {
+  const txHash = await hardhatRpc('eth_sendTransaction', [input.tx]);
+  const receipt = await waitForReceipt(txHash, 60);
+  const gasUsed = toBigIntSafe(receipt.gasUsed);
+  let effectiveGasPrice = 0n;
+  if (receipt.effectiveGasPrice) {
+    effectiveGasPrice = toBigIntSafe(receipt.effectiveGasPrice);
+  } else {
+    const latest = await hardhatRpc('eth_gasPrice', []);
+    effectiveGasPrice = toBigIntSafe(latest);
+  }
+  const costWei = gasUsed * effectiveGasPrice;
+  return {
+    txHash,
+    gasUsed,
+    effectiveGasPrice,
+    costWei,
+    receipt,
+  };
+}
+
+async function runGasPackOnce(suiteRaw) {
+  const suite = String(suiteRaw || 'core').toLowerCase();
+  const startedAtMs = Date.now();
+  const deployments = loadDeployments();
+  const accounts = await hardhatRpc('eth_accounts', []);
+  if (!Array.isArray(accounts) || accounts.length < 2) {
+    throw new Error('need at least 2 local accounts');
+  }
+  const admin = accounts[0];
+  const traderA = accounts[0];
+  const traderB = accounts[1];
+
+  const registryAddress = normalizeAddress(deployments.listingsRegistry);
+  const orderBookAddress = normalizeAddress(deployments.orderBookDex);
+  const ttokenAddress = normalizeAddress(getTTokenAddressFromDeployments());
+  const dividendsAddress = normalizeAddress(deployments.dividends);
+  const merkleDividendsAddress = normalizeAddress(deployments.dividendsMerkle);
+  const leveragedFactoryAddress = normalizeAddress(deployments.leveragedTokenFactory);
+  const leveragedRouterAddress = normalizeAddress(deployments.leveragedProductRouter);
+  const awardAddress = normalizeAddress(deployments.award);
+
+  if (!registryAddress || !orderBookAddress || !ttokenAddress) {
+    throw new Error('missing deployed contracts for gas pack');
+  }
+
+  const allSymbolsData = registryListInterface.encodeFunctionData('getAllSymbols', []);
+  const allSymbolsResult = await hardhatRpc('eth_call', [{ to: registryAddress, data: allSymbolsData }, 'latest']);
+  const [allSymbols] = registryListInterface.decodeFunctionResult('getAllSymbols', allSymbolsResult);
+  if (!Array.isArray(allSymbols) || allSymbols.length === 0) {
+    throw new Error('no listed symbols for gas pack');
+  }
+  const symbol = allSymbols[0];
+  const listingData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
+  const listingResult = await hardhatRpc('eth_call', [{ to: registryAddress, data: listingData }, 'latest']);
+  const [equityTokenAddressRaw] = listingsRegistryInterface.decodeFunctionResult('getListing', listingResult);
+  const equityTokenAddress = normalizeAddress(equityTokenAddressRaw);
+  if (!equityTokenAddress || equityTokenAddress === ethers.ZeroAddress) {
+    throw new Error(`listing missing token address for ${symbol}`);
+  }
+
+  const now = Date.now();
+  const tempSymbol = `G${String(now).slice(-5)}`;
+  const oneShareWei = ethers.parseUnits('1', 18);
+  const hundredSharesWei = ethers.parseUnits('100', 18);
+  const oneTTokenWei = ethers.parseUnits('1', 18);
+  const hundredTTokenWei = ethers.parseUnits('100', 18);
+
+  const rows = [];
+  function pushRow(name, measured, extra = {}) {
+    const baselineGasUsed = gasRuntimeState.baseline[name] || 0;
+    const deltaPct = calcDeltaPct(measured.gasUsed, baselineGasUsed);
+    rows.push({
+      txName: name,
+      gasUsed: measured.gasUsed.toString(),
+      effectiveGasPrice: measured.effectiveGasPrice.toString(),
+      costWei: measured.costWei.toString(),
+      costEth: toEthString(measured.costWei),
+      baselineGasUsed: String(baselineGasUsed),
+      deltaPct,
+      status: getGasStatus(deltaPct),
+      txHash: measured.txHash,
+      ...extra,
+    });
+  }
+
+  function pushSkipped(name, reason) {
+    rows.push({
+      txName: name,
+      gasUsed: '0',
+      effectiveGasPrice: '0',
+      costWei: '0',
+      costEth: '0',
+      baselineGasUsed: String(gasRuntimeState.baseline[name] || 0),
+      deltaPct: null,
+      status: 'SKIP',
+      skipReason: reason,
+    });
+  }
+
+  const snapshotId = await hardhatRpc('evm_snapshot', []);
+  try {
+    let canRunBuySide = true;
+    let canRunSellSide = true;
+
+    try {
+      const buyerBalData = equityTokenInterface.encodeFunctionData('balanceOf', [traderA]);
+      const buyerBalResult = await hardhatRpc('eth_call', [{ to: ttokenAddress, data: buyerBalData }, 'latest']);
+      const [buyerBalanceRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', buyerBalResult);
+      const buyerBalance = toBigIntSafe(buyerBalanceRaw);
+      const neededBuyerTToken = ethers.parseUnits('500', 18);
+      if (buyerBalance < neededBuyerTToken) {
+        await sendMeasuredTx({
+          tx: {
+            from: admin,
+            to: ttokenAddress,
+            data: equityTokenInterface.encodeFunctionData('mint', [traderA, neededBuyerTToken - buyerBalance]),
+          },
+        });
+      }
+    } catch (err) {
+      canRunBuySide = false;
+    }
+
+    try {
+      const sellerBalData = equityTokenInterface.encodeFunctionData('balanceOf', [traderB]);
+      const sellerBalResult = await hardhatRpc('eth_call', [{ to: equityTokenAddress, data: sellerBalData }, 'latest']);
+      const [sellerBalanceRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', sellerBalResult);
+      const sellerBalance = toBigIntSafe(sellerBalanceRaw);
+      const neededSellerQty = hundredSharesWei;
+      if (sellerBalance < neededSellerQty) {
+        const mintShares = await sendMeasuredTx({
+          tx: {
+            from: admin,
+            to: equityTokenAddress,
+            data: equityTokenInterface.encodeFunctionData('mint', [traderB, neededSellerQty - sellerBalance]),
+          },
+        });
+        pushRow('mint_equity_for_seller_setup', mintShares);
+      } else {
+        pushSkipped('mint_equity_for_seller_setup', 'already funded');
+      }
+    } catch (err) {
+      canRunSellSide = false;
+      pushSkipped('mint_equity_for_seller_setup', err.message || 'cannot fund seller equity');
+    }
+
+    if (canRunBuySide) {
+      try {
+        const approveBuyer = await sendMeasuredTx({
+          tx: {
+            from: traderA,
+            to: ttokenAddress,
+            data: equityTokenInterface.encodeFunctionData('approve', [orderBookAddress, ethers.MaxUint256]),
+          },
+        });
+        pushRow('approve_ttoken_for_dex', approveBuyer);
+      } catch (err) {
+        canRunBuySide = false;
+        pushSkipped('approve_ttoken_for_dex', err.message || 'cannot approve ttoken');
+      }
+    } else {
+      pushSkipped('approve_ttoken_for_dex', 'buyer setup failed');
+    }
+
+    if (canRunSellSide) {
+      try {
+        const approveSeller = await sendMeasuredTx({
+          tx: {
+            from: traderB,
+            to: equityTokenAddress,
+            data: equityTokenInterface.encodeFunctionData('approve', [orderBookAddress, ethers.MaxUint256]),
+          },
+        });
+        pushRow('approve_equity_for_dex', approveSeller);
+      } catch (err) {
+        canRunSellSide = false;
+        pushSkipped('approve_equity_for_dex', err.message || 'cannot approve equity');
+      }
+    } else {
+      pushSkipped('approve_equity_for_dex', 'seller setup failed');
+    }
+
+    if (suite === 'core' || suite === 'all') {
+      const listSymbol = await sendMeasuredTx({
+        tx: {
+          from: admin,
+          to: normalizeAddress(deployments.equityTokenFactory),
+          data: equityFactoryInterface.encodeFunctionData('createEquityToken', [tempSymbol, `Gas ${tempSymbol}`]),
+        },
+      });
+      pushRow('list_symbol', listSymbol, { symbol: tempSymbol });
+
+      let placeSell = null;
+      if (canRunBuySide) {
+        try {
+          const placeBuy = await sendMeasuredTx({
+            tx: {
+              from: traderA,
+              to: orderBookAddress,
+              data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 0, 100n, hundredSharesWei]),
+            },
+          });
+          pushRow('place_buy_limit', placeBuy, { symbol });
+        } catch (err) {
+          canRunBuySide = false;
+          pushSkipped('place_buy_limit', err.message || 'place buy failed');
+        }
+      } else {
+        pushSkipped('place_buy_limit', 'buyer setup failed');
+      }
+
+      if (canRunSellSide) {
+        try {
+          placeSell = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: orderBookAddress,
+              data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 1, 120n, hundredSharesWei]),
+            },
+          });
+          pushRow('place_sell_limit', placeSell, { symbol });
+        } catch (err) {
+          canRunSellSide = false;
+          pushSkipped('place_sell_limit', err.message || 'place sell failed');
+        }
+      } else {
+        pushSkipped('place_sell_limit', 'seller setup failed');
+      }
+
+      if (placeSell) {
+        const placedIds = [];
+        for (let i = 0; i < placeSell.receipt.logs.length; i += 1) {
+          const log = placeSell.receipt.logs[i];
+          try {
+            const parsed = orderBookInterface.parseLog(log);
+            if (parsed && parsed.name === 'OrderPlaced') {
+              placedIds.push(toBigIntSafe(parsed.args.id));
+            }
+          } catch {
+          }
+        }
+        if (placedIds.length > 0) {
+          const cancel = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: orderBookAddress,
+              data: orderBookInterface.encodeFunctionData('cancelOrder', [placedIds[0]]),
+            },
+          });
+          pushRow('cancel_order', cancel, { symbol });
+        } else {
+          pushSkipped('cancel_order', 'could not parse order id');
+        }
+      } else {
+        pushSkipped('cancel_order', 'sell order not available for cancel');
+      }
+
+      if (dividendsAddress) {
+        try {
+          const declareSnapshot = await sendMeasuredTx({
+            tx: {
+              from: admin,
+              to: dividendsAddress,
+              data: dividendsInterface.encodeFunctionData('declareDividendPerShare', [equityTokenAddress, oneTTokenWei]),
+            },
+          });
+          pushRow('snapshot_dividend_declare', declareSnapshot, { symbol });
+
+          const epochCountCall = dividendsInterface.encodeFunctionData('epochCount', [equityTokenAddress]);
+          const epochCountResult = await hardhatRpc('eth_call', [{ to: dividendsAddress, data: epochCountCall }, 'latest']);
+          const [epochCount] = dividendsInterface.decodeFunctionResult('epochCount', epochCountResult);
+          const epochId = toBigIntSafe(epochCount);
+          const claimSnapshot = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: dividendsAddress,
+              data: dividendsInterface.encodeFunctionData('claimDividend', [equityTokenAddress, epochId]),
+            },
+          });
+          pushRow('snapshot_dividend_claim', claimSnapshot, { symbol, epochId: epochId.toString() });
+        } catch (err) {
+          pushSkipped('snapshot_dividend_declare', err.message || 'failed');
+          pushSkipped('snapshot_dividend_claim', 'declare/claim unavailable');
+        }
+      } else {
+        pushSkipped('snapshot_dividend_declare', 'dividends not deployed');
+        pushSkipped('snapshot_dividend_claim', 'dividends not deployed');
+      }
+
+      if (merkleDividendsAddress) {
+        try {
+          const merkleCountCall = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+          const merkleCountResult = await hardhatRpc('eth_call', [{ to: merkleDividendsAddress, data: merkleCountCall }, 'latest']);
+          const [beforeCount] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', merkleCountResult);
+          const newEpochId = toBigIntSafe(beforeCount) + 1n;
+          const leafAmount = ethers.parseUnits('3', 18);
+          const leafIndex = 0n;
+          const leaf = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+            ['uint256', 'address', 'address', 'uint256', 'uint256'],
+            [newEpochId, equityTokenAddress, traderB, leafAmount, leafIndex],
+          ));
+          const contentHash = ethers.keccak256(ethers.toUtf8Bytes(`gas-pack-${Date.now()}`));
+          const declareMerkle = await sendMeasuredTx({
+            tx: {
+              from: admin,
+              to: merkleDividendsAddress,
+              data: dividendsMerkleInterface.encodeFunctionData('declareMerkleDividend', [equityTokenAddress, leaf, leafAmount, contentHash, '']),
+            },
+          });
+          pushRow('merkle_dividend_declare', declareMerkle, { symbol, epochId: newEpochId.toString() });
+
+          const claimMerkle = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: merkleDividendsAddress,
+              data: dividendsMerkleInterface.encodeFunctionData('claim', [newEpochId, traderB, leafAmount, leafIndex, []]),
+            },
+          });
+          pushRow('merkle_dividend_claim', claimMerkle, { symbol, epochId: newEpochId.toString() });
+        } catch (err) {
+          pushSkipped('merkle_dividend_declare', err.message || 'failed');
+          pushSkipped('merkle_dividend_claim', 'declare/claim unavailable');
+        }
+      } else {
+        pushSkipped('merkle_dividend_declare', 'merkle dividends not deployed');
+        pushSkipped('merkle_dividend_claim', 'merkle dividends not deployed');
+      }
+
+      if (leveragedFactoryAddress && leveragedRouterAddress) {
+        try {
+          const productCountCall = leveragedFactoryInterface.encodeFunctionData('productCount', []);
+          const productCountResult = await hardhatRpc('eth_call', [{ to: leveragedFactoryAddress, data: productCountCall }, 'latest']);
+          const [productCount] = leveragedFactoryInterface.decodeFunctionResult('productCount', productCountResult);
+          const productCountNumber = Number(productCount);
+          if (productCountNumber > 0) {
+            const productAtCall = leveragedFactoryInterface.encodeFunctionData('getProductAt', [0]);
+            const productAtResult = await hardhatRpc('eth_call', [{ to: leveragedFactoryAddress, data: productAtCall }, 'latest']);
+            const [productTuple] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', productAtResult);
+            const productToken = normalizeAddress(productTuple.token);
+            const leveragedBaseSymbol = String(productTuple.baseSymbol || '').toUpperCase();
+            if (leveragedBaseSymbol) {
+              const ensurePriceResult = await ensureOnchainPriceForSymbol(leveragedBaseSymbol);
+              if (!ensurePriceResult.ok) {
+                throw new Error(ensurePriceResult.error || `price unavailable for ${leveragedBaseSymbol}`);
+              }
+            }
+
+            const approveRouter = await sendMeasuredTx({
+              tx: {
+                from: traderA,
+                to: ttokenAddress,
+                data: equityTokenInterface.encodeFunctionData('approve', [leveragedRouterAddress, ethers.MaxUint256]),
+              },
+            });
+            pushRow('approve_ttoken_for_leveraged', approveRouter);
+
+            const mintLeveraged = await sendMeasuredTx({
+              tx: {
+                from: traderA,
+                to: leveragedRouterAddress,
+                data: leveragedRouterInterface.encodeFunctionData('mintLong', [productToken, hundredTTokenWei, 0n]),
+              },
+            });
+            pushRow('leveraged_mint', mintLeveraged);
+
+            let mintedOut = 0n;
+            for (let i = 0; i < mintLeveraged.receipt.logs.length; i += 1) {
+              const log = mintLeveraged.receipt.logs[i];
+              try {
+                const parsed = leveragedRouterInterface.parseLog(log);
+                if (parsed && parsed.name === 'LeveragedMinted') {
+                  mintedOut = toBigIntSafe(parsed.args.productOutWei);
+                }
+              } catch {
+              }
+            }
+            if (mintedOut > 0n) {
+              const unwindLeveraged = await sendMeasuredTx({
+                tx: {
+                  from: traderA,
+                  to: leveragedRouterAddress,
+                  data: leveragedRouterInterface.encodeFunctionData('unwindLong', [productToken, mintedOut, 0n]),
+                },
+              });
+              pushRow('leveraged_unwind', unwindLeveraged);
+            } else {
+              pushSkipped('leveraged_unwind', 'minted amount missing from logs');
+            }
+          } else {
+            pushSkipped('leveraged_mint', 'no leveraged products');
+            pushSkipped('leveraged_unwind', 'no leveraged products');
+          }
+        } catch (err) {
+          pushSkipped('leveraged_mint', err.message || 'failed');
+          pushSkipped('leveraged_unwind', 'mint/unwind unavailable');
+        }
+      } else {
+        pushSkipped('leveraged_mint', 'leveraged contracts not deployed');
+        pushSkipped('leveraged_unwind', 'leveraged contracts not deployed');
+      }
+
+    }
+
+    if (suite === 'stress' || suite === 'all') {
+      let deepGasUsed = 0n;
+      let deepCostWei = 0n;
+      let deepTxCount = 0;
+      if (canRunBuySide && canRunSellSide) {
+        try {
+          for (let i = 0; i < 6; i += 1) {
+            const price = BigInt(300 + i);
+            const buyTx = await sendMeasuredTx({
+              tx: {
+                from: traderA,
+                to: orderBookAddress,
+                data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 0, price, oneShareWei]),
+              },
+            });
+            deepGasUsed += buyTx.gasUsed;
+            deepCostWei += buyTx.costWei;
+            deepTxCount += 1;
+          }
+          const stressSell = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: orderBookAddress,
+              data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 1, 100n, ethers.parseUnits('6', 18)]),
+            },
+          });
+          deepGasUsed += stressSell.gasUsed;
+          deepCostWei += stressSell.costWei;
+          deepTxCount += 1;
+          const stressMeasured = {
+            txHash: stressSell.txHash,
+            gasUsed: deepGasUsed,
+            effectiveGasPrice: deepGasUsed > 0n ? deepCostWei / deepGasUsed : 0n,
+            costWei: deepCostWei,
+          };
+          pushRow('stress_deep_orderbook_match_loop', stressMeasured, { txCount: deepTxCount });
+        } catch (err) {
+          pushSkipped('stress_deep_orderbook_match_loop', err.message || 'stress orderbook run failed');
+        }
+      } else {
+        pushSkipped('stress_deep_orderbook_match_loop', 'buyer or seller setup failed');
+      }
+
+      if (merkleDividendsAddress) {
+        try {
+          const claimants = [accounts[0], accounts[1], accounts[2], accounts[3]];
+          const leafAmount = ethers.parseUnits('2', 18);
+          let claimGas = 0n;
+          let claimCost = 0n;
+          let declareGas = 0n;
+          let declareCost = 0n;
+          let lastTxHash = '';
+          for (let i = 0; i < claimants.length; i += 1) {
+            const merkleCountCall = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+            const merkleCountResult = await hardhatRpc('eth_call', [{ to: merkleDividendsAddress, data: merkleCountCall }, 'latest']);
+            const [beforeCount] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', merkleCountResult);
+            const epochId = toBigIntSafe(beforeCount) + 1n;
+            const leafIndex = 0n;
+            const leaf = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+              ['uint256', 'address', 'address', 'uint256', 'uint256'],
+              [epochId, equityTokenAddress, claimants[i], leafAmount, leafIndex],
+            ));
+            const declare = await sendMeasuredTx({
+              tx: {
+                from: admin,
+                to: merkleDividendsAddress,
+                data: dividendsMerkleInterface.encodeFunctionData('declareMerkleDividend', [equityTokenAddress, leaf, leafAmount, ethers.keccak256(ethers.toUtf8Bytes(`gas-stress-merkle-${i}`)), '']),
+              },
+            });
+            declareGas += declare.gasUsed;
+            declareCost += declare.costWei;
+            lastTxHash = declare.txHash;
+            const proof = [];
+            const claimTx = await sendMeasuredTx({
+              tx: {
+                from: claimants[i],
+                to: merkleDividendsAddress,
+                data: dividendsMerkleInterface.encodeFunctionData('claim', [epochId, claimants[i], leafAmount, leafIndex, proof]),
+              },
+            });
+            claimGas += claimTx.gasUsed;
+            claimCost += claimTx.costWei;
+            lastTxHash = claimTx.txHash;
+          }
+          const summary = {
+            txHash: lastTxHash,
+            gasUsed: claimGas + declareGas,
+            effectiveGasPrice: (claimGas + declareGas) > 0n ? (claimCost + declareCost) / (claimGas + declareGas) : 0n,
+            costWei: claimCost + declareCost,
+          };
+          pushRow('stress_merkle_claim_sequence', summary, { claimants: claimants.length });
+        } catch (err) {
+          pushSkipped('stress_merkle_claim_sequence', err.message || 'failed');
+        }
+      } else {
+        pushSkipped('stress_merkle_claim_sequence', 'merkle contract not deployed');
+      }
+
+      let awardStressGas = 0n;
+      let awardStressCost = 0n;
+      let awardStressTxCount = 0;
+      if (canRunBuySide && canRunSellSide) {
+        try {
+          for (let i = 0; i < 5; i += 1) {
+            const buyTx = await sendMeasuredTx({
+              tx: {
+                from: traderA,
+                to: orderBookAddress,
+                data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 0, 100n, oneShareWei]),
+              },
+            });
+            awardStressGas += buyTx.gasUsed;
+            awardStressCost += buyTx.costWei;
+            awardStressTxCount += 1;
+            const sellTx = await sendMeasuredTx({
+              tx: {
+                from: traderB,
+                to: orderBookAddress,
+                data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 1, 100n, oneShareWei]),
+              },
+            });
+            awardStressGas += sellTx.gasUsed;
+            awardStressCost += sellTx.costWei;
+            awardStressTxCount += 1;
+          }
+          pushRow('stress_award_high_fill_density', {
+            txHash: '',
+            gasUsed: awardStressGas,
+            effectiveGasPrice: awardStressGas > 0n ? awardStressCost / awardStressGas : 0n,
+            costWei: awardStressCost,
+          }, { txCount: awardStressTxCount });
+        } catch (err) {
+          pushSkipped('stress_award_high_fill_density', err.message || 'stress award run failed');
+        }
+      } else {
+        pushSkipped('stress_award_high_fill_density', 'buyer or seller setup failed');
+      }
+    }
+  } finally {
+    await hardhatRpc('evm_revert', [snapshotId]);
+  }
+
+  const finishedAtMs = Date.now();
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const chainIdHex = await hardhatRpc('eth_chainId', []);
+  const warnCount = rows.filter((one) => one.status === 'WARN').length;
+  const skipCount = rows.filter((one) => one.status === 'SKIP').length;
+  const report = {
+    suite,
+    startedAtMs,
+    finishedAtMs,
+    durationMs: finishedAtMs - startedAtMs,
+    chainId: parseRpcInt(chainIdHex),
+    latestBlock: parseRpcInt(latestBlockHex),
+    thresholdPct: GAS_WARN_THRESHOLD_PCT,
+    warnCount,
+    skipCount,
+    totalRows: rows.length,
+    pollMs: GAS_PAGE_POLL_MS,
+    rows,
+  };
+  return report;
+}
+
+async function runGasPackGuarded(suite) {
+  if (gasRunInFlight) {
+    return gasRunInFlight;
+  }
+  gasRunInFlight = (async function () {
+    const report = await runGasPackOnce(suite);
+    gasRuntimeState.lastRunAtMs = Date.now();
+    gasRuntimeState.latest = report;
+    return report;
+  })();
+  try {
+    return await gasRunInFlight;
+  } finally {
+    gasRunInFlight = null;
   }
 }
 function addCashflow(cashflows, input) {
@@ -1957,6 +2608,286 @@ app.get('/api/fmp/stock-info', async (req, res) => {
     }
   }
 });
+
+app.get('/api/fmp/market-details', async (req, res) => {
+  let symbolRaw = 'TSLA';
+  if (req.query.symbol) {
+    symbolRaw = String(req.query.symbol);
+  }
+  const symbol = symbolRaw.toUpperCase();
+  const cached = fmpDetailsCache.get(symbol);
+
+  try {
+    if (cached && (Date.now() - cached.timestamp) < FMP_DETAILS_TTL_MS) {
+      return res.json(cached.data);
+    }
+
+    const endpointJobs = [
+      ['searchExchangeVariants', getFmpUrl('search-exchange-variants', { symbol })],
+      ['companyScreener', getFmpUrl('company-screener', { limit: '200' })],
+      ['profile', getFmpUrl('profile', { symbol })],
+      ['employeeCount', getFmpUrl('employee-count', { symbol })],
+      ['keyExecutives', getFmpUrl('key-executives', { symbol })],
+      ['quote', getFmpUrl('quote', { symbol })],
+      ['stockPriceChange', getFmpUrl('stock-price-change', { symbol })],
+      ['balanceSheet', getFmpUrl('balance-sheet-statement', { symbol, limit: '4' })],
+      ['keyMetrics', getFmpUrl('key-metrics', { symbol, limit: '4' })],
+      ['ratios', getFmpUrl('ratios', { symbol, limit: '4' })],
+      ['keyMetricsTtm', getFmpUrl('key-metrics-ttm', { symbol })],
+      ['ratiosTtm', getFmpUrl('ratios-ttm', { symbol })],
+      ['enterpriseValues', getFmpUrl('enterprise-values', { symbol, limit: '4' })],
+      ['newsLatest', getFmpUrl('news/stock-latest', { page: '0', limit: '50' })],
+      ['ratingsHistorical', getFmpUrl('ratings-historical', { symbol, limit: '20' })],
+      ['analystEstimates', getFmpUrl('analyst-estimates', { symbol, period: 'annual', page: '0', limit: '20' })],
+      ['priceTargetSummary', getFmpUrl('price-target-summary', { symbol })],
+      ['grades', getFmpUrl('grades', { symbol, limit: '20' })],
+      ['insiderLatest', getFmpUrl('insider-trading/latest', { page: '0', limit: '200' })],
+    ];
+
+    const collected = {};
+    const sourceErrors = {};
+    const settled = await Promise.all(endpointJobs.map(async (job) => {
+      const key = job[0];
+      const url = job[1];
+      try {
+        const payload = await fetchFmpJson(url);
+        return [key, payload];
+      } catch (err) {
+        sourceErrors[key] = err.message || 'request failed';
+        return [key, []];
+      }
+    }));
+    for (let i = 0; i < settled.length; i += 1) {
+      const entry = settled[i];
+      const key = entry[0];
+      const payload = entry[1];
+      collected[key] = payload;
+    }
+
+    function asArray(payload) {
+      if (Array.isArray(payload)) {
+        return payload;
+      }
+      if (payload === null || payload === undefined) {
+        return [];
+      }
+      return [payload];
+    }
+
+    function first(payload) {
+      const rows = asArray(payload);
+      if (rows.length > 0) {
+        return rows[0];
+      }
+      return {};
+    }
+
+    function keepNumber(value) {
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        return n;
+      }
+      return null;
+    }
+
+    const quoteRow = first(collected.quote);
+    const profileRow = first(collected.profile);
+    const changeRow = first(collected.stockPriceChange);
+    const employeeRow = first(collected.employeeCount);
+    const keyMetricsTtmRow = first(collected.keyMetricsTtm);
+    const ratiosTtmRow = first(collected.ratiosTtm);
+    const priceTargetRow = first(collected.priceTargetSummary);
+    const screenerRows = asArray(collected.companyScreener);
+    let screenerRow = {};
+    for (let i = 0; i < screenerRows.length; i += 1) {
+      const row = screenerRows[i];
+      const rowSymbol = String(row.symbol || row.ticker || '').toUpperCase();
+      if (rowSymbol === symbol) {
+        screenerRow = row;
+      }
+    }
+
+    const executivesRows = asArray(collected.keyExecutives).slice(0, 10).map((row) => ({
+      name: String(row.name || ''),
+      title: String(row.title || row.position || ''),
+      pay: keepNumber(row.pay),
+      currency: String(row.currency || ''),
+      year: String(row.year || ''),
+    }));
+
+    const balanceRows = asArray(collected.balanceSheet).slice(0, 4).map((row) => ({
+      date: String(row.date || row.fillingDate || ''),
+      totalAssets: keepNumber(row.totalAssets),
+      totalLiabilities: keepNumber(row.totalLiabilities),
+      totalStockholdersEquity: keepNumber(row.totalStockholdersEquity),
+      cashAndCashEquivalents: keepNumber(row.cashAndCashEquivalents),
+      totalDebt: keepNumber(row.totalDebt),
+    }));
+
+    const metricsRows = asArray(collected.keyMetrics).slice(0, 4).map((row) => ({
+      date: String(row.date || ''),
+      peRatio: keepNumber(row.peRatio),
+      pbRatio: keepNumber(row.pbRatio),
+      roe: keepNumber(row.roe),
+      roa: keepNumber(row.roa),
+      debtToEquity: keepNumber(row.debtToEquity),
+    }));
+
+    const ratiosRows = asArray(collected.ratios).slice(0, 4).map((row) => ({
+      date: String(row.date || ''),
+      currentRatio: keepNumber(row.currentRatio),
+      quickRatio: keepNumber(row.quickRatio),
+      netProfitMargin: keepNumber(row.netProfitMargin),
+      grossProfitMargin: keepNumber(row.grossProfitMargin),
+      returnOnEquity: keepNumber(row.returnOnEquity),
+    }));
+
+    const enterpriseRows = asArray(collected.enterpriseValues).slice(0, 4).map((row) => ({
+      date: String(row.date || ''),
+      stockPrice: keepNumber(row.stockPrice),
+      marketCapitalization: keepNumber(row.marketCapitalization),
+      enterpriseValue: keepNumber(row.enterpriseValue),
+      numberOfShares: keepNumber(row.numberOfShares),
+    }));
+
+    const ratingsRows = asArray(collected.ratingsHistorical).slice(0, 10).map((row) => ({
+      date: String(row.date || ''),
+      rating: String(row.rating || row.ratingRecommendation || ''),
+      score: keepNumber(row.ratingScore),
+    }));
+
+    const estimatesRows = asArray(collected.analystEstimates).slice(0, 10).map((row) => ({
+      date: String(row.date || row.period || ''),
+      estimatedRevenueAvg: keepNumber(row.estimatedRevenueAvg),
+      estimatedEbitdaAvg: keepNumber(row.estimatedEbitdaAvg),
+      estimatedNetIncomeAvg: keepNumber(row.estimatedNetIncomeAvg),
+      estimatedEpsAvg: keepNumber(row.estimatedEpsAvg),
+    }));
+
+    const gradesRows = asArray(collected.grades).slice(0, 10).map((row) => ({
+      date: String(row.date || ''),
+      gradingCompany: String(row.gradingCompany || ''),
+      previousGrade: String(row.previousGrade || ''),
+      newGrade: String(row.newGrade || ''),
+      action: String(row.action || ''),
+    }));
+
+    const newsAllRows = asArray(collected.newsLatest).map((row) => ({
+      symbol: String(row.symbol || row.ticker || ''),
+      title: String(row.title || ''),
+      publisher: String(row.site || row.publisher || ''),
+      publishedDate: String(row.publishedDate || row.date || ''),
+      url: String(row.url || ''),
+    }));
+    const newsFiltered = newsAllRows.filter((row) => {
+      const rowSymbol = String(row.symbol || '').toUpperCase();
+      return !rowSymbol || rowSymbol === symbol;
+    });
+    const newsRows = (newsFiltered.length > 0 ? newsFiltered : newsAllRows)
+      .slice(0, 20)
+      .map((row) => ({
+        symbol: String(row.symbol || row.ticker || ''),
+        title: String(row.title || ''),
+        publisher: String(row.site || row.publisher || ''),
+        publishedDate: String(row.publishedDate || row.date || ''),
+        url: String(row.url || ''),
+      }));
+
+    const insiderAllRows = asArray(collected.insiderLatest).map((row) => ({
+      symbol: String(row.symbol || row.ticker || ''),
+      date: String(row.transactionDate || row.filingDate || row.date || ''),
+      reportingName: String(row.reportingName || row.reporterName || ''),
+      transactionType: String(row.transactionType || ''),
+      securitiesTransacted: keepNumber(row.securitiesTransacted || row.shares),
+      price: keepNumber(row.price),
+    }));
+    const insiderFiltered = insiderAllRows.filter((row) => {
+      const rowSymbol = String(row.symbol || '').toUpperCase();
+      return rowSymbol === symbol;
+    });
+    const insiderRows = (insiderFiltered.length > 0 ? insiderFiltered : insiderAllRows)
+      .slice(0, 20)
+      .map((row) => ({
+        symbol: String(row.symbol || ''),
+        date: String(row.date || ''),
+        reportingName: String(row.reportingName || ''),
+        transactionType: String(row.transactionType || ''),
+        securitiesTransacted: keepNumber(row.securitiesTransacted),
+        price: keepNumber(row.price),
+      }));
+
+    const payload = {
+      symbol,
+      asOfMs: Date.now(),
+      sections: {
+        overview: {
+          name: String(profileRow.companyName || profileRow.name || ''),
+          description: String(profileRow.description || ''),
+          exchange: String(profileRow.exchange || profileRow.exchangeShortName || ''),
+          sector: String(profileRow.sector || screenerRow.sector || ''),
+          industry: String(profileRow.industry || screenerRow.industry || ''),
+          ceo: String(profileRow.ceo || ''),
+          country: String(profileRow.country || ''),
+          city: String(profileRow.city || ''),
+          state: String(profileRow.state || ''),
+          website: String(profileRow.website || ''),
+          currency: String(quoteRow.currency || ''),
+          ipoDate: String(profileRow.ipoDate || ''),
+          price: keepNumber(pick(quoteRow, ['price'])),
+          previousClose: keepNumber(pick(quoteRow, ['previousClose', 'prevClose'])),
+          open: keepNumber(pick(quoteRow, ['open'])),
+          dayLow: keepNumber(pick(quoteRow, ['dayLow', 'low'])),
+          dayHigh: keepNumber(pick(quoteRow, ['dayHigh', 'high'])),
+          yearLow: keepNumber(pick(quoteRow, ['yearLow', 'fiftyTwoWeekLow', '52WeekLow'])),
+          yearHigh: keepNumber(pick(quoteRow, ['yearHigh', 'fiftyTwoWeekHigh', '52WeekHigh'])),
+          marketCap: keepNumber(pick(quoteRow, ['marketCap', 'mktCap'])),
+          volume: keepNumber(pick(quoteRow, ['volume'])),
+          avgVolume: keepNumber(pick(quoteRow, ['avgVolume', 'averageVolume'])),
+          beta: keepNumber(pick(quoteRow, ['beta'])),
+          pe: keepNumber(pick(quoteRow, ['pe', 'peTTM'])),
+          eps: keepNumber(pick(quoteRow, ['eps', 'epsTTM'])),
+          stockPriceChange1D: keepNumber(pick(changeRow, ['1D', 'changesPercentage', 'changePercent'])),
+        },
+        company: {
+          searchExchangeVariants: asArray(collected.searchExchangeVariants).slice(0, 8),
+          employeeCount: keepNumber(pick(employeeRow, ['employeeCount', 'employees'])),
+          phone: String(profileRow.phone || ''),
+          isin: String(profileRow.isin || ''),
+          cusip: String(profileRow.cusip || ''),
+        },
+        people: {
+          keyExecutives: executivesRows,
+        },
+        financial: {
+          balanceSheet: balanceRows,
+          keyMetrics: metricsRows,
+          ratios: ratiosRows,
+          keyMetricsTtm: keyMetricsTtmRow,
+          ratiosTtm: ratiosTtmRow,
+          enterpriseValues: enterpriseRows,
+        },
+        analysis: {
+          ratingsHistorical: ratingsRows,
+          analystEstimates: estimatesRows,
+          priceTargetSummary: priceTargetRow,
+          grades: gradesRows,
+        },
+        news: newsRows,
+        insider: insiderRows,
+      },
+      sourceErrors,
+    };
+
+    fmpDetailsCache.set(symbol, { data: payload, timestamp: Date.now() });
+    res.json(payload);
+  } catch (err) {
+    let msg = '';
+    if (err.message) {
+      msg = err.message;
+    }
+    res.status(502).json({ error: msg });
+  }
+});
 // rest api to get hardhat accounts
 app.get('/api/hardhat/accounts', async (_req, res) => {
   try {
@@ -2097,7 +3028,7 @@ app.post('/api/orderbook/limit', async (req, res) => {
 
     res.json({ txHash: txHash });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 // get orders that's no filled
@@ -2157,7 +3088,7 @@ app.get('/api/orderbook/open', async (_req, res) => {
     });
     res.json({ orders: orders });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -2235,7 +3166,7 @@ app.get('/api/orderbook/fills', async (_req, res) => {
     }
     res.json({ fills: fills });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -2288,7 +3219,7 @@ app.get('/api/indexer/status', async (_req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -5152,8 +6083,9 @@ app.get('/api/leveraged/positions', async (req, res) => {
         let baseChangePct = 0;
         try {
           const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
-          if (quote.regularMarketPrice) {
-            basePriceCents = Math.round(Number(quote.regularMarketPrice) * 100);
+          const yahooPrice = Number(quote.regularMarketPrice || quote.price || 0);
+          if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
+            basePriceCents = Math.round(yahooPrice * 100);
           }
           if (quote.regularMarketChangePercent) {
             baseChangePct = Number(quote.regularMarketChangePercent) * 100;
@@ -5161,7 +6093,34 @@ app.get('/api/leveraged/positions', async (req, res) => {
         } catch {
         }
         if (!(basePriceCents > 0)) {
-          basePriceCents = Number(navCents);
+          try {
+            const fmpShort = await fetchFmpJson(getFmpUrl('quote-short', { symbol: String(item.baseSymbol).toUpperCase() }));
+            let first = null;
+            if (Array.isArray(fmpShort) && fmpShort.length > 0) {
+              first = fmpShort[0];
+            } else if (fmpShort && typeof fmpShort === 'object') {
+              first = fmpShort;
+            }
+            if (first) {
+              const fmpPrice = Number(first.price || 0);
+              if (Number.isFinite(fmpPrice) && fmpPrice > 0) {
+                basePriceCents = Math.round(fmpPrice * 100);
+              }
+              if (!(baseChangePct !== 0)) {
+                const fmpPct = Number(first.changePercent || first.changesPercentage || 0);
+                if (Number.isFinite(fmpPct)) {
+                  baseChangePct = fmpPct;
+                }
+              }
+            }
+          } catch {
+          }
+        }
+        if (!(basePriceCents > 0)) {
+          const navNum = Number(navCents);
+          if (Number.isFinite(navNum) && navNum > 0) {
+            basePriceCents = navNum;
+          }
         }
         positions.push({
           productSymbol: item.productSymbol,
@@ -5320,6 +6279,91 @@ app.post('/api/admin/award/session', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.post('/api/gas/run', async (req, res) => {
+  let suite = 'core';
+  if (req.body && req.body.suite) {
+    suite = String(req.body.suite).toLowerCase();
+  }
+  if (!(suite === 'core' || suite === 'stress' || suite === 'all')) {
+    return res.status(400).json({ error: 'suite must be core, stress, or all' });
+  }
+  try {
+    const report = await runGasPackGuarded(suite);
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/gas/latest', async (_req, res) => {
+  try {
+    if (!gasRuntimeState.latest) {
+      await runGasPackGuarded('core');
+    }
+    res.json({
+      ok: true,
+      lastRunAtMs: gasRuntimeState.lastRunAtMs,
+      report: gasRuntimeState.latest,
+    });
+  } catch (err) {
+    const fallbackReport = {
+      suite: 'core',
+      startedAtMs: Date.now(),
+      finishedAtMs: Date.now(),
+      durationMs: 0,
+      chainId: 0,
+      latestBlock: 0,
+      thresholdPct: GAS_WARN_THRESHOLD_PCT,
+      warnCount: 0,
+      skipCount: 0,
+      totalRows: 1,
+      pollMs: GAS_PAGE_POLL_MS,
+      rows: [{
+        txName: 'gas_pack_error',
+        gasUsed: '0',
+        effectiveGasPrice: '0',
+        costWei: '0',
+        costEth: '0',
+        baselineGasUsed: '0',
+        deltaPct: null,
+        status: 'SKIP',
+        skipReason: err.message || 'gas pack failed',
+      }],
+    };
+    res.json({
+      ok: false,
+      error: err.message,
+      lastRunAtMs: gasRuntimeState.lastRunAtMs,
+      report: fallbackReport,
+    });
+  }
+});
+
+app.get('/api/gas/baseline', async (_req, res) => {
+  res.json({
+    thresholdPct: GAS_WARN_THRESHOLD_PCT,
+    baseline: gasRuntimeState.baseline,
+  });
+});
+
+app.post('/api/gas/baseline/accept', async (_req, res) => {
+  if (!gasRuntimeState.latest || !Array.isArray(gasRuntimeState.latest.rows)) {
+    return res.status(400).json({ error: 'no latest gas report available' });
+  }
+  const next = {};
+  for (let i = 0; i < gasRuntimeState.latest.rows.length; i += 1) {
+    const row = gasRuntimeState.latest.rows[i];
+    if (row.status !== 'SKIP') {
+      next[row.txName] = Number(row.gasUsed);
+    }
+  }
+  gasRuntimeState.baseline = next;
+  res.json({
+    ok: true,
+    baseline: gasRuntimeState.baseline,
+  });
 });
 
 app.post('/api/autotrade/rules/create', async (req, res) => {
@@ -5995,6 +7039,15 @@ setInterval(() => {
     console.error('[autotrade]', msg);
   });
 }, AUTOTRADE_POLL_INTERVAL_MS);
+setInterval(() => {
+  runGasPackGuarded('core').catch((err) => {
+    let msg = 'gas pack interval failed';
+    if (err && err.message) {
+      msg = err.message;
+    }
+    console.error('[gas]', msg);
+  });
+}, GAS_AUTO_RUN_INTERVAL_MS);
 
 app.use((_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

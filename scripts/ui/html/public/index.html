@@ -273,8 +273,9 @@
         <a class="nav-link" href="#" data-page="ttoken">TToken</a>
         <a class="nav-link" href="#" data-page="trade">Trade</a>
         <a class="nav-link" href="#" data-page="award">Award</a>
+        <a class="nav-link" href="#" data-page="gas">Gas</a>
         <a class="nav-link" href="#" data-page="admin">Admin</a>
-        <button id="live-updates-toggle" class="nav-toggle-btn disabled" type="button">Live updates: Disabled</button>
+        <button id="live-updates-toggle" class="nav-toggle-btn enabled" type="button">Live updates: Enabled</button>
       </nav>
     </aside>
 
@@ -304,7 +305,7 @@
     const pageFrame = document.getElementById("page-frame");
     const navLinks = document.querySelectorAll(".nav-link");
     const liveUpdatesToggle = document.getElementById("live-updates-toggle");
-    let liveUpdatesEnabled = false;
+    let liveUpdatesEnabled = true;
     let activeEthereumProvider = null;
 
     function findEthereumProvider() {
@@ -439,6 +440,12 @@
         pageFrame.src = "/award.html";
         pageFrame.title = "Award";
         setActiveNav("award");
+        return;
+      }
+      if (page === "gas") {
+        pageFrame.src = "/gas.html";
+        pageFrame.title = "Gas";
+        setActiveNav("gas");
         return;
       }
       pageFrame.src = "/dataFetch/tsla-yahoo/chart.html";

@@ -266,7 +266,7 @@
       <thead>
         <tr>
           <th>Product</th>
-          <th>Base Price</th>
+          <th>Live Price</th>
           <th>Qty</th>
           <th>Avg Entry NAV (value of one unit)</th>
           <th>Current Value</th>
@@ -295,6 +295,15 @@
     let pollingEnabled = false;
     let poller;
 
+    function isValidWalletAddress(value) {
+      if (!value) {
+        return false;
+      }
+      const text = String(value).trim();
+      const re = /^0x[a-fA-F0-9]{40}$/;
+      return re.test(text);
+    }
+
     function chooseDisplayAccount(rawAccounts) {
       let accounts = [];
       if (Array.isArray(rawAccounts)) {
@@ -309,12 +318,17 @@
         for (let i = 0; i < accounts.length; i += 1) {
           const account = String(accounts[i]);
           if (account.toLowerCase() === selectedLower) {
-            return account;
+            if (isValidWalletAddress(account)) {
+              return account;
+            }
           }
         }
       }
       if (accounts.length > 0) {
-        return String(accounts[0]);
+        const first = String(accounts[0]);
+        if (isValidWalletAddress(first)) {
+          return first;
+        }
       }
       return "";
     }
@@ -347,7 +361,11 @@
     }
 
     function formatCents(cents) {
-      const num = Number(cents) / 100;
+      const raw = Number(cents);
+      if (!Number.isFinite(raw) || raw <= 0) {
+        return "-";
+      }
+      const num = raw / 100;
       return `$${num.toFixed(2)}`;
     }
 
@@ -591,6 +609,10 @@
     }
 
     async function refreshPortfolio() {
+      if (!isValidWalletAddress(currentWallet)) {
+        holdingsStatus.textContent = "Wallet not connected";
+        return;
+      }
       holdingsStatus.textContent = "Loading";
 
       const [summaryRes, positionsRes, claimablesRes, leveragedRes, lifecycleRes] = await Promise.all([

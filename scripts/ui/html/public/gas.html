@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gas Pack</title>
+  <style>
+    :root {
+      --bg: #eef2f6;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #64748b;
+      --line: #d7dde4;
+      --ok: #0f766e;
+      --warn: #dc2626;
+      --skip: #6b7280;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f3f7fb 0%, #e8eef5 100%);
+      color: var(--ink);
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+    }
+    .wrap { max-width: 1200px; margin: 24px auto; padding: 0 16px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      margin-bottom: 16px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #334155;
+      font-size: 32px;
+    }
+    .meta {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--ok);
+      display: inline-block;
+      margin-right: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th {
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #475569;
+      font-size: 12px;
+    }
+    .status-ok { color: var(--ok); font-weight: 700; }
+    .status-warn { color: var(--warn); font-weight: 700; }
+    .status-skip { color: var(--skip); font-weight: 700; }
+    .mono { font-family: "SFMono-Regular", Menlo, monospace; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Gas Cost Monitor</h1>
+      <div class="meta">
+        <div><span class="dot"></span><span id="connection">Loading</span></div>
+        <div>Auto update every <span id="poll-ms">1500</span> ms</div>
+        <div>Last run <span id="last-run">-</span></div>
+        <div>Suite <span id="suite">-</span></div>
+        <div>Warn count <span id="warn-count">0</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Tx</th>
+            <th>Gas</th>
+            <th>Cost Eth</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="3">Loading</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const rowsEl = document.getElementById('rows');
+    const connectionEl = document.getElementById('connection');
+    const pollMsEl = document.getElementById('poll-ms');
+    const lastRunEl = document.getElementById('last-run');
+    const suiteEl = document.getElementById('suite');
+    const warnCountEl = document.getElementById('warn-count');
+
+    let pollMs = 1500;
+
+    function fmtTime(ms) {
+      if (!ms) {
+        return '-';
+      }
+      const d = new Date(ms);
+      return d.toLocaleString('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    }
+
+    function renderRows(rows) {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        rowsEl.innerHTML = '<tr><td colspan="3">No rows</td></tr>';
+        return;
+      }
+      let html = '';
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i];
+        html += `
+          <tr>
+            <td class="mono">${row.txName}</td>
+            <td>${row.gasUsed}</td>
+            <td>${row.costEth}</td>
+          </tr>
+        `;
+      }
+      rowsEl.innerHTML = html;
+    }
+
+    async function refreshLatest() {
+      try {
+        const res = await fetch('/api/gas/latest');
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'cannot load gas');
+        }
+
+        connectionEl.textContent = 'Connected';
+
+        const report = data.report || {};
+        pollMs = report.pollMs || 1500;
+        pollMsEl.textContent = String(pollMs);
+        lastRunEl.textContent = fmtTime(data.lastRunAtMs);
+        suiteEl.textContent = report.suite || '-';
+        warnCountEl.textContent = String(report.warnCount || 0);
+
+        renderRows(report.rows || []);
+      } catch (err) {
+        connectionEl.textContent = 'Disconnected';
+        rowsEl.innerHTML = `<tr><td colspan="3">${err.message}</td></tr>`;
+      }
+    }
+
+    refreshLatest();
+    setInterval(refreshLatest, 1500);
+  </script>
+</body>
+</html>

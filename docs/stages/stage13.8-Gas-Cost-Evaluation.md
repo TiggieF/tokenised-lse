@@ -102,8 +102,8 @@ Page requirements:
 - status badge:
   - `OK`
   - `WARN` when increase is greater than threshold
-- auto refresh every 10 seconds
-- manual refresh button
+- auto refresh every 1.5 seconds
+- no refresh button on page
 
 Access behavior:
 

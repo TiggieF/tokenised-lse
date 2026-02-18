@@ -642,7 +642,7 @@
       if (!livePollingEnabled) {
         return;
       }
-      livePoller = setInterval(loadLivePrice, 10000);
+      livePoller = setInterval(loadLivePrice, 2000);
       liveTicker = setInterval(renderLiveUpdated, 1000);
     }
 
@@ -763,7 +763,7 @@
       await loadListedSymbols();
       await loadStockInfo();
       await loadCandles();
-      applyLiveUpdatesState(false);
+      applyLiveUpdatesState(true);
     })();
     
     function applyLiveUpdatesState(enabled) {

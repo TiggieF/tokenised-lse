@@ -519,16 +519,32 @@
         return;
       }
       try {
+        let onchainPriceShown = false;
+        try {
+          const chainRes = await fetch(`/api/leveraged/quote?mode=MINT&productSymbol=${encodeURIComponent(productSymbol)}&ttokenInWei=1`);
+          const chainData = await chainRes.json();
+          if (chainRes.ok && !chainData.error) {
+            const navCents = Number(chainData.navCents);
+            if (Number.isFinite(navCents) && navCents > 0) {
+              levBasePriceEl.textContent = formatUsd(navCents / 100);
+              onchainPriceShown = true;
+            }
+          }
+        } catch {
+        }
+
         const quoteRes = await fetch(`/api/fmp/quote-short?symbol=${encodeURIComponent(parsed.baseSymbol)}`);
         const quoteData = await quoteRes.json();
         if (!quoteRes.ok) {
-          levBasePriceEl.textContent = "-";
+          if (!onchainPriceShown) {
+            levBasePriceEl.textContent = "-";
+          }
           levBaseChangeEl.textContent = "-";
           levBaseChangeEl.className = "price-change neutral";
           return;
         }
-        let priceText = "-";
-        if (quoteData.price) {
+        let priceText = levBasePriceEl.textContent;
+        if (!onchainPriceShown && quoteData.price) {
           priceText = formatUsd(quoteData.price);
         }
         levBasePriceEl.textContent = priceText;
@@ -806,6 +822,23 @@
       // status for action
     }
 
+    function prettyTxError(rawMessage) {
+      const text = String(rawMessage || "");
+      if (text.includes("0xe450d38c") || text.includes("ERC20InsufficientBalance")) {
+        return "Insufficient TToken balance";
+      }
+      if (text.includes("0xfb8f41b2") || text.includes("ERC20InsufficientAllowance")) {
+        return "TToken allowance is not enough";
+      }
+      if (text.includes("price unavailable")) {
+        return "Base price unavailable please wait for oracle update";
+      }
+      if (text.includes("product not found")) {
+        return "Leveraged product not found";
+      }
+      return text;
+    }
+
     const modeBuy = document.getElementById("mode-buy");
     const modeAuto = document.getElementById("mode-auto");
     const buyPanel = document.getElementById("buy-panel");
@@ -954,17 +987,19 @@
         });
         const data = await res.json();
         if (!res.ok) {
-          levStatus.textContent = data.error;
+          showNoFunds(levStatus);
+          levStatus.textContent = prettyTxError(data.error);
           return;
         }
-        levStatus.textContent = `Bought leveraged tx ${data.txHash}`;
+        showStatus(levStatus, `Bought leveraged tx ${data.txHash}`);
         if (data.productToken) {
           levTokenAddress.style.display = "block";
           levTokenAddress.textContent = `token address: ${data.productToken}`;
         }
         await loadTTokenBalance();
       } catch (err) {
-        levStatus.textContent = err.message;
+        showNoFunds(levStatus);
+        levStatus.textContent = prettyTxError(err.message);
       }
     });
 

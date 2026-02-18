@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "node html/server.js",
-    "start": "node html/server.js"
+    "start": "node html/server.js",
+    "fmp:basic": "node nasdaq/fmp/fmp-ticker/fmp-basic-pull.mjs",
+    "fmp:basic:aapl": "node nasdaq/fmp/fmp-ticker/fmp-basic-pull.mjs AAPL"
   },
   "dependencies": {
     "express": "^5.2.1",
