@@ -17,15 +17,35 @@ const CANDLE_TTL_MS = 300000;
 const quoteCache = new Map();
 const QUOTE_TTL_MS = 2000;
 const fmpQuoteCache = new Map();
-const FMP_QUOTE_TTL_MS = 2000;
+const FMP_QUOTE_TTL_MS = 1000;
 const fmpInfoCache = new Map();
 const FMP_INFO_TTL_MS = 60000;
 const fmpDetailsCache = new Map();
 const FMP_DETAILS_TTL_MS = 30000;
+const fmpIndexTickerCache = new Map();
+const FMP_INDEX_TTL_MS = 2000;
 const INDEXER_SYNC_INTERVAL_MS = 5000;
 // fmp caches
-const FMP_API_KEY = process.env.FMP_API_KEY || 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
-const HARDHAT_RPC_URL = process.env.HARDHAT_RPC_URL || 'http://127.0.0.1:8545';
+let FMP_API_KEY = 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
+if (process.env.FMP_API_KEY) {
+  FMP_API_KEY = process.env.FMP_API_KEY;
+}
+let HARDHAT_RPC_URL = 'http://127.0.0.1:8545';
+if (process.env.HARDHAT_RPC_URL) {
+  HARDHAT_RPC_URL = process.env.HARDHAT_RPC_URL;
+}
+const FMP_INDEX_SYMBOLS = [
+  '^GSPC',
+  '^IXIC',
+  '^DJI',
+  '^RUT',
+  '^VIX',
+  '^N225',
+  '^FTSE',
+  '^GDAXI',
+  '^FCHI',
+  '^HSI',
+];
 // link to hardhat
 
 // connect to yahoo
@@ -208,6 +228,7 @@ const gasRuntimeState = {
   latest: null,
   baseline: {},
 };
+const txReceiptGasCache = new Map();
 
 async function ensureContract(address) {
   const code = await hardhatRpc('eth_getCode', [address, 'latest']);
@@ -242,13 +263,25 @@ function isValidAddress(address) {
 
 function parseRpcInt(value) {
   if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : 0;
+    if (Number.isFinite(value)) {
+      return value;
+    }
+    return 0;
   }
   if (typeof value === 'bigint') {
     return Number(value);
   }
   if (typeof value === 'string') {
-    if (value.startsWith('0x') || value.startsWith('0X')) {
+    const startsWithLowerHex = value.startsWith('0x');
+    const startsWithUpperHex = value.startsWith('0X');
+    let isHexPrefix = false;
+    if (startsWithLowerHex) {
+      isHexPrefix = true;
+    }
+    if (startsWithUpperHex) {
+      isHexPrefix = true;
+    }
+    if (isHexPrefix) {
       const parsed = parseInt(value, 16);
       if (Number.isFinite(parsed)) {
         return parsed;
@@ -271,7 +304,22 @@ async function hardhatRpc(method, params = []) {
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
   });
   const payload = await res.json();
-  if (!res.ok || payload.error) {
+  let hasHttpError = false;
+  let hasRpcError = false;
+  if (!res.ok) {
+    hasHttpError = true;
+  }
+  if (payload.error) {
+    hasRpcError = true;
+  }
+  let hasAnyError = false;
+  if (hasHttpError) {
+    hasAnyError = true;
+  }
+  if (hasRpcError) {
+    hasAnyError = true;
+  }
+  if (hasAnyError) {
     let msg = `Hardhat RPC ${res.status}`;
     if (payload.error && payload.error.message) {
       msg = payload.error.message;
@@ -476,7 +524,11 @@ function calcDeltaPct(gasUsed, baselineGasUsed) {
 }
 
 function getGasStatus(deltaPct) {
-  if (deltaPct === null) {
+  let missingDelta = false;
+  if (!Number.isFinite(deltaPct)) {
+    missingDelta = true;
+  }
+  if (missingDelta) {
     return 'OK';
   }
   if (deltaPct > GAS_WARN_THRESHOLD_PCT) {
@@ -486,14 +538,31 @@ function getGasStatus(deltaPct) {
 }
 
 function toUserErrorMessage(messageRaw) {
-  const message = String(messageRaw || '');
+  let message = '';
+  if (messageRaw) {
+    message = String(messageRaw);
+  }
   if (message.includes('leveragedrouter: price unavailable')) {
     return 'Base price is not available yet please wait for oracle update';
   }
-  if (message.includes('0xe450d38c') || message.includes('ERC20InsufficientBalance')) {
+  let matchesInsufficientBalance = false;
+  if (message.includes('0xe450d38c')) {
+    matchesInsufficientBalance = true;
+  }
+  if (message.includes('ERC20InsufficientBalance')) {
+    matchesInsufficientBalance = true;
+  }
+  if (matchesInsufficientBalance) {
     return 'Insufficient token balance for this transaction';
   }
-  if (message.includes('0xfb8f41b2') || message.includes('ERC20InsufficientAllowance')) {
+  let matchesInsufficientAllowance = false;
+  if (message.includes('0xfb8f41b2')) {
+    matchesInsufficientAllowance = true;
+  }
+  if (message.includes('ERC20InsufficientAllowance')) {
+    matchesInsufficientAllowance = true;
+  }
+  if (matchesInsufficientAllowance) {
     return 'Token allowance is not enough please approve again';
   }
   if (message.includes('award: epoch not ended')) {
@@ -527,11 +596,22 @@ async function sendMeasuredTx(input) {
 }
 
 async function runGasPackOnce(suiteRaw) {
-  const suite = String(suiteRaw || 'core').toLowerCase();
+  let suiteText = 'core';
+  if (suiteRaw) {
+    suiteText = String(suiteRaw);
+  }
+  const suite = suiteText.toLowerCase();
   const startedAtMs = Date.now();
   const deployments = loadDeployments();
   const accounts = await hardhatRpc('eth_accounts', []);
-  if (!Array.isArray(accounts) || accounts.length < 2) {
+  let invalidAccountsInput = false;
+  if (!Array.isArray(accounts)) {
+    invalidAccountsInput = true;
+  }
+  if (accounts.length < 2) {
+    invalidAccountsInput = true;
+  }
+  if (invalidAccountsInput) {
     throw new Error('need at least 2 local accounts');
   }
   const admin = accounts[0];
@@ -547,14 +627,31 @@ async function runGasPackOnce(suiteRaw) {
   const leveragedRouterAddress = normalizeAddress(deployments.leveragedProductRouter);
   const awardAddress = normalizeAddress(deployments.award);
 
-  if (!registryAddress || !orderBookAddress || !ttokenAddress) {
+  let missingGasPackCoreContract = false;
+  if (!registryAddress) {
+    missingGasPackCoreContract = true;
+  }
+  if (!orderBookAddress) {
+    missingGasPackCoreContract = true;
+  }
+  if (!ttokenAddress) {
+    missingGasPackCoreContract = true;
+  }
+  if (missingGasPackCoreContract) {
     throw new Error('missing deployed contracts for gas pack');
   }
 
   const allSymbolsData = registryListInterface.encodeFunctionData('getAllSymbols', []);
   const allSymbolsResult = await hardhatRpc('eth_call', [{ to: registryAddress, data: allSymbolsData }, 'latest']);
   const [allSymbols] = registryListInterface.decodeFunctionResult('getAllSymbols', allSymbolsResult);
-  if (!Array.isArray(allSymbols) || allSymbols.length === 0) {
+  let hasNoSymbols = false;
+  if (!Array.isArray(allSymbols)) {
+    hasNoSymbols = true;
+  }
+  if (allSymbols.length === 0) {
+    hasNoSymbols = true;
+  }
+  if (hasNoSymbols) {
     throw new Error('no listed symbols for gas pack');
   }
   const symbol = allSymbols[0];
@@ -562,7 +659,14 @@ async function runGasPackOnce(suiteRaw) {
   const listingResult = await hardhatRpc('eth_call', [{ to: registryAddress, data: listingData }, 'latest']);
   const [equityTokenAddressRaw] = listingsRegistryInterface.decodeFunctionResult('getListing', listingResult);
   const equityTokenAddress = normalizeAddress(equityTokenAddressRaw);
-  if (!equityTokenAddress || equityTokenAddress === ethers.ZeroAddress) {
+  let missingEquityToken = false;
+  if (!equityTokenAddress) {
+    missingEquityToken = true;
+  }
+  if (equityTokenAddress === ethers.ZeroAddress) {
+    missingEquityToken = true;
+  }
+  if (missingEquityToken) {
     throw new Error(`listing missing token address for ${symbol}`);
   }
 
@@ -575,7 +679,10 @@ async function runGasPackOnce(suiteRaw) {
 
   const rows = [];
   function pushRow(name, measured, extra = {}) {
-    const baselineGasUsed = gasRuntimeState.baseline[name] || 0;
+    let baselineGasUsed = 0;
+    if (gasRuntimeState.baseline[name]) {
+      baselineGasUsed = gasRuntimeState.baseline[name];
+    }
     const deltaPct = calcDeltaPct(measured.gasUsed, baselineGasUsed);
     rows.push({
       txName: name,
@@ -592,13 +699,17 @@ async function runGasPackOnce(suiteRaw) {
   }
 
   function pushSkipped(name, reason) {
+    let baselineGasUsed = 0;
+    if (gasRuntimeState.baseline[name]) {
+      baselineGasUsed = gasRuntimeState.baseline[name];
+    }
     rows.push({
       txName: name,
       gasUsed: '0',
       effectiveGasPrice: '0',
       costWei: '0',
       costEth: '0',
-      baselineGasUsed: String(gasRuntimeState.baseline[name] || 0),
+      baselineGasUsed: String(baselineGasUsed),
       deltaPct: null,
       status: 'SKIP',
       skipReason: reason,
@@ -649,7 +760,11 @@ async function runGasPackOnce(suiteRaw) {
       }
     } catch (err) {
       canRunSellSide = false;
-      pushSkipped('mint_equity_for_seller_setup', err.message || 'cannot fund seller equity');
+      let reason = 'cannot fund seller equity';
+      if (err.message) {
+        reason = err.message;
+      }
+      pushSkipped('mint_equity_for_seller_setup', reason);
     }
 
     if (canRunBuySide) {
@@ -664,7 +779,11 @@ async function runGasPackOnce(suiteRaw) {
         pushRow('approve_ttoken_for_dex', approveBuyer);
       } catch (err) {
         canRunBuySide = false;
-        pushSkipped('approve_ttoken_for_dex', err.message || 'cannot approve ttoken');
+        let reason = 'cannot approve ttoken';
+        if (err.message) {
+          reason = err.message;
+        }
+        pushSkipped('approve_ttoken_for_dex', reason);
       }
     } else {
       pushSkipped('approve_ttoken_for_dex', 'buyer setup failed');
@@ -682,13 +801,24 @@ async function runGasPackOnce(suiteRaw) {
         pushRow('approve_equity_for_dex', approveSeller);
       } catch (err) {
         canRunSellSide = false;
-        pushSkipped('approve_equity_for_dex', err.message || 'cannot approve equity');
+        let reason = 'cannot approve equity';
+        if (err.message) {
+          reason = err.message;
+        }
+        pushSkipped('approve_equity_for_dex', reason);
       }
     } else {
       pushSkipped('approve_equity_for_dex', 'seller setup failed');
     }
 
-    if (suite === 'core' || suite === 'all') {
+    let runCore = false;
+    if (suite === 'core') {
+      runCore = true;
+    }
+    if (suite === 'all') {
+      runCore = true;
+    }
+    if (runCore) {
       const listSymbol = await sendMeasuredTx({
         tx: {
           from: admin,
@@ -711,7 +841,11 @@ async function runGasPackOnce(suiteRaw) {
           pushRow('place_buy_limit', placeBuy, { symbol });
         } catch (err) {
           canRunBuySide = false;
-          pushSkipped('place_buy_limit', err.message || 'place buy failed');
+          let reason = 'place buy failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('place_buy_limit', reason);
         }
       } else {
         pushSkipped('place_buy_limit', 'buyer setup failed');
@@ -729,7 +863,11 @@ async function runGasPackOnce(suiteRaw) {
           pushRow('place_sell_limit', placeSell, { symbol });
         } catch (err) {
           canRunSellSide = false;
-          pushSkipped('place_sell_limit', err.message || 'place sell failed');
+          let reason = 'place sell failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('place_sell_limit', reason);
         }
       } else {
         pushSkipped('place_sell_limit', 'seller setup failed');
@@ -787,7 +925,11 @@ async function runGasPackOnce(suiteRaw) {
           });
           pushRow('snapshot_dividend_claim', claimSnapshot, { symbol, epochId: epochId.toString() });
         } catch (err) {
-          pushSkipped('snapshot_dividend_declare', err.message || 'failed');
+          let reason = 'failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('snapshot_dividend_declare', reason);
           pushSkipped('snapshot_dividend_claim', 'declare/claim unavailable');
         }
       } else {
@@ -826,7 +968,11 @@ async function runGasPackOnce(suiteRaw) {
           });
           pushRow('merkle_dividend_claim', claimMerkle, { symbol, epochId: newEpochId.toString() });
         } catch (err) {
-          pushSkipped('merkle_dividend_declare', err.message || 'failed');
+          let reason = 'failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('merkle_dividend_declare', reason);
           pushSkipped('merkle_dividend_claim', 'declare/claim unavailable');
         }
       } else {
@@ -845,11 +991,19 @@ async function runGasPackOnce(suiteRaw) {
             const productAtResult = await hardhatRpc('eth_call', [{ to: leveragedFactoryAddress, data: productAtCall }, 'latest']);
             const [productTuple] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', productAtResult);
             const productToken = normalizeAddress(productTuple.token);
-            const leveragedBaseSymbol = String(productTuple.baseSymbol || '').toUpperCase();
+            let leveragedBaseSymbolRaw = '';
+            if (productTuple.baseSymbol) {
+              leveragedBaseSymbolRaw = String(productTuple.baseSymbol);
+            }
+            const leveragedBaseSymbol = leveragedBaseSymbolRaw.toUpperCase();
             if (leveragedBaseSymbol) {
               const ensurePriceResult = await ensureOnchainPriceForSymbol(leveragedBaseSymbol);
               if (!ensurePriceResult.ok) {
-                throw new Error(ensurePriceResult.error || `price unavailable for ${leveragedBaseSymbol}`);
+                let reason = `price unavailable for ${leveragedBaseSymbol}`;
+                if (ensurePriceResult.error) {
+                  reason = ensurePriceResult.error;
+                }
+                throw new Error(reason);
               }
             }
 
@@ -899,7 +1053,11 @@ async function runGasPackOnce(suiteRaw) {
             pushSkipped('leveraged_unwind', 'no leveraged products');
           }
         } catch (err) {
-          pushSkipped('leveraged_mint', err.message || 'failed');
+          let reason = 'failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('leveraged_mint', reason);
           pushSkipped('leveraged_unwind', 'mint/unwind unavailable');
         }
       } else {
@@ -909,7 +1067,14 @@ async function runGasPackOnce(suiteRaw) {
 
     }
 
-    if (suite === 'stress' || suite === 'all') {
+    let runStress = false;
+    if (suite === 'stress') {
+      runStress = true;
+    }
+    if (suite === 'all') {
+      runStress = true;
+    }
+    if (runStress) {
       let deepGasUsed = 0n;
       let deepCostWei = 0n;
       let deepTxCount = 0;
@@ -941,12 +1106,22 @@ async function runGasPackOnce(suiteRaw) {
           const stressMeasured = {
             txHash: stressSell.txHash,
             gasUsed: deepGasUsed,
-            effectiveGasPrice: deepGasUsed > 0n ? deepCostWei / deepGasUsed : 0n,
+            effectiveGasPrice: (() => {
+              let effectiveGasPrice = 0n;
+              if (deepGasUsed > 0n) {
+                effectiveGasPrice = deepCostWei / deepGasUsed;
+              }
+              return effectiveGasPrice;
+            })(),
             costWei: deepCostWei,
           };
           pushRow('stress_deep_orderbook_match_loop', stressMeasured, { txCount: deepTxCount });
         } catch (err) {
-          pushSkipped('stress_deep_orderbook_match_loop', err.message || 'stress orderbook run failed');
+          let reason = 'stress orderbook run failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('stress_deep_orderbook_match_loop', reason);
         }
       } else {
         pushSkipped('stress_deep_orderbook_match_loop', 'buyer or seller setup failed');
@@ -996,12 +1171,24 @@ async function runGasPackOnce(suiteRaw) {
           const summary = {
             txHash: lastTxHash,
             gasUsed: claimGas + declareGas,
-            effectiveGasPrice: (claimGas + declareGas) > 0n ? (claimCost + declareCost) / (claimGas + declareGas) : 0n,
+            effectiveGasPrice: (() => {
+              const totalGas = claimGas + declareGas;
+              const totalCost = claimCost + declareCost;
+              let effectiveGasPrice = 0n;
+              if (totalGas > 0n) {
+                effectiveGasPrice = totalCost / totalGas;
+              }
+              return effectiveGasPrice;
+            })(),
             costWei: claimCost + declareCost,
           };
           pushRow('stress_merkle_claim_sequence', summary, { claimants: claimants.length });
         } catch (err) {
-          pushSkipped('stress_merkle_claim_sequence', err.message || 'failed');
+          let reason = 'failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('stress_merkle_claim_sequence', reason);
         }
       } else {
         pushSkipped('stress_merkle_claim_sequence', 'merkle contract not deployed');
@@ -1037,11 +1224,21 @@ async function runGasPackOnce(suiteRaw) {
           pushRow('stress_award_high_fill_density', {
             txHash: '',
             gasUsed: awardStressGas,
-            effectiveGasPrice: awardStressGas > 0n ? awardStressCost / awardStressGas : 0n,
+            effectiveGasPrice: (() => {
+              let effectiveGasPrice = 0n;
+              if (awardStressGas > 0n) {
+                effectiveGasPrice = awardStressCost / awardStressGas;
+              }
+              return effectiveGasPrice;
+            })(),
             costWei: awardStressCost,
           }, { txCount: awardStressTxCount });
         } catch (err) {
-          pushSkipped('stress_award_high_fill_density', err.message || 'stress award run failed');
+          let reason = 'stress award run failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('stress_award_high_fill_density', reason);
         }
       } else {
         pushSkipped('stress_award_high_fill_density', 'buyer or seller setup failed');
@@ -1130,7 +1327,14 @@ async function ensureIndexerSynced() {
     const deployments = loadDeployments();
     const orderBookAddr = deployments.orderBookDex;
     const registryAddr = deployments.listingsRegistry;
-    if (!orderBookAddr || !registryAddr) {
+    let missingAddresses = false;
+    if (!orderBookAddr) {
+      missingAddresses = true;
+    }
+    if (!registryAddr) {
+      missingAddresses = true;
+    }
+    if (missingAddresses) {
       return {
         synced: false,
         reason: '',
@@ -1229,7 +1433,14 @@ async function ensureIndexerSynced() {
       const normalized = normalizeAddress(tokenAddr);
       const isMissing = !normalized;
       const isZero = normalized === ethers.ZeroAddress;
-      if (!(isMissing || isZero)) {
+      let includeToken = true;
+      if (isMissing) {
+        includeToken = false;
+      }
+      if (isZero) {
+        includeToken = false;
+      }
+      if (includeToken) {
         addresses.add(normalized);
         symbolByTokenCache.set(normalized, symbol);
       }
@@ -1317,7 +1528,14 @@ async function ensureIndexerSynced() {
         if (cachedSymbol) {
           symbol = cachedSymbol;
         }
-        if (!symbol || symbol === '') {
+        let missingSymbol = false;
+        if (!symbol) {
+          missingSymbol = true;
+        }
+        if (symbol === '') {
+          missingSymbol = true;
+        }
+        if (missingSymbol) {
           symbol = await lookupSymbolByToken(registryAddr, tokenAddress);
           if (!symbol && deployments.ttoken && normalizeAddress(deployments.ttoken) === tokenAddress) {
             symbol = 'TTOKEN';
@@ -1405,7 +1623,7 @@ async function ensureIndexerSynced() {
           makerOrder.active = false;
         }
         if (!makerOrder.active && makerOrder.remainingWei === '0') {
-          if (makerOrder.cancelledAtBlock !== null) {
+          if (makerOrder.cancelledAtBlock) {
             makerOrder.status = 'CANCELLED';
           } else {
             makerOrder.status = 'FILLED';
@@ -1427,7 +1645,7 @@ async function ensureIndexerSynced() {
             takerOrder.active = false;
           }
           if (!takerOrder.active && takerOrder.remainingWei === '0') {
-            if (takerOrder.cancelledAtBlock !== null) {
+            if (takerOrder.cancelledAtBlock) {
               takerOrder.status = 'CANCELLED';
             } else {
               takerOrder.status = 'FILLED';
@@ -1655,6 +1873,152 @@ function readIndexerSnapshot() {
   };
 }
 
+async function readReceiptGasData(txHashRaw) {
+  const txHash = String(txHashRaw);
+  if (!txHash) {
+    return {
+      from: '',
+      gasUsed: 0n,
+      costWei: 0n,
+    };
+  }
+  if (txReceiptGasCache.has(txHash)) {
+    const cached = txReceiptGasCache.get(txHash);
+    return {
+      from: String(cached.from),
+      gasUsed: BigInt(String(cached.gasUsed)),
+      costWei: BigInt(String(cached.costWei)),
+    };
+  }
+  const receipt = await hardhatRpc('eth_getTransactionReceipt', [txHash]);
+  if (!receipt) {
+    return {
+      from: '',
+      gasUsed: 0n,
+      costWei: 0n,
+    };
+  }
+  const from = normalizeAddress(receipt.from);
+  const gasUsed = toBigIntSafe(receipt.gasUsed);
+  let gasPrice = 0n;
+  if (receipt.effectiveGasPrice) {
+    gasPrice = toBigIntSafe(receipt.effectiveGasPrice);
+  }
+  if (gasPrice === 0n && receipt.gasPrice) {
+    gasPrice = toBigIntSafe(receipt.gasPrice);
+  }
+  if (gasPrice === 0n) {
+    try {
+      const tx = await hardhatRpc('eth_getTransactionByHash', [txHash]);
+      if (tx && tx.gasPrice) {
+        gasPrice = toBigIntSafe(tx.gasPrice);
+      }
+    } catch {
+      gasPrice = 0n;
+    }
+  }
+  const costWei = gasUsed * gasPrice;
+  txReceiptGasCache.set(txHash, {
+    from,
+    gasUsed: gasUsed.toString(),
+    costWei: costWei.toString(),
+  });
+  return {
+    from,
+    gasUsed,
+    costWei,
+  };
+}
+
+function collectWalletRelatedTxHashes(snapshot, wallet) {
+  const walletNorm = normalizeAddress(wallet);
+  const txHashes = new Set();
+  const orderIds = Object.keys(snapshot.orders);
+  for (let i = 0; i < orderIds.length; i += 1) {
+    const order = snapshot.orders[orderIds[i]];
+    const trader = normalizeAddress(order.trader);
+    if (trader === walletNorm) {
+      const txHash = String(order.placedTxHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  for (let i = 0; i < snapshot.cancellations.length; i += 1) {
+    const row = snapshot.cancellations[i];
+    const trader = normalizeAddress(row.trader);
+    if (trader === walletNorm) {
+      const txHash = String(row.txHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  for (let i = 0; i < snapshot.fills.length; i += 1) {
+    const row = snapshot.fills[i];
+    let include = false;
+    if (normalizeAddress(row.makerTrader) === walletNorm) {
+      include = true;
+    }
+    if (normalizeAddress(row.takerTrader) === walletNorm) {
+      include = true;
+    }
+    if (include) {
+      const txHash = String(row.txHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  for (let i = 0; i < snapshot.leveragedEvents.length; i += 1) {
+    const row = snapshot.leveragedEvents[i];
+    const eventWallet = normalizeAddress(row.wallet);
+    if (eventWallet === walletNorm) {
+      const txHash = String(row.txHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  for (let i = 0; i < snapshot.transfers.length; i += 1) {
+    const row = snapshot.transfers[i];
+    const to = normalizeAddress(row.to);
+    const from = normalizeAddress(row.from);
+    if (to === walletNorm || from === walletNorm) {
+      const txHash = String(row.txHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  return Array.from(txHashes);
+}
+
+async function computeOverallGasForWallet(snapshot, wallet) {
+  const walletNorm = normalizeAddress(wallet);
+  const txHashes = collectWalletRelatedTxHashes(snapshot, walletNorm);
+  let totalGasUsed = 0n;
+  let totalCostWei = 0n;
+  for (let i = 0; i < txHashes.length; i += 1) {
+    const txHash = txHashes[i];
+    let receiptData = null;
+    try {
+      receiptData = await readReceiptGasData(txHash);
+    } catch {
+      receiptData = null;
+    }
+    if (receiptData && receiptData.from === walletNorm) {
+      totalGasUsed += receiptData.gasUsed;
+      totalCostWei += receiptData.costWei;
+    }
+  }
+  return {
+    gasUsedUnits: totalGasUsed,
+    gasCostWei: totalCostWei,
+    txCount: txHashes.length,
+  };
+}
+
 function quoteAmountWei(qtyWei, priceCents) {
   return (BigInt(qtyWei) * BigInt(priceCents)) / 100n;
 }
@@ -1670,7 +2034,11 @@ async function getSymbolByToken(registryAddr, tokenAddress) {
   const symbolData = listingsRegistryInterface.encodeFunctionData('getSymbolByToken', [tokenAddress]);
   const symbolResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: symbolData }, 'latest']);
   const [symbol] = listingsRegistryInterface.decodeFunctionResult('getSymbolByToken', symbolResult);
-  return String(symbol || '').toUpperCase();
+  let symbolText = '';
+  if (symbol) {
+    symbolText = String(symbol);
+  }
+  return symbolText.toUpperCase();
 }
 
 function ensureAutoTradeDir() {
@@ -1797,7 +2165,14 @@ function merkleLeafHash(epochId, tokenAddress, account, amountWei, leafIndex) {
 }
 
 function tryParseSnapshotIdFromReceipt(receipt) {
-  if (!receipt || !Array.isArray(receipt.logs)) {
+  let invalidReceiptInput = false;
+  if (!receipt) {
+    invalidReceiptInput = true;
+  }
+  if (!Array.isArray(receipt.logs)) {
+    invalidReceiptInput = true;
+  }
+  if (invalidReceiptInput) {
     return 0;
   }
   for (let i = 0; i < receipt.logs.length; i += 1) {
@@ -1919,7 +2294,14 @@ async function getBestBookPrices(symbolRaw) {
   const symbol = String(symbolRaw).toUpperCase();
   const deployments = loadDeployments();
   const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-  if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+  let invalidTokenAddress = false;
+  if (!tokenAddress) {
+    invalidTokenAddress = true;
+  }
+  if (tokenAddress === ethers.ZeroAddress) {
+    invalidTokenAddress = true;
+  }
+  if (invalidTokenAddress) {
     return {
       symbol,
       tokenAddress: '',
@@ -1949,7 +2331,14 @@ async function getBestBookPrices(symbolRaw) {
     const remainingWei = BigInt(row.remaining.toString());
     if (isActive && remainingWei > 0n) {
       const cents = Number(row.price);
-      if (!hasBid || cents > bestBidCents) {
+      let shouldSetBid = false;
+      if (!hasBid) {
+        shouldSetBid = true;
+      }
+      if (cents > bestBidCents) {
+        shouldSetBid = true;
+      }
+      if (shouldSetBid) {
         hasBid = true;
         bestBidCents = cents;
       }
@@ -1962,7 +2351,14 @@ async function getBestBookPrices(symbolRaw) {
     const remainingWei = BigInt(row.remaining.toString());
     if (isActive && remainingWei > 0n) {
       const cents = Number(row.price);
-      if (!hasAsk || cents < bestAskCents) {
+      let shouldSetAsk = false;
+      if (!hasAsk) {
+        shouldSetAsk = true;
+      }
+      if (cents < bestAskCents) {
+        shouldSetAsk = true;
+      }
+      if (shouldSetAsk) {
         hasAsk = true;
         bestAskCents = cents;
       }
@@ -1999,10 +2395,37 @@ function shouldRuleTrigger(rule, book) {
 
 function isRulePausedByLifecycle(rule) {
   const symbolStatus = getSymbolLifecycleStatus(rule.symbol);
-  return symbolStatus === 'FROZEN' || symbolStatus === 'DELISTED';
+  let isPaused = false;
+  if (symbolStatus === 'FROZEN') {
+    isPaused = true;
+  }
+  if (symbolStatus === 'DELISTED') {
+    isPaused = true;
+  }
+  return isPaused;
 }
 
 function normalizeRuleForResponse(rule) {
+  let cooldownSec = 0;
+  if (rule.cooldownSec) {
+    cooldownSec = Number(rule.cooldownSec);
+  }
+  let maxExecutionsPerDay = 0;
+  if (rule.maxExecutionsPerDay) {
+    maxExecutionsPerDay = Number(rule.maxExecutionsPerDay);
+  }
+  let createdAtMs = 0;
+  if (rule.createdAtMs) {
+    createdAtMs = Number(rule.createdAtMs);
+  }
+  let updatedAtMs = 0;
+  if (rule.updatedAtMs) {
+    updatedAtMs = Number(rule.updatedAtMs);
+  }
+  let lastExecutedAtMs = 0;
+  if (rule.lastExecutedAtMs) {
+    lastExecutedAtMs = Number(rule.lastExecutedAtMs);
+  }
   return {
     id: Number(rule.id),
     wallet: rule.wallet,
@@ -2012,16 +2435,28 @@ function normalizeRuleForResponse(rule) {
     qtyWei: String(rule.qtyWei),
     maxSlippageBps: Number(rule.maxSlippageBps),
     enabled: Boolean(rule.enabled),
-    cooldownSec: Number(rule.cooldownSec || 0),
-    maxExecutionsPerDay: Number(rule.maxExecutionsPerDay || 0),
-    createdAtMs: Number(rule.createdAtMs || 0),
-    updatedAtMs: Number(rule.updatedAtMs || 0),
-    lastExecutedAtMs: Number(rule.lastExecutedAtMs || 0),
+    cooldownSec,
+    maxExecutionsPerDay,
+    createdAtMs,
+    updatedAtMs,
+    lastExecutedAtMs,
     pausedByLifecycle: isRulePausedByLifecycle(rule),
   };
 }
 
 function normalizeExecutionForResponse(entry) {
+  let observedBestBidCents = 0;
+  if (entry.observedBestBidCents) {
+    observedBestBidCents = Number(entry.observedBestBidCents);
+  }
+  let observedBestAskCents = 0;
+  if (entry.observedBestAskCents) {
+    observedBestAskCents = Number(entry.observedBestAskCents);
+  }
+  let error = '';
+  if (entry.error) {
+    error = entry.error;
+  }
   return {
     id: Number(entry.id),
     ruleId: Number(entry.ruleId),
@@ -2029,12 +2464,12 @@ function normalizeExecutionForResponse(entry) {
     symbol: entry.symbol,
     side: entry.side,
     triggerPriceCents: Number(entry.triggerPriceCents),
-    observedBestBidCents: Number(entry.observedBestBidCents || 0),
-    observedBestAskCents: Number(entry.observedBestAskCents || 0),
+    observedBestBidCents,
+    observedBestAskCents,
     qtyWei: String(entry.qtyWei),
     txHash: entry.txHash,
     status: entry.status,
-    error: entry.error || '',
+    error,
     executedAtMs: Number(entry.executedAtMs),
   };
 }
@@ -2124,40 +2559,64 @@ async function runAutoTradeTick() {
 
     for (let i = 0; i < state.rules.length; i += 1) {
       const rule = state.rules[i];
-      if (!rule.enabled) {
-        continue;
-      }
-      if (isRulePausedByLifecycle(rule)) {
-        continue;
+      let shouldRunRule = true;
+      if (!rule.enabled || isRulePausedByLifecycle(rule)) {
+        shouldRunRule = false;
       }
 
       const nowMs = Date.now();
-      const cooldownSec = Number(rule.cooldownSec || 0);
-      if (cooldownSec > 0 && Number(rule.lastExecutedAtMs || 0) > 0) {
-        const elapsedMs = nowMs - Number(rule.lastExecutedAtMs);
-        if (elapsedMs < (cooldownSec * 1000)) {
-          continue;
+      if (shouldRunRule) {
+        let cooldownSec = 0;
+        if (rule.cooldownSec) {
+          cooldownSec = Number(rule.cooldownSec);
+        }
+        let lastExecutedAtMs = 0;
+        if (rule.lastExecutedAtMs) {
+          lastExecutedAtMs = Number(rule.lastExecutedAtMs);
+        }
+        if (cooldownSec > 0 && lastExecutedAtMs > 0) {
+          const elapsedMs = nowMs - Number(rule.lastExecutedAtMs);
+          if (elapsedMs < (cooldownSec * 1000)) {
+            shouldRunRule = false;
+          }
         }
       }
 
-      const maxExecutionsPerDay = Number(rule.maxExecutionsPerDay || 0);
-      const currentDay = getDateKeyEt();
-      if (rule.executionsDay !== currentDay) {
-        rule.executionsDay = currentDay;
-        rule.executionsDayCount = 0;
-      }
-      if (maxExecutionsPerDay > 0 && Number(rule.executionsDayCount || 0) >= maxExecutionsPerDay) {
-        continue;
+      if (shouldRunRule) {
+        let maxExecutionsPerDay = 0;
+        if (rule.maxExecutionsPerDay) {
+          maxExecutionsPerDay = Number(rule.maxExecutionsPerDay);
+        }
+        const currentDay = getDateKeyEt();
+        if (rule.executionsDay !== currentDay) {
+          rule.executionsDay = currentDay;
+          rule.executionsDayCount = 0;
+        }
+        let executionsDayCount = 0;
+        if (rule.executionsDayCount) {
+          executionsDayCount = Number(rule.executionsDayCount);
+        }
+        if (maxExecutionsPerDay > 0 && executionsDayCount >= maxExecutionsPerDay) {
+          shouldRunRule = false;
+        }
       }
 
-      const book = await getBestBookPrices(rule.symbol);
-      if (!book.tokenAddress) {
-        continue;
+      let book = { tokenAddress: '' };
+      if (shouldRunRule) {
+        book = await getBestBookPrices(rule.symbol);
+        if (!book.tokenAddress) {
+          shouldRunRule = false;
+        }
       }
-      const triggerNow = shouldRuleTrigger(rule, book);
-      if (!triggerNow) {
-        continue;
+      if (shouldRunRule) {
+        const triggerNow = shouldRuleTrigger(rule, book);
+        if (!triggerNow) {
+          shouldRunRule = false;
+        }
       }
+      if (!shouldRunRule) {
+        // skip this rule this tick
+      } else {
 
       const executionId = state.nextExecutionId;
       state.nextExecutionId = Number(state.nextExecutionId) + 1;
@@ -2168,8 +2627,20 @@ async function runAutoTradeTick() {
         symbol: rule.symbol,
         side: rule.side,
         triggerPriceCents: Number(rule.triggerPriceCents),
-        observedBestBidCents: Number(book.bestBidCents || 0),
-        observedBestAskCents: Number(book.bestAskCents || 0),
+        observedBestBidCents: (() => {
+          let value = 0;
+          if (book.bestBidCents) {
+            value = Number(book.bestBidCents);
+          }
+          return value;
+        })(),
+        observedBestAskCents: (() => {
+          let value = 0;
+          if (book.bestAskCents) {
+            value = Number(book.bestAskCents);
+          }
+          return value;
+        })(),
         qtyWei: String(rule.qtyWei),
         txHash: '',
         status: 'FAILED',
@@ -2183,14 +2654,23 @@ async function runAutoTradeTick() {
         entry.status = 'EXECUTED';
         rule.lastExecutedAtMs = Date.now();
         rule.updatedAtMs = Date.now();
-        rule.executionsDayCount = Number(rule.executionsDayCount || 0) + 1;
+        let currentExecutionsDayCount = 0;
+        if (rule.executionsDayCount) {
+          currentExecutionsDayCount = Number(rule.executionsDayCount);
+        }
+        rule.executionsDayCount = currentExecutionsDayCount + 1;
         state.rules.splice(i, 1);
         i -= 1;
       } catch (err) {
-        entry.error = err.message || 'execution failed';
+        let reason = 'execution failed';
+        if (err.message) {
+          reason = err.message;
+        }
+        entry.error = reason;
       }
 
       state.executions.push(entry);
+      }
     }
 
     writeAutoTradeState(state);
@@ -2213,7 +2693,14 @@ function isTradingDay(ymd) {
   const [y, m, d] = ymd.split('-').map(Number);
   const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
   let weekend = false;
-  if (weekday === 0 || weekday === 6) {
+  let isWeekend = false;
+  if (weekday === 0) {
+    isWeekend = true;
+  }
+  if (weekday === 6) {
+    isWeekend = true;
+  }
+  if (isWeekend) {
     weekend = true;
   }
   if (weekend) {
@@ -2403,7 +2890,14 @@ app.get('/api/fmp/quote-short', async (req, res) => {
   const cached = fmpQuoteCache.get(symbol);
 
   try {
-    if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
+    let cacheFresh = false;
+    if (cached) {
+      const ageMs = Date.now() - cached.timestamp;
+      if (ageMs < FMP_QUOTE_TTL_MS) {
+        cacheFresh = true;
+      }
+    }
+    if (cacheFresh) {
       return res.json(cached.data);
     }
 
@@ -2468,7 +2962,15 @@ app.get('/api/fmp/quote-short', async (req, res) => {
       }
 
       if (cached) {
-        return res.json({ ...cached.data, stale: true });
+        const staleData = {
+          symbol: cached.data.symbol,
+          price: cached.data.price,
+          volume: cached.data.volume,
+          previousClose: cached.data.previousClose,
+          changePercent: cached.data.changePercent,
+          stale: true,
+        };
+        return res.json(staleData);
       }
       let msg = '';
       if (err.message) {
@@ -2477,6 +2979,97 @@ app.get('/api/fmp/quote-short', async (req, res) => {
       res.status(502).json({ error: msg });
     }
   }
+});
+
+app.get('/api/fmp/index-ticker', async (_req, res) => {
+  const now = Date.now();
+  const rows = [];
+
+  for (let i = 0; i < FMP_INDEX_SYMBOLS.length; i += 1) {
+    const symbol = String(FMP_INDEX_SYMBOLS[i]).toUpperCase();
+    const cached = fmpIndexTickerCache.get(symbol);
+    let shouldUseCache = false;
+    if (cached) {
+      const ageMs = now - cached.timestamp;
+      if (ageMs < FMP_INDEX_TTL_MS) {
+        shouldUseCache = true;
+      }
+    }
+    if (shouldUseCache) {
+      rows.push(cached.data);
+    } else {
+      try {
+        const payload = await fetchFmpJson(getFmpUrl('quote', { symbol }));
+        let quote = payload;
+        if (Array.isArray(payload)) {
+          quote = payload[0];
+        }
+        const price = Number(pick(quote, ['price', 'regularMarketPrice']));
+        const previousClose = Number(quote.previousClose);
+        const change = Number(quote.change);
+
+        let changePercentRaw = quote.changePercentage;
+        if (!Number.isFinite(Number(changePercentRaw))) {
+          changePercentRaw = quote.changesPercentage;
+        }
+        if (!Number.isFinite(Number(changePercentRaw))) {
+          changePercentRaw = quote.changePercent;
+        }
+
+        let changePercent = NaN;
+        if (typeof changePercentRaw === 'string') {
+          const cleaned = changePercentRaw.replace('%', '').trim();
+          changePercent = Number(cleaned);
+        } else {
+          changePercent = Number(changePercentRaw);
+        }
+
+        // FMP returns percent units (0.53 = 0.53%), UI expects ratio (0.0053)
+        if (Number.isFinite(changePercent)) {
+          changePercent = changePercent / 100;
+        } else if (Number.isFinite(change) && Number.isFinite(previousClose) && previousClose > 0) {
+          changePercent = change / previousClose;
+        }
+        let label = '';
+        if (quote.name) {
+          label = String(quote.name);
+        }
+        if (!label && quote.symbol) {
+          label = String(quote.symbol);
+        }
+        if (!label) {
+          label = symbol;
+        }
+
+        let outputSymbol = symbol;
+        if (quote.symbol) {
+          outputSymbol = String(quote.symbol);
+        }
+        const next = {
+          symbol: outputSymbol,
+          label,
+          price,
+          changePercent,
+        };
+        fmpIndexTickerCache.set(symbol, { data: next, timestamp: now });
+        rows.push(next);
+      } catch (err) {
+        if (cached) {
+          rows.push(cached.data);
+        }
+      }
+    }
+  }
+
+  if (rows.length === 0) {
+    return res.status(502).json({ error: 'failed to load index ticker' });
+  }
+
+  res.json({
+    ok: true,
+    updatedAtMs: now,
+    rows,
+  });
 });
 
 // get stock info with fmp
@@ -2545,9 +3138,13 @@ app.get('/api/fmp/stock-info', async (req, res) => {
       const price = summary.price;
       const sd = summary.summaryDetail;
       const stats = summary.defaultKeyStatistics;
+      let currency = 'USD';
+      if (price.currency) {
+        currency = price.currency;
+      }
       const fallbackData = {
         symbol,
-        currency: price.currency || 'USD',
+        currency,
         previousClose: asNumber(price.regularMarketPreviousClose),
         open: asNumber(price.regularMarketOpen),
         dayLow: asNumber(price.regularMarketDayLow),
@@ -2625,11 +3222,17 @@ app.get('/api/fmp/market-details', async (req, res) => {
     const endpointJobs = [
       ['searchExchangeVariants', getFmpUrl('search-exchange-variants', { symbol })],
       ['companyScreener', getFmpUrl('company-screener', { limit: '200' })],
+      ['stockPeers', getFmpUrl('stock-peers', { symbol })],
       ['profile', getFmpUrl('profile', { symbol })],
       ['employeeCount', getFmpUrl('employee-count', { symbol })],
+      ['historicalEmployeeCount', getFmpUrl('historical-employee-count', { symbol })],
       ['keyExecutives', getFmpUrl('key-executives', { symbol })],
+      ['governanceExecutiveCompensation', getFmpUrl('governance-executive-compensation', { symbol })],
       ['quote', getFmpUrl('quote', { symbol })],
       ['stockPriceChange', getFmpUrl('stock-price-change', { symbol })],
+      ['marketCapitalization', getFmpUrl('market-capitalization', { symbol })],
+      ['historicalMarketCapitalization', getFmpUrl('historical-market-capitalization', { symbol })],
+      ['sharesFloat', getFmpUrl('shares-float', { symbol })],
       ['balanceSheet', getFmpUrl('balance-sheet-statement', { symbol, limit: '4' })],
       ['keyMetrics', getFmpUrl('key-metrics', { symbol, limit: '4' })],
       ['ratios', getFmpUrl('ratios', { symbol, limit: '4' })],
@@ -2642,6 +3245,7 @@ app.get('/api/fmp/market-details', async (req, res) => {
       ['priceTargetSummary', getFmpUrl('price-target-summary', { symbol })],
       ['grades', getFmpUrl('grades', { symbol, limit: '20' })],
       ['insiderLatest', getFmpUrl('insider-trading/latest', { page: '0', limit: '200' })],
+      ['mergersAcquisitionsLatest', getFmpUrl('mergers-acquisitions-latest', { page: '0', limit: '100' })],
     ];
 
     const collected = {};
@@ -2653,7 +3257,11 @@ app.get('/api/fmp/market-details', async (req, res) => {
         const payload = await fetchFmpJson(url);
         return [key, payload];
       } catch (err) {
-        sourceErrors[key] = err.message || 'request failed';
+        let reason = 'request failed';
+        if (err.message) {
+          reason = err.message;
+        }
+        sourceErrors[key] = reason;
         return [key, []];
       }
     }));
@@ -2667,9 +3275,6 @@ app.get('/api/fmp/market-details', async (req, res) => {
     function asArray(payload) {
       if (Array.isArray(payload)) {
         return payload;
-      }
-      if (payload === null || payload === undefined) {
-        return [];
       }
       return [payload];
     }
@@ -2701,138 +3306,607 @@ app.get('/api/fmp/market-details', async (req, res) => {
     let screenerRow = {};
     for (let i = 0; i < screenerRows.length; i += 1) {
       const row = screenerRows[i];
-      const rowSymbol = String(row.symbol || row.ticker || '').toUpperCase();
+      let rowSymbolText = '';
+      if (row.symbol) {
+        rowSymbolText = String(row.symbol);
+      } else if (row.ticker) {
+        rowSymbolText = String(row.ticker);
+      }
+      const rowSymbol = rowSymbolText.toUpperCase();
       if (rowSymbol === symbol) {
         screenerRow = row;
       }
     }
 
-    const executivesRows = asArray(collected.keyExecutives).slice(0, 10).map((row) => ({
-      name: String(row.name || ''),
-      title: String(row.title || row.position || ''),
-      pay: keepNumber(row.pay),
-      currency: String(row.currency || ''),
-      year: String(row.year || ''),
-    }));
+    const executivesRows = [];
+    const keyExecutivesRows = asArray(collected.keyExecutives);
+    const keyExecutivesLimit = Math.min(10, keyExecutivesRows.length);
+    for (let i = 0; i < keyExecutivesLimit; i += 1) {
+      const row = keyExecutivesRows[i];
+      let name = '';
+      if (row.name) {
+        name = String(row.name);
+      }
+      let title = '';
+      if (row.title) {
+        title = String(row.title);
+      } else if (row.position) {
+        title = String(row.position);
+      }
+      let currency = '';
+      if (row.currency) {
+        currency = String(row.currency);
+      }
+      let year = '';
+      if (row.year) {
+        year = String(row.year);
+      }
+      executivesRows.push({
+        name,
+        title,
+        pay: keepNumber(row.pay),
+        currency,
+        year,
+      });
+    }
 
-    const balanceRows = asArray(collected.balanceSheet).slice(0, 4).map((row) => ({
-      date: String(row.date || row.fillingDate || ''),
-      totalAssets: keepNumber(row.totalAssets),
-      totalLiabilities: keepNumber(row.totalLiabilities),
-      totalStockholdersEquity: keepNumber(row.totalStockholdersEquity),
-      cashAndCashEquivalents: keepNumber(row.cashAndCashEquivalents),
-      totalDebt: keepNumber(row.totalDebt),
-    }));
+    const executiveCompRows = [];
+    const executiveCompSourceRows = asArray(collected.governanceExecutiveCompensation);
+    const executiveCompLimit = Math.min(10, executiveCompSourceRows.length);
+    for (let i = 0; i < executiveCompLimit; i += 1) {
+      const row = executiveCompSourceRows[i];
+      let name = '';
+      if (row.name) {
+        name = String(row.name);
+      } else if (row.executive) {
+        name = String(row.executive);
+      }
+      let title = '';
+      if (row.title) {
+        title = String(row.title);
+      } else if (row.position) {
+        title = String(row.position);
+      }
+      let totalSource = row.total;
+      if (!totalSource) {
+        totalSource = row.totalCompensation;
+      }
+      if (!totalSource) {
+        totalSource = row.totalPay;
+      }
+      let stockAwardsSource = row.stockAwards;
+      if (!stockAwardsSource) {
+        stockAwardsSource = row.stockAward;
+      }
+      let year = '';
+      if (row.year) {
+        year = String(row.year);
+      } else if (row.fiscalYear) {
+        year = String(row.fiscalYear);
+      }
+      executiveCompRows.push({
+        name,
+        title,
+        total: keepNumber(totalSource),
+        salary: keepNumber(row.salary),
+        bonus: keepNumber(row.bonus),
+        stockAwards: keepNumber(stockAwardsSource),
+        year,
+      });
+    }
 
-    const metricsRows = asArray(collected.keyMetrics).slice(0, 4).map((row) => ({
-      date: String(row.date || ''),
-      peRatio: keepNumber(row.peRatio),
-      pbRatio: keepNumber(row.pbRatio),
-      roe: keepNumber(row.roe),
-      roa: keepNumber(row.roa),
-      debtToEquity: keepNumber(row.debtToEquity),
-    }));
+    const employeeHistoryRows = [];
+    const employeeHistorySourceRows = asArray(collected.historicalEmployeeCount);
+    const employeeHistoryLimit = Math.min(12, employeeHistorySourceRows.length);
+    for (let i = 0; i < employeeHistoryLimit; i += 1) {
+      const row = employeeHistorySourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.period) {
+        date = String(row.period);
+      }
+      let employeeCountSource = row.employeeCount;
+      if (!employeeCountSource) {
+        employeeCountSource = row.employees;
+      }
+      employeeHistoryRows.push({
+        date,
+        employeeCount: keepNumber(employeeCountSource),
+      });
+    }
+    const sharesFloatRow = first(collected.sharesFloat);
+    const marketCapRows = [];
+    const marketCapSourceRows = asArray(collected.marketCapitalization);
+    const marketCapLimit = Math.min(1, marketCapSourceRows.length);
+    for (let i = 0; i < marketCapLimit; i += 1) {
+      const row = marketCapSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      let marketCapSource = row.marketCap;
+      if (!marketCapSource) {
+        marketCapSource = row.marketCapitalization;
+      }
+      marketCapRows.push({
+        date,
+        marketCap: keepNumber(marketCapSource),
+      });
+    }
 
-    const ratiosRows = asArray(collected.ratios).slice(0, 4).map((row) => ({
-      date: String(row.date || ''),
-      currentRatio: keepNumber(row.currentRatio),
-      quickRatio: keepNumber(row.quickRatio),
-      netProfitMargin: keepNumber(row.netProfitMargin),
-      grossProfitMargin: keepNumber(row.grossProfitMargin),
-      returnOnEquity: keepNumber(row.returnOnEquity),
-    }));
+    const marketCapHistoryRows = [];
+    const marketCapHistorySourceRows = asArray(collected.historicalMarketCapitalization);
+    const marketCapHistoryLimit = Math.min(30, marketCapHistorySourceRows.length);
+    for (let i = 0; i < marketCapHistoryLimit; i += 1) {
+      const row = marketCapHistorySourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      let marketCapSource = row.marketCap;
+      if (!marketCapSource) {
+        marketCapSource = row.marketCapitalization;
+      }
+      marketCapHistoryRows.push({
+        date,
+        marketCap: keepNumber(marketCapSource),
+      });
+    }
 
-    const enterpriseRows = asArray(collected.enterpriseValues).slice(0, 4).map((row) => ({
-      date: String(row.date || ''),
-      stockPrice: keepNumber(row.stockPrice),
-      marketCapitalization: keepNumber(row.marketCapitalization),
-      enterpriseValue: keepNumber(row.enterpriseValue),
-      numberOfShares: keepNumber(row.numberOfShares),
-    }));
+    const peerRows = [];
+    const stockPeerSourceRows = asArray(collected.stockPeers);
+    const stockPeerLimit = Math.min(20, stockPeerSourceRows.length);
+    for (let i = 0; i < stockPeerLimit; i += 1) {
+      const row = stockPeerSourceRows[i];
+      let peerText = '';
+      if (row.symbol) {
+        peerText = String(row.symbol);
+      } else if (row.ticker) {
+        peerText = String(row.ticker);
+      } else if (row) {
+        peerText = String(row);
+      }
+      const peerSymbol = peerText.toUpperCase();
+      if (peerSymbol) {
+        peerRows.push(peerSymbol);
+      }
+    }
 
-    const ratingsRows = asArray(collected.ratingsHistorical).slice(0, 10).map((row) => ({
-      date: String(row.date || ''),
-      rating: String(row.rating || row.ratingRecommendation || ''),
-      score: keepNumber(row.ratingScore),
-    }));
+    const balanceRows = [];
+    const balanceSourceRows = asArray(collected.balanceSheet);
+    const balanceLimit = Math.min(4, balanceSourceRows.length);
+    for (let i = 0; i < balanceLimit; i += 1) {
+      const row = balanceSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.fillingDate) {
+        date = String(row.fillingDate);
+      }
+      balanceRows.push({
+        date,
+        totalAssets: keepNumber(row.totalAssets),
+        totalLiabilities: keepNumber(row.totalLiabilities),
+        totalStockholdersEquity: keepNumber(row.totalStockholdersEquity),
+        cashAndCashEquivalents: keepNumber(row.cashAndCashEquivalents),
+        totalDebt: keepNumber(row.totalDebt),
+      });
+    }
 
-    const estimatesRows = asArray(collected.analystEstimates).slice(0, 10).map((row) => ({
-      date: String(row.date || row.period || ''),
-      estimatedRevenueAvg: keepNumber(row.estimatedRevenueAvg),
-      estimatedEbitdaAvg: keepNumber(row.estimatedEbitdaAvg),
-      estimatedNetIncomeAvg: keepNumber(row.estimatedNetIncomeAvg),
-      estimatedEpsAvg: keepNumber(row.estimatedEpsAvg),
-    }));
+    const metricsRows = [];
+    const metricsSourceRows = asArray(collected.keyMetrics);
+    const metricsLimit = Math.min(4, metricsSourceRows.length);
+    for (let i = 0; i < metricsLimit; i += 1) {
+      const row = metricsSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      metricsRows.push({
+        date,
+        peRatio: keepNumber(row.peRatio),
+        pbRatio: keepNumber(row.pbRatio),
+        roe: keepNumber(row.roe),
+        roa: keepNumber(row.roa),
+        debtToEquity: keepNumber(row.debtToEquity),
+      });
+    }
 
-    const gradesRows = asArray(collected.grades).slice(0, 10).map((row) => ({
-      date: String(row.date || ''),
-      gradingCompany: String(row.gradingCompany || ''),
-      previousGrade: String(row.previousGrade || ''),
-      newGrade: String(row.newGrade || ''),
-      action: String(row.action || ''),
-    }));
+    const ratiosRows = [];
+    const ratiosSourceRows = asArray(collected.ratios);
+    const ratiosLimit = Math.min(4, ratiosSourceRows.length);
+    for (let i = 0; i < ratiosLimit; i += 1) {
+      const row = ratiosSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      ratiosRows.push({
+        date,
+        currentRatio: keepNumber(row.currentRatio),
+        quickRatio: keepNumber(row.quickRatio),
+        netProfitMargin: keepNumber(row.netProfitMargin),
+        grossProfitMargin: keepNumber(row.grossProfitMargin),
+        returnOnEquity: keepNumber(row.returnOnEquity),
+      });
+    }
 
-    const newsAllRows = asArray(collected.newsLatest).map((row) => ({
-      symbol: String(row.symbol || row.ticker || ''),
-      title: String(row.title || ''),
-      publisher: String(row.site || row.publisher || ''),
-      publishedDate: String(row.publishedDate || row.date || ''),
-      url: String(row.url || ''),
-    }));
+    const enterpriseRows = [];
+    const enterpriseSourceRows = asArray(collected.enterpriseValues);
+    const enterpriseLimit = Math.min(4, enterpriseSourceRows.length);
+    for (let i = 0; i < enterpriseLimit; i += 1) {
+      const row = enterpriseSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      enterpriseRows.push({
+        date,
+        stockPrice: keepNumber(row.stockPrice),
+        marketCapitalization: keepNumber(row.marketCapitalization),
+        enterpriseValue: keepNumber(row.enterpriseValue),
+        numberOfShares: keepNumber(row.numberOfShares),
+      });
+    }
+
+    const ratingsRows = [];
+    const ratingsSourceRows = asArray(collected.ratingsHistorical);
+    const ratingsLimit = Math.min(10, ratingsSourceRows.length);
+    for (let i = 0; i < ratingsLimit; i += 1) {
+      const row = ratingsSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      let rating = '';
+      if (row.rating) {
+        rating = String(row.rating);
+      } else if (row.ratingRecommendation) {
+        rating = String(row.ratingRecommendation);
+      }
+      ratingsRows.push({
+        date,
+        rating,
+        score: keepNumber(row.ratingScore),
+      });
+    }
+
+    const estimatesRows = [];
+    const estimatesSourceRows = asArray(collected.analystEstimates);
+    const estimatesLimit = Math.min(10, estimatesSourceRows.length);
+    for (let i = 0; i < estimatesLimit; i += 1) {
+      const row = estimatesSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.period) {
+        date = String(row.period);
+      }
+      estimatesRows.push({
+        date,
+        estimatedRevenueAvg: keepNumber(row.estimatedRevenueAvg),
+        estimatedEbitdaAvg: keepNumber(row.estimatedEbitdaAvg),
+        estimatedNetIncomeAvg: keepNumber(row.estimatedNetIncomeAvg),
+        estimatedEpsAvg: keepNumber(row.estimatedEpsAvg),
+      });
+    }
+
+    const gradesRows = [];
+    const gradesSourceRows = asArray(collected.grades);
+    const gradesLimit = Math.min(10, gradesSourceRows.length);
+    for (let i = 0; i < gradesLimit; i += 1) {
+      const row = gradesSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      let gradingCompany = '';
+      if (row.gradingCompany) {
+        gradingCompany = String(row.gradingCompany);
+      }
+      let previousGrade = '';
+      if (row.previousGrade) {
+        previousGrade = String(row.previousGrade);
+      }
+      let newGrade = '';
+      if (row.newGrade) {
+        newGrade = String(row.newGrade);
+      }
+      let action = '';
+      if (row.action) {
+        action = String(row.action);
+      }
+      gradesRows.push({
+        date,
+        gradingCompany,
+        previousGrade,
+        newGrade,
+        action,
+      });
+    }
+
+    const newsAllRows = [];
+    const newsSourceRows = asArray(collected.newsLatest);
+    for (let i = 0; i < newsSourceRows.length; i += 1) {
+      const row = newsSourceRows[i];
+      let rowSymbol = '';
+      if (row.symbol) {
+        rowSymbol = String(row.symbol);
+      } else if (row.ticker) {
+        rowSymbol = String(row.ticker);
+      }
+      let title = '';
+      if (row.title) {
+        title = String(row.title);
+      }
+      let publisher = '';
+      if (row.site) {
+        publisher = String(row.site);
+      } else if (row.publisher) {
+        publisher = String(row.publisher);
+      }
+      let publishedDate = '';
+      if (row.publishedDate) {
+        publishedDate = String(row.publishedDate);
+      } else if (row.date) {
+        publishedDate = String(row.date);
+      }
+      let url = '';
+      if (row.url) {
+        url = String(row.url);
+      }
+      newsAllRows.push({
+        symbol: rowSymbol,
+        title,
+        publisher,
+        publishedDate,
+        url,
+      });
+    }
     const newsFiltered = newsAllRows.filter((row) => {
-      const rowSymbol = String(row.symbol || '').toUpperCase();
-      return !rowSymbol || rowSymbol === symbol;
+      let rowSymbolText = '';
+      if (row.symbol) {
+        rowSymbolText = String(row.symbol);
+      }
+      const rowSymbol = rowSymbolText.toUpperCase();
+      let allowRow = false;
+      if (!rowSymbol) {
+        allowRow = true;
+      }
+      if (rowSymbol === symbol) {
+        allowRow = true;
+      }
+      return allowRow;
     });
-    const newsRows = (newsFiltered.length > 0 ? newsFiltered : newsAllRows)
-      .slice(0, 20)
-      .map((row) => ({
-        symbol: String(row.symbol || row.ticker || ''),
-        title: String(row.title || ''),
-        publisher: String(row.site || row.publisher || ''),
-        publishedDate: String(row.publishedDate || row.date || ''),
-        url: String(row.url || ''),
-      }));
+    let newsBaseRows = newsAllRows;
+    if (newsFiltered.length > 0) {
+      newsBaseRows = newsFiltered;
+    }
+    const newsRows = [];
+    const newsRowsLimit = Math.min(20, newsBaseRows.length);
+    for (let i = 0; i < newsRowsLimit; i += 1) {
+      const row = newsBaseRows[i];
+      newsRows.push({
+        symbol: String(row.symbol),
+        title: String(row.title),
+        publisher: String(row.publisher),
+        publishedDate: String(row.publishedDate),
+        url: String(row.url),
+      });
+    }
 
-    const insiderAllRows = asArray(collected.insiderLatest).map((row) => ({
-      symbol: String(row.symbol || row.ticker || ''),
-      date: String(row.transactionDate || row.filingDate || row.date || ''),
-      reportingName: String(row.reportingName || row.reporterName || ''),
-      transactionType: String(row.transactionType || ''),
-      securitiesTransacted: keepNumber(row.securitiesTransacted || row.shares),
-      price: keepNumber(row.price),
-    }));
+    const insiderAllRows = [];
+    const insiderSourceRows = asArray(collected.insiderLatest);
+    for (let i = 0; i < insiderSourceRows.length; i += 1) {
+      const row = insiderSourceRows[i];
+      let rowSymbol = '';
+      if (row.symbol) {
+        rowSymbol = String(row.symbol);
+      } else if (row.ticker) {
+        rowSymbol = String(row.ticker);
+      }
+      let date = '';
+      if (row.transactionDate) {
+        date = String(row.transactionDate);
+      } else if (row.filingDate) {
+        date = String(row.filingDate);
+      } else if (row.date) {
+        date = String(row.date);
+      }
+      let reportingName = '';
+      if (row.reportingName) {
+        reportingName = String(row.reportingName);
+      } else if (row.reporterName) {
+        reportingName = String(row.reporterName);
+      }
+      let securitiesTransactedSource = row.securitiesTransacted;
+      if (!securitiesTransactedSource) {
+        securitiesTransactedSource = row.shares;
+      }
+      insiderAllRows.push({
+        symbol: rowSymbol,
+        date,
+        reportingName,
+        transactionType: String(row.transactionType),
+        securitiesTransacted: keepNumber(securitiesTransactedSource),
+        price: keepNumber(row.price),
+      });
+    }
     const insiderFiltered = insiderAllRows.filter((row) => {
-      const rowSymbol = String(row.symbol || '').toUpperCase();
+      let rowSymbolText = '';
+      if (row.symbol) {
+        rowSymbolText = String(row.symbol);
+      }
+      const rowSymbol = rowSymbolText.toUpperCase();
       return rowSymbol === symbol;
     });
-    const insiderRows = (insiderFiltered.length > 0 ? insiderFiltered : insiderAllRows)
-      .slice(0, 20)
-      .map((row) => ({
-        symbol: String(row.symbol || ''),
-        date: String(row.date || ''),
-        reportingName: String(row.reportingName || ''),
-        transactionType: String(row.transactionType || ''),
+    let insiderBaseRows = insiderAllRows;
+    if (insiderFiltered.length > 0) {
+      insiderBaseRows = insiderFiltered;
+    }
+    const insiderRows = [];
+    const insiderRowsLimit = Math.min(20, insiderBaseRows.length);
+    for (let i = 0; i < insiderRowsLimit; i += 1) {
+      const row = insiderBaseRows[i];
+      insiderRows.push({
+        symbol: String(row.symbol),
+        date: String(row.date),
+        reportingName: String(row.reportingName),
+        transactionType: String(row.transactionType),
         securitiesTransacted: keepNumber(row.securitiesTransacted),
         price: keepNumber(row.price),
-      }));
+      });
+    }
+
+    let overviewName = '';
+    if (profileRow.companyName) {
+      overviewName = String(profileRow.companyName);
+    } else if (profileRow.name) {
+      overviewName = String(profileRow.name);
+    }
+    let overviewDescription = '';
+    if (profileRow.description) {
+      overviewDescription = String(profileRow.description);
+    }
+    let overviewExchange = '';
+    if (profileRow.exchange) {
+      overviewExchange = String(profileRow.exchange);
+    } else if (profileRow.exchangeShortName) {
+      overviewExchange = String(profileRow.exchangeShortName);
+    }
+    let overviewSector = '';
+    if (profileRow.sector) {
+      overviewSector = String(profileRow.sector);
+    } else if (screenerRow.sector) {
+      overviewSector = String(screenerRow.sector);
+    }
+    let overviewIndustry = '';
+    if (profileRow.industry) {
+      overviewIndustry = String(profileRow.industry);
+    } else if (screenerRow.industry) {
+      overviewIndustry = String(screenerRow.industry);
+    }
+    let overviewCeo = '';
+    if (profileRow.ceo) {
+      overviewCeo = String(profileRow.ceo);
+    }
+    let overviewCountry = '';
+    if (profileRow.country) {
+      overviewCountry = String(profileRow.country);
+    }
+    let overviewCity = '';
+    if (profileRow.city) {
+      overviewCity = String(profileRow.city);
+    }
+    let overviewState = '';
+    if (profileRow.state) {
+      overviewState = String(profileRow.state);
+    }
+    let overviewWebsite = '';
+    if (profileRow.website) {
+      overviewWebsite = String(profileRow.website);
+    }
+    let overviewCurrency = '';
+    if (quoteRow.currency) {
+      overviewCurrency = String(quoteRow.currency);
+    }
+    let overviewIpoDate = '';
+    if (profileRow.ipoDate) {
+      overviewIpoDate = String(profileRow.ipoDate);
+    }
+
+    const searchExchangeVariants = [];
+    const searchExchangeVariantsSource = asArray(collected.searchExchangeVariants);
+    const searchExchangeVariantsLimit = Math.min(8, searchExchangeVariantsSource.length);
+    for (let i = 0; i < searchExchangeVariantsLimit; i += 1) {
+      searchExchangeVariants.push(searchExchangeVariantsSource[i]);
+    }
+
+    let companyPhone = '';
+    if (profileRow.phone) {
+      companyPhone = String(profileRow.phone);
+    }
+    let companyIsin = '';
+    if (profileRow.isin) {
+      companyIsin = String(profileRow.isin);
+    }
+    let companyCusip = '';
+    if (profileRow.cusip) {
+      companyCusip = String(profileRow.cusip);
+    }
+    let screenerCompanyName = '';
+    if (screenerRow.companyName) {
+      screenerCompanyName = String(screenerRow.companyName);
+    }
+    let screenerExchangeShortName = '';
+    if (screenerRow.exchangeShortName) {
+      screenerExchangeShortName = String(screenerRow.exchangeShortName);
+    }
+    let screenerCountry = '';
+    if (screenerRow.country) {
+      screenerCountry = String(screenerRow.country);
+    }
+    let screenerIpoDate = '';
+    if (screenerRow.ipoDate) {
+      screenerIpoDate = String(screenerRow.ipoDate);
+    }
+
+    let floatSharesSource = sharesFloatRow.floatShares;
+    if (!floatSharesSource) {
+      floatSharesSource = sharesFloatRow.outstandingSharesFloat;
+    }
+
+    const mergersAcquisitions = [];
+    const mergersAcquisitionsSourceRows = asArray(collected.mergersAcquisitionsLatest);
+    const mergersAcquisitionsLimit = Math.min(20, mergersAcquisitionsSourceRows.length);
+    for (let i = 0; i < mergersAcquisitionsLimit; i += 1) {
+      const row = mergersAcquisitionsSourceRows[i];
+      let companyName = '';
+      if (row.companyName) {
+        companyName = String(row.companyName);
+      } else if (row.targetCompany) {
+        companyName = String(row.targetCompany);
+      }
+      let acquiringCompany = '';
+      if (row.acquiringCompany) {
+        acquiringCompany = String(row.acquiringCompany);
+      }
+      let announcedDate = '';
+      if (row.announcedDate) {
+        announcedDate = String(row.announcedDate);
+      } else if (row.date) {
+        announcedDate = String(row.date);
+      }
+      let status = '';
+      if (row.status) {
+        status = String(row.status);
+      }
+      mergersAcquisitions.push({
+        companyName,
+        acquiringCompany,
+        announcedDate,
+        status,
+      });
+    }
 
     const payload = {
       symbol,
       asOfMs: Date.now(),
       sections: {
         overview: {
-          name: String(profileRow.companyName || profileRow.name || ''),
-          description: String(profileRow.description || ''),
-          exchange: String(profileRow.exchange || profileRow.exchangeShortName || ''),
-          sector: String(profileRow.sector || screenerRow.sector || ''),
-          industry: String(profileRow.industry || screenerRow.industry || ''),
-          ceo: String(profileRow.ceo || ''),
-          country: String(profileRow.country || ''),
-          city: String(profileRow.city || ''),
-          state: String(profileRow.state || ''),
-          website: String(profileRow.website || ''),
-          currency: String(quoteRow.currency || ''),
-          ipoDate: String(profileRow.ipoDate || ''),
+          name: overviewName,
+          description: overviewDescription,
+          exchange: overviewExchange,
+          sector: overviewSector,
+          industry: overviewIndustry,
+          ceo: overviewCeo,
+          country: overviewCountry,
+          city: overviewCity,
+          state: overviewState,
+          website: overviewWebsite,
+          currency: overviewCurrency,
+          ipoDate: overviewIpoDate,
           price: keepNumber(pick(quoteRow, ['price'])),
           previousClose: keepNumber(pick(quoteRow, ['previousClose', 'prevClose'])),
           open: keepNumber(pick(quoteRow, ['open'])),
@@ -2849,14 +3923,26 @@ app.get('/api/fmp/market-details', async (req, res) => {
           stockPriceChange1D: keepNumber(pick(changeRow, ['1D', 'changesPercentage', 'changePercent'])),
         },
         company: {
-          searchExchangeVariants: asArray(collected.searchExchangeVariants).slice(0, 8),
+          searchExchangeVariants,
           employeeCount: keepNumber(pick(employeeRow, ['employeeCount', 'employees'])),
-          phone: String(profileRow.phone || ''),
-          isin: String(profileRow.isin || ''),
-          cusip: String(profileRow.cusip || ''),
+          employeeCountHistory: employeeHistoryRows,
+          peers: peerRows,
+          phone: companyPhone,
+          isin: companyIsin,
+          cusip: companyCusip,
+          screener: {
+            companyName: screenerCompanyName,
+            exchangeShortName: screenerExchangeShortName,
+            marketCap: keepNumber(screenerRow.marketCap),
+            country: screenerCountry,
+            ipoDate: screenerIpoDate,
+            isEtf: Boolean(screenerRow.isEtf),
+            isActivelyTrading: Boolean(screenerRow.isActivelyTrading),
+          },
         },
         people: {
           keyExecutives: executivesRows,
+          executiveCompensation: executiveCompRows,
         },
         financial: {
           balanceSheet: balanceRows,
@@ -2865,6 +3951,13 @@ app.get('/api/fmp/market-details', async (req, res) => {
           keyMetricsTtm: keyMetricsTtmRow,
           ratiosTtm: ratiosTtmRow,
           enterpriseValues: enterpriseRows,
+          sharesFloat: {
+            freeFloat: keepNumber(sharesFloatRow.freeFloat),
+            floatShares: keepNumber(floatSharesSource),
+            outstandingShares: keepNumber(sharesFloatRow.outstandingShares),
+          },
+          marketCapitalization: marketCapRows,
+          historicalMarketCapitalization: marketCapHistoryRows,
         },
         analysis: {
           ratingsHistorical: ratingsRows,
@@ -2874,6 +3967,7 @@ app.get('/api/fmp/market-details', async (req, res) => {
         },
         news: newsRows,
         insider: insiderRows,
+        mergersAcquisitions,
       },
       sourceErrors,
     };
@@ -2913,7 +4007,10 @@ app.get('/api/ttoken-address', (_req, res) => {
 app.get('/api/ttoken/balance', async (req, res) => {
   const address = String(req.query.address);
   try {
-    const ttokenAddress = process.env.TTOKEN_ADDRESS || getTTokenAddressFromDeployments();
+    let ttokenAddress = getTTokenAddressFromDeployments();
+    if (process.env.TTOKEN_ADDRESS) {
+      ttokenAddress = process.env.TTOKEN_ADDRESS;
+    }
     const data = equityTokenInterface.encodeFunctionData('balanceOf', [address]);
     const result = await hardhatRpc('eth_call', [{ to: ttokenAddress, data }, 'latest']);
     const [balanceWei] = equityTokenInterface.decodeFunctionResult('balanceOf', result);
@@ -2933,11 +4030,21 @@ app.post('/api/ttoken/mint', async (req, res) => {
     return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
-  if (!amountIsNumber || amount < 1000) {
+  let invalidAmount = false;
+  if (!amountIsNumber) {
+    invalidAmount = true;
+  }
+  if (amount < 1000) {
+    invalidAmount = true;
+  }
+  if (invalidAmount) {
     return res.status(400).json({ error: '' });
   }
 
-  const ttokenAddress = process.env.TTOKEN_ADDRESS || getTTokenAddressFromDeployments();
+  let ttokenAddress = getTTokenAddressFromDeployments();
+  if (process.env.TTOKEN_ADDRESS) {
+    ttokenAddress = process.env.TTOKEN_ADDRESS;
+  }
 
   try {
     const deployments = loadDeployments();
@@ -2966,13 +4073,24 @@ app.post('/api/orderbook/limit', async (req, res) => {
     const body = req.body;
     const symbol = String(body.symbol).toUpperCase();
     const symbolLifecycle = getSymbolLifecycleStatus(symbol);
-    if (symbolLifecycle === 'FROZEN' || symbolLifecycle === 'DELISTED') {
+    let blockedByLifecycle = false;
+    if (symbolLifecycle === 'FROZEN') {
+      blockedByLifecycle = true;
+    }
+    if (symbolLifecycle === 'DELISTED') {
+      blockedByLifecycle = true;
+    }
+    if (blockedByLifecycle) {
       return res.status(400).json({ error: `symbol ${symbol} is ${symbolLifecycle}` });
     }
     const sideText = String(body.side).toUpperCase();
     const priceCents = Number(body.priceCents);
     const qty = Number(body.qty);
-    const from = normalizeAddress(String(body.from || ''));
+    let fromText = '';
+    if (body.from) {
+      fromText = String(body.from);
+    }
+    const from = normalizeAddress(fromText);
     if (!from) {
       return res.status(400).json({ error: 'wallet is required' });
     }
@@ -3303,7 +4421,14 @@ app.get('/api/orders/open', async (req, res) => {
       const order = orderValues[i];
       const isOwner = order.trader === wallet;
       let isOpen = false;
-      if (order.status === 'OPEN' || order.status === 'PARTIAL') {
+      let isOpenStatus = false;
+      if (order.status === 'OPEN') {
+        isOpenStatus = true;
+      }
+      if (order.status === 'PARTIAL') {
+        isOpenStatus = true;
+      }
+      if (isOpenStatus) {
         isOpen = true;
       }
       if (isOwner && isOpen) {
@@ -3331,7 +4456,14 @@ app.get('/api/orders/:orderId', async (req, res) => {
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
-  if (!Number.isFinite(orderId) || orderId <= 0) {
+  let invalidOrderId = false;
+  if (!Number.isFinite(orderId)) {
+    invalidOrderId = true;
+  }
+  if (orderId <= 0) {
+    invalidOrderId = true;
+  }
+  if (invalidOrderId) {
     return res.status(400).json({ error: 'invalid order id' });
   }
 
@@ -3339,7 +4471,14 @@ app.get('/api/orders/:orderId', async (req, res) => {
     await ensureIndexerSynced();
     const { orders } = readIndexerSnapshot();
     const order = orders[String(orderId)];
-    if (!order || order.trader !== wallet) {
+    let missingOrder = false;
+    if (!order) {
+      missingOrder = true;
+    }
+    if (order && order.trader !== wallet) {
+      missingOrder = true;
+    }
+    if (missingOrder) {
       return res.status(404).json({ error: 'order not found' });
     }
     res.json({ order });
@@ -3362,7 +4501,14 @@ app.post('/api/orders/cancel', async (req, res) => {
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
-  if (!Number.isFinite(orderId) || orderId <= 0) {
+  let invalidCancelOrderId = false;
+  if (!Number.isFinite(orderId)) {
+    invalidCancelOrderId = true;
+  }
+  if (orderId <= 0) {
+    invalidCancelOrderId = true;
+  }
+  if (invalidCancelOrderId) {
     return res.status(400).json({ error: 'invalid order id' });
   }
 
@@ -3377,7 +4523,14 @@ app.post('/api/orders/cancel', async (req, res) => {
       return res.status(403).json({ error: 'cannot cancel another wallet order' });
     }
     let isCancellable = false;
-    if (order.status === 'OPEN' || order.status === 'PARTIAL') {
+    let openOrPartial = false;
+    if (order.status === 'OPEN') {
+      openOrPartial = true;
+    }
+    if (order.status === 'PARTIAL') {
+      openOrPartial = true;
+    }
+    if (openOrPartial) {
       isCancellable = true;
     }
     if (!isCancellable) {
@@ -3444,7 +4597,14 @@ app.get('/api/txs', async (req, res) => {
     const { orders, fills, cancellations, cashflows, transfers, leveragedEvents } = snapshot;
     const items = [];
 
-    if (type === 'ALL' || type === 'ORDERS') {
+    let includeOrders = false;
+    if (type === 'ALL') {
+      includeOrders = true;
+    }
+    if (type === 'ORDERS') {
+      includeOrders = true;
+    }
+    if (includeOrders) {
       for (const order of Object.values(orders)) {
         if (order.trader === wallet) {
           items.push({
@@ -3489,7 +4649,14 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    if (type === 'ALL' || type === 'FILLS') {
+    let includeFills = false;
+    if (type === 'ALL') {
+      includeFills = true;
+    }
+    if (type === 'FILLS') {
+      includeFills = true;
+    }
+    if (includeFills) {
       for (const fill of fills) {
         let side = '';
         if (fill.makerTrader === wallet) {
@@ -3523,7 +4690,14 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    if (type === 'ALL' || type === 'CASHFLOW') {
+    let includeCashflow = false;
+    if (type === 'ALL') {
+      includeCashflow = true;
+    }
+    if (type === 'CASHFLOW') {
+      includeCashflow = true;
+    }
+    if (includeCashflow) {
       for (const cashflow of cashflows) {
         if (cashflow.wallet === wallet) {
           items.push({
@@ -3542,9 +4716,23 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    if (type === 'ALL' || type === 'TRANSFERS') {
+    let includeTransfers = false;
+    if (type === 'ALL') {
+      includeTransfers = true;
+    }
+    if (type === 'TRANSFERS') {
+      includeTransfers = true;
+    }
+    if (includeTransfers) {
       for (const transfer of transfers) {
-        if (transfer.from === wallet || transfer.to === wallet) {
+        let isWalletTransfer = false;
+        if (transfer.from === wallet) {
+          isWalletTransfer = true;
+        }
+        if (transfer.to === wallet) {
+          isWalletTransfer = true;
+        }
+        if (isWalletTransfer) {
           let direction = 'OUT';
           if (transfer.to === wallet) {
             direction = 'IN';
@@ -3570,7 +4758,14 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    if (type === 'ALL' || type === 'LEVERAGE') {
+    let includeLeverage = false;
+    if (type === 'ALL') {
+      includeLeverage = true;
+    }
+    if (type === 'LEVERAGE') {
+      includeLeverage = true;
+    }
+    if (includeLeverage) {
       for (const entry of leveragedEvents) {
         if (entry.wallet === wallet) {
           const row = {
@@ -3598,7 +4793,14 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    items.sort((a, b) => b.timestampMs - a.timestampMs || b.blockNumber - a.blockNumber);
+    items.sort((a, b) => {
+      const timestampDiff = b.timestampMs - a.timestampMs;
+      if (timestampDiff !== 0) {
+        return timestampDiff;
+      }
+      const blockNumberDiff = b.blockNumber - a.blockNumber;
+      return blockNumberDiff;
+    });
     const offset = Math.max(0, cursor);
     const paged = items.slice(offset, offset + limit);
     let nextCursor = null;
@@ -3650,7 +4852,14 @@ app.get('/api/portfolio/positions', async (req, res) => {
     const fillRows = [];
     const walletNorm = normalizeAddress(wallet);
     for (const fill of snapshot.fills) {
-      if (fill.makerTrader === walletNorm || fill.takerTrader === walletNorm) {
+      let isWalletFill = false;
+      if (fill.makerTrader === walletNorm) {
+        isWalletFill = true;
+      }
+      if (fill.takerTrader === walletNorm) {
+        isWalletFill = true;
+      }
+      if (isWalletFill) {
         let side = '';
         if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
@@ -3982,7 +5191,14 @@ app.get('/api/portfolio/summary', async (req, res) => {
     const fillRows = [];
     const walletNorm = normalizeAddress(wallet);
     for (const fill of snapshot.fills) {
-      if (fill.makerTrader === walletNorm || fill.takerTrader === walletNorm) {
+      let matchesFillWallet = false;
+      if (fill.makerTrader === walletNorm) {
+        matchesFillWallet = true;
+      }
+      if (fill.takerTrader === walletNorm) {
+        matchesFillWallet = true;
+      }
+      if (matchesFillWallet) {
         let side = '';
         if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
@@ -4306,6 +5522,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
       }
     }
     const totalValueWei = cashWei + stockValueWei + leveragedValueWei;
+    const gasSummary = await computeOverallGasForWallet(snapshot, wallet);
 
     let aggregator = null;
     let drift = null;
@@ -4360,6 +5577,8 @@ app.get('/api/portfolio/summary', async (req, res) => {
       totalCostBasisWei: totalCostBasisWei.toString(),
       realizedPnlWei: realizedPnlWei.toString(),
       unrealizedPnlWei: unrealizedPnlWei.toString(),
+      overallGasUsedUnits: gasSummary.gasUsedUnits.toString(),
+      overallGasCostWei: gasSummary.gasCostWei.toString(),
       aggregator,
       drift,
     });
@@ -4385,7 +5604,14 @@ app.get('/api/portfolio/rebuild-audit', async (req, res) => {
     const fillRows = [];
     const walletNorm = normalizeAddress(wallet);
     for (const fill of snapshot.fills) {
-      if (fill.makerTrader === walletNorm || fill.takerTrader === walletNorm) {
+      let relatedToWallet = false;
+      if (fill.makerTrader === walletNorm) {
+        relatedToWallet = true;
+      }
+      if (fill.takerTrader === walletNorm) {
+        relatedToWallet = true;
+      }
+      if (relatedToWallet) {
         let side = '';
         if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
@@ -4519,7 +5745,14 @@ app.get('/api/dividends/epochs', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let missingEpochTokenAddress = false;
+    if (!tokenAddress) {
+      missingEpochTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingEpochTokenAddress = true;
+    }
+    if (missingEpochTokenAddress) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
 
@@ -4550,15 +5783,47 @@ app.get('/api/dividends/epochs', async (req, res) => {
 
 app.post('/api/dividends/merkle/declare', async (req, res) => {
   try {
-    const body = req.body || {};
-    const symbol = String(body.symbol || '').toUpperCase();
-    const merkleRoot = String(body.merkleRoot || '');
-    const totalEntitledWei = String(body.totalEntitledWei || '');
-    const claimsUri = String(body.claimsUri || '');
-    const contentHash = String(body.contentHash || ethers.ZeroHash);
-    const claims = Array.isArray(body.claims) ? body.claims : [];
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let symbolText = '';
+    if (body.symbol) {
+      symbolText = String(body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
+    let merkleRoot = '';
+    if (body.merkleRoot) {
+      merkleRoot = String(body.merkleRoot);
+    }
+    let totalEntitledWei = '';
+    if (body.totalEntitledWei) {
+      totalEntitledWei = String(body.totalEntitledWei);
+    }
+    let claimsUri = '';
+    if (body.claimsUri) {
+      claimsUri = String(body.claimsUri);
+    }
+    let contentHash = ethers.ZeroHash;
+    if (body.contentHash) {
+      contentHash = String(body.contentHash);
+    }
+    let claims = [];
+    if (Array.isArray(body.claims)) {
+      claims = body.claims;
+    }
 
-    if (!symbol || !merkleRoot || !totalEntitledWei) {
+    let hasMissingInput = false;
+    if (!symbol) {
+      hasMissingInput = true;
+    }
+    if (!merkleRoot) {
+      hasMissingInput = true;
+    }
+    if (!totalEntitledWei) {
+      hasMissingInput = true;
+    }
+    if (hasMissingInput) {
       return res.status(400).json({ error: 'symbol, merkleRoot, totalEntitledWei are required' });
     }
     if (!/^0x[a-fA-F0-9]{64}$/.test(merkleRoot)) {
@@ -4577,7 +5842,14 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
     }
 
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let tokenAddressMissing = false;
+    if (!tokenAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddressMissing) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
 
@@ -4643,25 +5915,42 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
     const normalizedClaims = [];
     for (let i = 0; i < claims.length; i += 1) {
       const row = claims[i];
-      const account = normalizeAddress(String(row.account || ''));
-      const amountWei = String(row.amountWei || '0');
+      let accountText = '';
+      if (row.account) {
+        accountText = String(row.account);
+      }
+      const account = normalizeAddress(accountText);
+      let amountWei = '0';
+      if (row.amountWei) {
+        amountWei = String(row.amountWei);
+      }
       const leafIndex = Number(row.leafIndex);
-      const proof = Array.isArray(row.proof) ? row.proof : [];
-      if (!account) {
-        continue;
+      let proof = [];
+      if (Array.isArray(row.proof)) {
+        proof = row.proof;
       }
-      if (!(BigInt(amountWei) > 0n)) {
-        continue;
+      let canUseClaim = true;
+      if (!account || !(BigInt(amountWei) > 0n)) {
+        canUseClaim = false;
       }
-      if (!Number.isFinite(leafIndex) || leafIndex < 0) {
-        continue;
+      let invalidLeafIndex = false;
+      if (!Number.isFinite(leafIndex)) {
+        invalidLeafIndex = true;
       }
-      normalizedClaims.push({
-        account,
-        amountWei,
-        leafIndex,
-        proof,
-      });
+      if (leafIndex < 0) {
+        invalidLeafIndex = true;
+      }
+      if (invalidLeafIndex) {
+        canUseClaim = false;
+      }
+      if (canUseClaim) {
+        normalizedClaims.push({
+          account,
+          amountWei,
+          leafIndex,
+          proof,
+        });
+      }
     }
     if (normalizedClaims.length > 0) {
       writeMerkleClaims(epochId, {
@@ -4691,11 +5980,31 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
 
 app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
   try {
-    const body = req.body || {};
-    const symbol = String(body.symbol || '').toUpperCase();
-    const divPerShareText = String(body.divPerShare || '').trim();
-    const claimsUri = String(body.claimsUri || '');
-    if (!symbol || !divPerShareText) {
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let symbolText = '';
+    if (body.symbol) {
+      symbolText = String(body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
+    let divPerShareText = '';
+    if (body.divPerShare) {
+      divPerShareText = String(body.divPerShare).trim();
+    }
+    let claimsUri = '';
+    if (body.claimsUri) {
+      claimsUri = String(body.claimsUri);
+    }
+    let missingDeclareAutoInput = false;
+    if (!symbol) {
+      missingDeclareAutoInput = true;
+    }
+    if (!divPerShareText) {
+      missingDeclareAutoInput = true;
+    }
+    if (missingDeclareAutoInput) {
       return res.status(400).json({ error: 'symbol and divPerShare are required' });
     }
     const divPerShareWei = ethers.parseUnits(divPerShareText, 18);
@@ -4708,7 +6017,14 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       return res.status(400).json({ error: 'dividends merkle contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let missingTokenAddress = false;
+    if (!tokenAddress) {
+      missingTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingTokenAddress = true;
+    }
+    if (missingTokenAddress) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
 
@@ -4739,17 +6055,15 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
       const [balanceRaw] = equityTokenSnapshotInterface.decodeFunctionResult('balanceOfAt', balResult);
       const balanceWei = BigInt(balanceRaw.toString());
-      if (balanceWei <= 0n) {
-        continue;
+      if (balanceWei > 0n) {
+        const amountWei = (balanceWei * divPerShareWei) / (10n ** 18n);
+        if (amountWei > 0n) {
+          claims.push({
+            account,
+            amountWei: amountWei.toString(),
+          });
+        }
       }
-      const amountWei = (balanceWei * divPerShareWei) / (10n ** 18n);
-      if (amountWei <= 0n) {
-        continue;
-      }
-      claims.push({
-        account,
-        amountWei: amountWei.toString(),
-      });
     }
     claims.sort((a, b) => a.account.toLowerCase().localeCompare(b.account.toLowerCase()));
     for (let i = 0; i < claims.length; i += 1) {
@@ -4867,7 +6181,11 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
 });
 
 app.get('/api/dividends/merkle/epochs', async (req, res) => {
-  const symbol = String(req.query.symbol || '').toUpperCase();
+  let symbolText = '';
+  if (req.query.symbol) {
+    symbolText = String(req.query.symbol);
+  }
+  const symbol = symbolText.toUpperCase();
   try {
     const deployments = loadDeployments();
     if (!deployments.dividendsMerkle) {
@@ -4884,20 +6202,27 @@ app.get('/api/dividends/merkle/epochs', async (req, res) => {
       const epochResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: epochData }, 'latest']);
       const [row] = dividendsMerkleInterface.decodeFunctionResult('getEpoch', epochResult);
       const epochSymbol = await getSymbolByToken(deployments.listingsRegistry, row.equityToken);
-      if (symbol && epochSymbol !== symbol) {
-        continue;
+      let hasSymbolFilter = false;
+      if (symbol) {
+        hasSymbolFilter = true;
       }
-      epochs.push({
-        epochId,
-        symbol: epochSymbol,
-        tokenAddress: normalizeAddress(row.equityToken),
-        merkleRoot: row.merkleRoot,
-        declaredAt: Number(row.declaredAt),
-        totalEntitledWei: row.totalEntitledWei.toString(),
-        totalClaimedWei: row.totalClaimedWei.toString(),
-        contentHash: row.contentHash,
-        claimsUri: String(row.claimsUri),
-      });
+      let allowEpoch = true;
+      if (hasSymbolFilter && epochSymbol !== symbol) {
+        allowEpoch = false;
+      }
+      if (allowEpoch) {
+        epochs.push({
+          epochId,
+          symbol: epochSymbol,
+          tokenAddress: normalizeAddress(row.equityToken),
+          merkleRoot: row.merkleRoot,
+          declaredAt: Number(row.declaredAt),
+          totalEntitledWei: row.totalEntitledWei.toString(),
+          totalClaimedWei: row.totalClaimedWei.toString(),
+          contentHash: row.contentHash,
+          claimsUri: String(row.claimsUri),
+        });
+      }
     }
     res.json({ symbol, epochs });
   } catch (err) {
@@ -4907,14 +6232,27 @@ app.get('/api/dividends/merkle/epochs', async (req, res) => {
 
 app.get('/api/dividends/merkle/tree', async (req, res) => {
   const epochId = Number(req.query.epochId);
-  if (!Number.isFinite(epochId) || epochId <= 0) {
+  let invalidMerkleEpochId = false;
+  if (!Number.isFinite(epochId)) {
+    invalidMerkleEpochId = true;
+  }
+  if (epochId <= 0) {
+    invalidMerkleEpochId = true;
+  }
+  if (invalidMerkleEpochId) {
     return res.status(400).json({ error: 'epochId is required' });
   }
   try {
     const tree = readMerkleTree(epochId);
     const claims = readMerkleClaims(epochId);
-    const levels = Array.isArray(tree.levels) ? tree.levels : [];
-    const levelSizes = Array.isArray(tree.levelSizes) ? tree.levelSizes : [];
+    let levels = [];
+    if (Array.isArray(tree.levels)) {
+      levels = tree.levels;
+    }
+    let levelSizes = [];
+    if (Array.isArray(tree.levelSizes)) {
+      levelSizes = tree.levelSizes;
+    }
     const previewLevels = [];
     for (let i = 0; i < levels.length; i += 1) {
       const hashes = levels[i];
@@ -4935,14 +6273,62 @@ app.get('/api/dividends/merkle/tree', async (req, res) => {
     }
     res.json({
       epochId,
-      symbol: String(tree.symbol || ''),
-      tokenAddress: String(tree.tokenAddress || ''),
-      snapshotId: Number(tree.snapshotId || 0),
-      merkleRoot: String(tree.merkleRoot || ''),
-      totalEntitledWei: String(tree.totalEntitledWei || '0'),
-      contentHash: String(tree.contentHash || ethers.ZeroHash),
-      claimsUri: String(tree.claimsUri || ''),
-      claimCount: Array.isArray(claims.claims) ? claims.claims.length : 0,
+      symbol: (() => {
+        let value = '';
+        if (tree.symbol) {
+          value = String(tree.symbol);
+        }
+        return value;
+      })(),
+      tokenAddress: (() => {
+        let value = '';
+        if (tree.tokenAddress) {
+          value = String(tree.tokenAddress);
+        }
+        return value;
+      })(),
+      snapshotId: (() => {
+        let value = 0;
+        if (tree.snapshotId) {
+          value = Number(tree.snapshotId);
+        }
+        return value;
+      })(),
+      merkleRoot: (() => {
+        let value = '';
+        if (tree.merkleRoot) {
+          value = String(tree.merkleRoot);
+        }
+        return value;
+      })(),
+      totalEntitledWei: (() => {
+        let value = '0';
+        if (tree.totalEntitledWei) {
+          value = String(tree.totalEntitledWei);
+        }
+        return value;
+      })(),
+      contentHash: (() => {
+        let value = ethers.ZeroHash;
+        if (tree.contentHash) {
+          value = String(tree.contentHash);
+        }
+        return value;
+      })(),
+      claimsUri: (() => {
+        let value = '';
+        if (tree.claimsUri) {
+          value = String(tree.claimsUri);
+        }
+        return value;
+      })(),
+      claimCount: (() => {
+        let value = 0;
+        if (Array.isArray(claims.claims)) {
+          value = claims.claims.length;
+        }
+        return value;
+      })(),
       levelSizes,
       levels: previewLevels,
     });
@@ -4952,7 +6338,11 @@ app.get('/api/dividends/merkle/tree', async (req, res) => {
 });
 
 app.get('/api/dividends/merkle/claimable', async (req, res) => {
-  const wallet = normalizeAddress(String(req.query.wallet || ''));
+  let walletText = '';
+  if (req.query.wallet) {
+    walletText = String(req.query.wallet);
+  }
+  const wallet = normalizeAddress(walletText);
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
@@ -4970,34 +6360,76 @@ app.get('/api/dividends/merkle/claimable', async (req, res) => {
     for (let epochId = 1; epochId <= count; epochId += 1) {
       const tree = readMerkleTree(epochId);
       const claimsPayload = readMerkleClaims(epochId);
-      const rows = Array.isArray(claimsPayload.claims) ? claimsPayload.claims : [];
+      let rows = [];
+      if (Array.isArray(claimsPayload.claims)) {
+        rows = claimsPayload.claims;
+      }
       for (let i = 0; i < rows.length; i += 1) {
         const row = rows[i];
-        const account = normalizeAddress(String(row.account || ''));
-        if (account !== wallet) {
-          continue;
+        let accountText = '';
+        if (row.account) {
+          accountText = String(row.account);
         }
-        const leafIndex = Number(row.leafIndex);
-        const amountWei = String(row.amountWei || '0');
-        const proof = Array.isArray(row.proof) ? row.proof : [];
-        const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
-        const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
-        const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
-        claimables.push({
-          claimType: 'MERKLE',
-          epochId,
-          symbol: String(tree.symbol || ''),
-          tokenAddress: String(tree.tokenAddress || ''),
-          claimableWei: amountWei,
-          amountWei,
-          leafIndex,
-          proof,
-          claimed,
-          canClaim: !claimed && BigInt(amountWei) > 0n,
-          merkleRoot: String(tree.merkleRoot || ''),
-          contentHash: String(tree.contentHash || ethers.ZeroHash),
-          claimsUri: String(tree.claimsUri || ''),
-        });
+        const account = normalizeAddress(accountText);
+        if (account === wallet) {
+          const leafIndex = Number(row.leafIndex);
+          let amountWei = '0';
+          if (row.amountWei) {
+            amountWei = String(row.amountWei);
+          }
+          let proof = [];
+          if (Array.isArray(row.proof)) {
+            proof = row.proof;
+          }
+          const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
+          const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
+          const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
+          claimables.push({
+            claimType: 'MERKLE',
+            epochId,
+            symbol: (() => {
+              let value = '';
+              if (tree.symbol) {
+                value = String(tree.symbol);
+              }
+              return value;
+            })(),
+            tokenAddress: (() => {
+              let value = '';
+              if (tree.tokenAddress) {
+                value = String(tree.tokenAddress);
+              }
+              return value;
+            })(),
+            claimableWei: amountWei,
+            amountWei,
+            leafIndex,
+            proof,
+            claimed,
+            canClaim: !claimed && BigInt(amountWei) > 0n,
+            merkleRoot: (() => {
+              let value = '';
+              if (tree.merkleRoot) {
+                value = String(tree.merkleRoot);
+              }
+              return value;
+            })(),
+            contentHash: (() => {
+              let value = ethers.ZeroHash;
+              if (tree.contentHash) {
+                value = String(tree.contentHash);
+              }
+              return value;
+            })(),
+            claimsUri: (() => {
+              let value = '';
+              if (tree.claimsUri) {
+                value = String(tree.claimsUri);
+              }
+              return value;
+            })(),
+          });
+        }
       }
     }
 
@@ -5009,24 +6441,65 @@ app.get('/api/dividends/merkle/claimable', async (req, res) => {
 
 app.post('/api/dividends/merkle/claim', async (req, res) => {
   try {
-    const body = req.body || {};
-    const wallet = normalizeAddress(String(body.wallet || ''));
-    const account = normalizeAddress(String(body.account || ''));
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let walletText = '';
+    if (body.wallet) {
+      walletText = String(body.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    let accountText = '';
+    if (body.account) {
+      accountText = String(body.account);
+    }
+    const account = normalizeAddress(accountText);
     const epochId = Number(body.epochId);
-    const amountWei = String(body.amountWei || '0');
+    let amountWei = '0';
+    if (body.amountWei) {
+      amountWei = String(body.amountWei);
+    }
     const leafIndex = Number(body.leafIndex);
-    const proof = Array.isArray(body.proof) ? body.proof : [];
+    let proof = [];
+    if (Array.isArray(body.proof)) {
+      proof = body.proof;
+    }
 
-    if (!wallet || !account || wallet !== account) {
+    let invalidWalletAccountPair = false;
+    if (!wallet) {
+      invalidWalletAccountPair = true;
+    }
+    if (!account) {
+      invalidWalletAccountPair = true;
+    }
+    if (wallet !== account) {
+      invalidWalletAccountPair = true;
+    }
+    if (invalidWalletAccountPair) {
       return res.status(400).json({ error: 'wallet and account must match and be valid address' });
     }
-    if (!Number.isFinite(epochId) || epochId <= 0) {
+    let invalidClaimEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidClaimEpochId = true;
+    }
+    if (epochId <= 0) {
+      invalidClaimEpochId = true;
+    }
+    if (invalidClaimEpochId) {
       return res.status(400).json({ error: 'epochId must be > 0' });
     }
     if (!(BigInt(amountWei) > 0n)) {
       return res.status(400).json({ error: 'amountWei must be > 0' });
     }
-    if (!Number.isFinite(leafIndex) || leafIndex < 0) {
+    let invalidClaimLeafIndex = false;
+    if (!Number.isFinite(leafIndex)) {
+      invalidClaimLeafIndex = true;
+    }
+    if (leafIndex < 0) {
+      invalidClaimLeafIndex = true;
+    }
+    if (invalidClaimLeafIndex) {
       return res.status(400).json({ error: 'leafIndex must be >= 0' });
     }
 
@@ -5097,7 +6570,15 @@ app.get('/api/dividends/claimables', async (req, res) => {
           epochId,
           claimableWei,
           claimed,
-          canClaim: BigInt(claimableWei) > 0n && !claimed,
+          canClaim: (() => {
+            let canClaim = false;
+            if (BigInt(claimableWei) > 0n) {
+              if (!claimed) {
+                canClaim = true;
+              }
+            }
+            return canClaim;
+          })(),
         });
       }
     }
@@ -5110,34 +6591,74 @@ app.get('/api/dividends/claimables', async (req, res) => {
       for (let epochId = 1; epochId <= count; epochId += 1) {
         const tree = readMerkleTree(epochId);
         const claimsPayload = readMerkleClaims(epochId);
-        const rows = Array.isArray(claimsPayload.claims) ? claimsPayload.claims : [];
+        let rows = [];
+        if (Array.isArray(claimsPayload.claims)) {
+          rows = claimsPayload.claims;
+        }
         for (let i = 0; i < rows.length; i += 1) {
           const row = rows[i];
-          const account = normalizeAddress(String(row.account || ''));
-          if (account !== wallet) {
-            continue;
+          let accountText = '';
+          if (row.account) {
+            accountText = String(row.account);
           }
-          const amountWei = String(row.amountWei || '0');
-          const leafIndex = Number(row.leafIndex);
-          const proof = Array.isArray(row.proof) ? row.proof : [];
-          const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
-          const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
-          const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
-          claimables.push({
-            claimType: 'MERKLE',
-            symbol: String(tree.symbol || ''),
-            tokenAddress: String(tree.tokenAddress || ''),
-            epochId,
-            claimableWei: amountWei,
-            amountWei,
-            leafIndex,
-            proof,
-            claimed,
-            canClaim: BigInt(amountWei) > 0n && !claimed,
-            merkleRoot: String(tree.merkleRoot || ''),
-            contentHash: String(tree.contentHash || ethers.ZeroHash),
-            claimsUri: String(tree.claimsUri || ''),
-          });
+          const account = normalizeAddress(accountText);
+          if (account === wallet) {
+            let amountWei = '0';
+            if (row.amountWei) {
+              amountWei = String(row.amountWei);
+            }
+            const leafIndex = Number(row.leafIndex);
+            let proof = [];
+            if (Array.isArray(row.proof)) {
+              proof = row.proof;
+            }
+            const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
+            const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
+            const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
+            let treeSymbol = '';
+            if (tree.symbol) {
+              treeSymbol = String(tree.symbol);
+            }
+            let treeTokenAddress = '';
+            if (tree.tokenAddress) {
+              treeTokenAddress = String(tree.tokenAddress);
+            }
+            let treeMerkleRoot = '';
+            if (tree.merkleRoot) {
+              treeMerkleRoot = String(tree.merkleRoot);
+            }
+            let treeContentHash = ethers.ZeroHash;
+            if (tree.contentHash) {
+              treeContentHash = String(tree.contentHash);
+            }
+            let treeClaimsUri = '';
+            if (tree.claimsUri) {
+              treeClaimsUri = String(tree.claimsUri);
+            }
+            claimables.push({
+              claimType: 'MERKLE',
+              symbol: treeSymbol,
+              tokenAddress: treeTokenAddress,
+              epochId,
+              claimableWei: amountWei,
+              amountWei,
+              leafIndex,
+              proof,
+              claimed,
+              canClaim: (() => {
+                let canClaim = false;
+                if (BigInt(amountWei) > 0n) {
+                  if (!claimed) {
+                    canClaim = true;
+                  }
+                }
+                return canClaim;
+              })(),
+              merkleRoot: treeMerkleRoot,
+              contentHash: treeContentHash,
+              claimsUri: treeClaimsUri,
+            });
+          }
         }
       }
     }
@@ -5152,7 +6673,20 @@ app.get('/api/dividends/claimable', async (req, res) => {
   const wallet = normalizeAddress(String(req.query.wallet));
   const symbol = String(req.query.symbol).toUpperCase();
   const epochId = Number(req.query.epochId);
-  if (!wallet || !symbol || !Number.isFinite(epochId) || epochId <= 0) {
+  let claimableInputInvalid = false;
+  if (!wallet) {
+    claimableInputInvalid = true;
+  }
+  if (!symbol) {
+    claimableInputInvalid = true;
+  }
+  if (!Number.isFinite(epochId)) {
+    claimableInputInvalid = true;
+  }
+  if (epochId <= 0) {
+    claimableInputInvalid = true;
+  }
+  if (claimableInputInvalid) {
     return res.status(400).json({ error: 'wallet, symbol, epochId are required' });
   }
   try {
@@ -5161,7 +6695,14 @@ app.get('/api/dividends/claimable', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let tokenAddressMissing = false;
+    if (!tokenAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddressMissing) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
     const previewData = dividendsInterface.encodeFunctionData('previewClaim', [tokenAddress, epochId, wallet]);
@@ -5178,7 +6719,15 @@ app.get('/api/dividends/claimable', async (req, res) => {
       epochId,
       claimableWei,
       claimed,
-      canClaim: BigInt(claimableWei) > 0n && !claimed,
+      canClaim: (() => {
+        let canClaim = false;
+        if (BigInt(claimableWei) > 0n) {
+          if (!claimed) {
+            canClaim = true;
+          }
+        }
+        return canClaim;
+      })(),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -5190,7 +6739,14 @@ app.post('/api/dividends/declare', async (req, res) => {
     const body = req.body;
     const symbol = String(body.symbol).toUpperCase();
     const divPerShare = String(body.divPerShare);
-    if (!symbol || !divPerShare) {
+    let missingDeclareInput = false;
+    if (!symbol) {
+      missingDeclareInput = true;
+    }
+    if (!divPerShare) {
+      missingDeclareInput = true;
+    }
+    if (missingDeclareInput) {
       return res.status(400).json({ error: 'symbol and divPerShare are required' });
     }
     const deployments = loadDeployments();
@@ -5198,7 +6754,14 @@ app.post('/api/dividends/declare', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let tokenAddressMissing = false;
+    if (!tokenAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddressMissing) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
     const dividendsAddr = deployments.dividends;
@@ -5269,7 +6832,20 @@ app.post('/api/dividends/claim', async (req, res) => {
     const wallet = normalizeAddress(String(body.wallet));
     const symbol = String(body.symbol).toUpperCase();
     const epochId = Number(body.epochId);
-    if (!wallet || !symbol || !Number.isFinite(epochId) || epochId <= 0) {
+    let invalidClaimInput = false;
+    if (!wallet) {
+      invalidClaimInput = true;
+    }
+    if (!symbol) {
+      invalidClaimInput = true;
+    }
+    if (!Number.isFinite(epochId)) {
+      invalidClaimInput = true;
+    }
+    if (epochId <= 0) {
+      invalidClaimInput = true;
+    }
+    if (invalidClaimInput) {
       return res.status(400).json({ error: 'wallet, symbol, epochId are required' });
     }
     const deployments = loadDeployments();
@@ -5277,7 +6853,14 @@ app.post('/api/dividends/claim', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let missingClaimTokenAddress = false;
+    if (!tokenAddress) {
+      missingClaimTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingClaimTokenAddress = true;
+    }
+    if (missingClaimTokenAddress) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
     const dividendsAddr = deployments.dividends;
@@ -5484,7 +7067,13 @@ async function getAwardStatusSnapshot() {
       nextAwardWindowAppliesAtEpoch: Number(sessionState.nextAwardWindowAppliesAtEpoch),
       terminateNextSession: Boolean(sessionState.terminateNextSession),
       terminateAtEpoch: Number(sessionState.terminateAtEpoch),
-      updatedAtMs: Number(sessionState.updatedAtMs || 0),
+      updatedAtMs: (() => {
+        let updatedAtMs = 0;
+        if (sessionState.updatedAtMs) {
+          updatedAtMs = Number(sessionState.updatedAtMs);
+        }
+        return updatedAtMs;
+      })(),
     },
   };
 }
@@ -5526,7 +7115,14 @@ app.get('/api/award/leaderboard', async (req, res) => {
     const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
     const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
     const currentEpoch = Number(currentEpochRaw);
-    if (!Number.isFinite(epochId) || epochId < 0) {
+    let invalidEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidEpochId = true;
+    }
+    if (epochId < 0) {
+      invalidEpochId = true;
+    }
+    if (invalidEpochId) {
       epochId = Math.max(0, currentEpoch - 1);
     }
 
@@ -5545,7 +7141,11 @@ app.get('/api/award/leaderboard', async (req, res) => {
 
 app.get('/api/award/claimable', async (req, res) => {
   try {
-    const wallet = normalizeAddress(String(req.query.wallet || ''));
+    let walletText = '';
+    if (req.query.wallet) {
+      walletText = String(req.query.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
     if (!wallet) {
       return res.status(400).json({ error: 'wallet is required' });
     }
@@ -5560,7 +7160,11 @@ app.get('/api/award/claimable', async (req, res) => {
     const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
     const currentEpoch = Number(currentEpochRaw);
 
-    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    let limitRaw = 50;
+    if (req.query.limit) {
+      limitRaw = Number(req.query.limit);
+    }
+    const limit = Math.min(200, Math.max(1, Number(limitRaw)));
     const startEpoch = Math.max(0, currentEpoch - limit);
     const items = [];
 
@@ -5588,7 +7192,15 @@ app.get('/api/award/claimable', async (req, res) => {
           maxQtyWei: maxQtyWeiRaw.toString(),
           isWinner,
           claimed,
-          canClaim: isWinner && !claimed,
+          canClaim: (() => {
+            let canClaim = false;
+            if (isWinner) {
+              if (!claimed) {
+                canClaim = true;
+              }
+            }
+            return canClaim;
+          })(),
         });
       }
     }
@@ -5602,12 +7214,23 @@ app.get('/api/award/claimable', async (req, res) => {
 
 app.post('/api/award/claim', async (req, res) => {
   try {
-    const wallet = normalizeAddress(String(req.body.wallet || ''));
+    let walletText = '';
+    if (req.body.wallet) {
+      walletText = String(req.body.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
     const epochId = Number(req.body.epochId);
     if (!wallet) {
       return res.status(400).json({ error: 'wallet is required' });
     }
-    if (!Number.isFinite(epochId) || epochId < 0) {
+    let invalidEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidEpochId = true;
+    }
+    if (epochId < 0) {
+      invalidEpochId = true;
+    }
+    if (invalidEpochId) {
       return res.status(400).json({ error: 'epochId is required' });
     }
 
@@ -5638,17 +7261,38 @@ app.get('/api/award/current', async (_req, res) => {
     const statusRes = await fetch(`http://127.0.0.1:${PORT}/api/award/status`);
     const statusData = await statusRes.json();
     if (!statusRes.ok) {
-      return res.status(500).json({ error: statusData.error || 'failed to load status' });
+      let reason = 'failed to load status';
+      if (statusData.error) {
+        reason = statusData.error;
+      }
+      return res.status(500).json({ error: reason });
     }
     const leaderboardRes = await fetch(`http://127.0.0.1:${PORT}/api/award/leaderboard?epochId=${Math.max(0, statusData.currentEpoch - 1)}`);
     const leaderboardData = await leaderboardRes.json();
-    const topRow = leaderboardData.items && leaderboardData.items.length > 0 ? leaderboardData.items[0] : null;
+    let topRow = null;
+    if (leaderboardData.items) {
+      if (leaderboardData.items.length > 0) {
+        topRow = leaderboardData.items[0];
+      }
+    }
     res.json({
       available: true,
       currentEpoch: statusData.currentEpoch,
       previousEpoch: Math.max(0, statusData.currentEpoch - 1),
-      topTrader: topRow ? topRow.trader : ethers.ZeroAddress,
-      topVolumeWei: topRow ? topRow.qtyWei : "0",
+      topTrader: (() => {
+        let topTrader = ethers.ZeroAddress;
+        if (topRow) {
+          topTrader = topRow.trader;
+        }
+        return topTrader;
+      })(),
+      topVolumeWei: (() => {
+        let topVolumeWei = '0';
+        if (topRow) {
+          topVolumeWei = topRow.qtyWei;
+        }
+        return topVolumeWei;
+      })(),
       rewarded: false,
     });
   } catch (err) {
@@ -5662,7 +7306,11 @@ app.get('/api/award/history', async (req, res) => {
     if (!deployments.award) {
       return res.json({ available: false, items: [] });
     }
-    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    let limitRaw = 20;
+    if (req.query.limit) {
+      limitRaw = Number(req.query.limit);
+    }
+    const limit = Math.min(100, Math.max(1, Number(limitRaw)));
     const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
     const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
     const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
@@ -5670,11 +7318,26 @@ app.get('/api/award/history', async (req, res) => {
     const rows = [];
     for (let epochId = Math.max(0, currentEpoch - limit); epochId < currentEpoch; epochId += 1) {
       const leaderboard = await buildAwardLeaderboardForEpoch(deployments.award, epochId);
-      const topRow = leaderboard.items.length > 0 ? leaderboard.items[0] : null;
+      let topRow = null;
+      if (leaderboard.items.length > 0) {
+        topRow = leaderboard.items[0];
+      }
       rows.push({
         epochId,
-        topTrader: topRow ? topRow.trader : ethers.ZeroAddress,
-        topVolumeWei: topRow ? topRow.qtyWei : "0",
+        topTrader: (() => {
+          let topTrader = ethers.ZeroAddress;
+          if (topRow) {
+            topTrader = topRow.trader;
+          }
+          return topTrader;
+        })(),
+        topVolumeWei: (() => {
+          let topVolumeWei = '0';
+          if (topRow) {
+            topVolumeWei = topRow.qtyWei;
+          }
+          return topVolumeWei;
+        })(),
         rewarded: false,
       });
     }
@@ -5719,7 +7382,14 @@ app.post('/api/leveraged/products/create', async (req, res) => {
     const body = req.body;
     const baseSymbol = String(body.baseSymbol).toUpperCase();
     const leverage = Number(body.leverage);
-    if (!baseSymbol || !Number.isFinite(leverage)) {
+    let invalidProductInput = false;
+    if (!baseSymbol) {
+      invalidProductInput = true;
+    }
+    if (!Number.isFinite(leverage)) {
+      invalidProductInput = true;
+    }
+    if (invalidProductInput) {
       return res.status(400).json({ error: 'baseSymbol and leverage are required' });
     }
 
@@ -5749,7 +7419,10 @@ app.post('/api/leveraged/products/create', async (req, res) => {
       productToken,
     });
   } catch (err) {
-    const message = String(err.message || '');
+    let message = '';
+    if (err.message) {
+      message = String(err.message);
+    }
     let cleanedError = message;
     const reasonMatch = message.match(/reverted with reason string '([^']+)'/);
     if (reasonMatch) {
@@ -5812,7 +7485,17 @@ app.post('/api/leveraged/mint', async (req, res) => {
     if (body.minOutWei) {
       minOutWei = BigInt(String(body.minOutWei));
     }
-    if (!wallet || !productSymbol || ttokenInWei <= 0n) {
+    let invalidMintInput = false;
+    if (!wallet) {
+      invalidMintInput = true;
+    }
+    if (!productSymbol) {
+      invalidMintInput = true;
+    }
+    if (ttokenInWei <= 0n) {
+      invalidMintInput = true;
+    }
+    if (invalidMintInput) {
       return res.status(400).json({ error: 'wallet, productSymbol, ttokenInWei are required' });
     }
 
@@ -5820,7 +7503,17 @@ app.post('/api/leveraged/mint', async (req, res) => {
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
     const ttokenAddress = getTTokenAddressFromDeployments();
-    if (!factoryAddress || !routerAddress || !ttokenAddress) {
+    let missingLeveragedDeployment = false;
+    if (!factoryAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (!routerAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (!ttokenAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (missingLeveragedDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -5828,7 +7521,14 @@ app.post('/api/leveraged/mint', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingProductToken = false;
+    if (!productToken) {
+      missingProductToken = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingProductToken = true;
+    }
+    if (missingProductToken) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -5872,7 +7572,17 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     if (body.minOutWei) {
       minOutWei = BigInt(String(body.minOutWei));
     }
-    if (!wallet || !productSymbol || qtyWei <= 0n) {
+    let invalidUnwindInput = false;
+    if (!wallet) {
+      invalidUnwindInput = true;
+    }
+    if (!productSymbol) {
+      invalidUnwindInput = true;
+    }
+    if (qtyWei <= 0n) {
+      invalidUnwindInput = true;
+    }
+    if (invalidUnwindInput) {
       return res.status(400).json({ error: 'wallet, productSymbol, qtyWei are required' });
     }
 
@@ -5880,7 +7590,17 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
     const ttokenAddress = getTTokenAddressFromDeployments();
-    if (!factoryAddress || !routerAddress || !ttokenAddress) {
+    let missingUnwindDeployment = false;
+    if (!factoryAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (!routerAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (!ttokenAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (missingUnwindDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -5888,7 +7608,14 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingUnwindProductToken = false;
+    if (!productToken) {
+      missingUnwindProductToken = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingUnwindProductToken = true;
+    }
+    if (missingUnwindProductToken) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -5942,7 +7669,14 @@ app.get('/api/leveraged/quote', async (req, res) => {
     const deployments = loadDeployments();
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
-    if (!factoryAddress || !routerAddress) {
+    let missingQuoteDeployment = false;
+    if (!factoryAddress) {
+      missingQuoteDeployment = true;
+    }
+    if (!routerAddress) {
+      missingQuoteDeployment = true;
+    }
+    if (missingQuoteDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -5950,7 +7684,14 @@ app.get('/api/leveraged/quote', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingQuoteProduct = false;
+    if (!productToken) {
+      missingQuoteProduct = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingQuoteProduct = true;
+    }
+    if (missingQuoteProduct) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -6001,9 +7742,20 @@ app.get('/api/leveraged/quote', async (req, res) => {
 app.post('/api/leveraged/price-adjust', async (req, res) => {
   try {
     const body = req.body;
-    const productSymbol = String(body.productSymbol || '').toUpperCase();
+    let productSymbolText = '';
+    if (body.productSymbol) {
+      productSymbolText = String(body.productSymbol);
+    }
+    const productSymbol = productSymbolText.toUpperCase();
     const changePct = Number(body.changePct);
-    if (!productSymbol || !Number.isFinite(changePct)) {
+    let invalidPriceAdjustInput = false;
+    if (!productSymbol) {
+      invalidPriceAdjustInput = true;
+    }
+    if (!Number.isFinite(changePct)) {
+      invalidPriceAdjustInput = true;
+    }
+    if (invalidPriceAdjustInput) {
       return res.status(400).json({ error: 'productSymbol and changePct are required' });
     }
 
@@ -6050,7 +7802,14 @@ app.get('/api/leveraged/positions', async (req, res) => {
     const deployments = loadDeployments();
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
-    if (!factoryAddress || !routerAddress) {
+    let missingPositionsDeployment = false;
+    if (!factoryAddress) {
+      missingPositionsDeployment = true;
+    }
+    if (!routerAddress) {
+      missingPositionsDeployment = true;
+    }
+    if (missingPositionsDeployment) {
       return res.json({ wallet, positions: [] });
     }
 
@@ -6083,7 +7842,13 @@ app.get('/api/leveraged/positions', async (req, res) => {
         let baseChangePct = 0;
         try {
           const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
-          const yahooPrice = Number(quote.regularMarketPrice || quote.price || 0);
+          let yahooPriceRaw = 0;
+          if (quote.regularMarketPrice) {
+            yahooPriceRaw = quote.regularMarketPrice;
+          } else if (quote.price) {
+            yahooPriceRaw = quote.price;
+          }
+          const yahooPrice = Number(yahooPriceRaw);
           if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
             basePriceCents = Math.round(yahooPrice * 100);
           }
@@ -6102,12 +7867,22 @@ app.get('/api/leveraged/positions', async (req, res) => {
               first = fmpShort;
             }
             if (first) {
-              const fmpPrice = Number(first.price || 0);
+              let fmpPriceRaw = 0;
+              if (first.price) {
+                fmpPriceRaw = first.price;
+              }
+              const fmpPrice = Number(fmpPriceRaw);
               if (Number.isFinite(fmpPrice) && fmpPrice > 0) {
                 basePriceCents = Math.round(fmpPrice * 100);
               }
               if (!(baseChangePct !== 0)) {
-                const fmpPct = Number(first.changePercent || first.changesPercentage || 0);
+                let fmpPctRaw = 0;
+                if (first.changePercent) {
+                  fmpPctRaw = first.changePercent;
+                } else if (first.changesPercentage) {
+                  fmpPctRaw = first.changesPercentage;
+                }
+                const fmpPct = Number(fmpPctRaw);
                 if (Number.isFinite(fmpPct)) {
                   baseChangePct = fmpPct;
                 }
@@ -6148,7 +7923,11 @@ app.get('/api/leveraged/positions', async (req, res) => {
 
 app.post('/api/admin/symbols/freeze', async (req, res) => {
   try {
-    const symbol = String(req.body.symbol || '').toUpperCase();
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
@@ -6161,7 +7940,11 @@ app.post('/api/admin/symbols/freeze', async (req, res) => {
 
 app.post('/api/admin/symbols/unfreeze', async (req, res) => {
   try {
-    const symbol = String(req.body.symbol || '').toUpperCase();
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
@@ -6174,7 +7957,11 @@ app.post('/api/admin/symbols/unfreeze', async (req, res) => {
 
 app.post('/api/admin/symbols/delist', async (req, res) => {
   try {
-    const symbol = String(req.body.symbol || '').toUpperCase();
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
@@ -6187,7 +7974,11 @@ app.post('/api/admin/symbols/delist', async (req, res) => {
 
 app.post('/api/admin/symbols/list', async (req, res) => {
   try {
-    const symbol = String(req.body.symbol || '').toUpperCase();
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
@@ -6227,15 +8018,57 @@ app.get('/api/admin/award/session', async (_req, res) => {
     const state = readAwardSessionState();
     res.json({
       available: Boolean(snapshot.available),
-      currentEpoch: Number(snapshot.currentEpoch || 0),
-      chainEpochDurationSec: Number(snapshot.chainEpochDurationSec || 0),
-      activeEpochDurationSec: Number(snapshot.epochDurationSec || 0),
+      currentEpoch: (() => {
+        let value = 0;
+        if (snapshot.currentEpoch) {
+          value = Number(snapshot.currentEpoch);
+        }
+        return value;
+      })(),
+      chainEpochDurationSec: (() => {
+        let value = 0;
+        if (snapshot.chainEpochDurationSec) {
+          value = Number(snapshot.chainEpochDurationSec);
+        }
+        return value;
+      })(),
+      activeEpochDurationSec: (() => {
+        let value = 0;
+        if (snapshot.epochDurationSec) {
+          value = Number(snapshot.epochDurationSec);
+        }
+        return value;
+      })(),
       sessionTerminated: Boolean(snapshot.sessionTerminated),
-      nextAwardWindowSec: Number(state.nextAwardWindowSec || 60),
-      nextAwardWindowAppliesAtEpoch: Number(state.nextAwardWindowAppliesAtEpoch || -1),
+      nextAwardWindowSec: (() => {
+        let value = 60;
+        if (state.nextAwardWindowSec) {
+          value = Number(state.nextAwardWindowSec);
+        }
+        return value;
+      })(),
+      nextAwardWindowAppliesAtEpoch: (() => {
+        let value = -1;
+        if (state.nextAwardWindowAppliesAtEpoch) {
+          value = Number(state.nextAwardWindowAppliesAtEpoch);
+        }
+        return value;
+      })(),
       terminateNextSession: Boolean(state.terminateNextSession),
-      terminateAtEpoch: Number(state.terminateAtEpoch || -1),
-      updatedAtMs: Number(state.updatedAtMs || 0),
+      terminateAtEpoch: (() => {
+        let terminateAtEpoch = -1;
+        if (state.terminateAtEpoch) {
+          terminateAtEpoch = Number(state.terminateAtEpoch);
+        }
+        return terminateAtEpoch;
+      })(),
+      updatedAtMs: (() => {
+        let updatedAtMs = 0;
+        if (state.updatedAtMs) {
+          updatedAtMs = Number(state.updatedAtMs);
+        }
+        return updatedAtMs;
+      })(),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -6244,7 +8077,10 @@ app.get('/api/admin/award/session', async (_req, res) => {
 
 app.post('/api/admin/award/session', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     const snapshot = await getAwardStatusSnapshot();
     if (!snapshot.available) {
       return res.status(400).json({ error: 'award contract not deployed' });
@@ -6252,7 +8088,17 @@ app.post('/api/admin/award/session', async (req, res) => {
 
     const nextAwardWindowSecRaw = Number(body.nextAwardWindowSec);
     const terminateNextSessionRaw = Boolean(body.terminateNextSession);
-    if (!Number.isFinite(nextAwardWindowSecRaw) || nextAwardWindowSecRaw <= 0 || nextAwardWindowSecRaw > 3600) {
+    let nextAwardWindowSecInvalid = false;
+    if (!Number.isFinite(nextAwardWindowSecRaw)) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecRaw <= 0) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecRaw > 3600) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecInvalid) {
       return res.status(400).json({ error: 'nextAwardWindowSec must be between 1 and 3600' });
     }
 
@@ -6286,7 +8132,17 @@ app.post('/api/gas/run', async (req, res) => {
   if (req.body && req.body.suite) {
     suite = String(req.body.suite).toLowerCase();
   }
-  if (!(suite === 'core' || suite === 'stress' || suite === 'all')) {
+  let isValidSuite = false;
+  switch (suite) {
+    case 'core':
+    case 'stress':
+    case 'all':
+      isValidSuite = true;
+      break;
+    default:
+      break;
+  }
+  if (!isValidSuite) {
     return res.status(400).json({ error: 'suite must be core, stress, or all' });
   }
   try {
@@ -6329,7 +8185,13 @@ app.get('/api/gas/latest', async (_req, res) => {
         baselineGasUsed: '0',
         deltaPct: null,
         status: 'SKIP',
-        skipReason: err.message || 'gas pack failed',
+        skipReason: (() => {
+          let reason = 'gas pack failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          return reason;
+        })(),
       }],
     };
     res.json({
@@ -6349,7 +8211,14 @@ app.get('/api/gas/baseline', async (_req, res) => {
 });
 
 app.post('/api/gas/baseline/accept', async (_req, res) => {
-  if (!gasRuntimeState.latest || !Array.isArray(gasRuntimeState.latest.rows)) {
+  let missingLatestGasState = false;
+  if (!gasRuntimeState.latest) {
+    missingLatestGasState = true;
+  }
+  if (!Array.isArray(gasRuntimeState.latest.rows)) {
+    missingLatestGasState = true;
+  }
+  if (missingLatestGasState) {
     return res.status(400).json({ error: 'no latest gas report available' });
   }
   const next = {};
@@ -6368,16 +8237,46 @@ app.post('/api/gas/baseline/accept', async (_req, res) => {
 
 app.post('/api/autotrade/rules/create', async (req, res) => {
   try {
-    const body = req.body || {};
-    const wallet = normalizeAddress(String(body.wallet || ''));
-    const symbol = String(body.symbol || '').toUpperCase();
-    const side = String(body.side || '').toUpperCase();
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let walletText = '';
+    if (body.wallet) {
+      walletText = String(body.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    let symbolText = '';
+    if (body.symbol) {
+      symbolText = String(body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
+    let sideText = '';
+    if (body.side) {
+      sideText = String(body.side);
+    }
+    const side = sideText.toUpperCase();
     const triggerPriceCents = Number(body.triggerPriceCents);
-    const qtyWei = String(body.qtyWei || '');
-    const maxSlippageBps = Number(body.maxSlippageBps || 0);
+    let qtyWei = '';
+    if (body.qtyWei) {
+      qtyWei = String(body.qtyWei);
+    }
+    let maxSlippageBpsRaw = 0;
+    if (body.maxSlippageBps) {
+      maxSlippageBpsRaw = body.maxSlippageBps;
+    }
+    const maxSlippageBps = Number(maxSlippageBpsRaw);
     const enabled = Boolean(body.enabled !== false);
-    const cooldownSec = Number(body.cooldownSec || 0);
-    const maxExecutionsPerDay = Number(body.maxExecutionsPerDay || 0);
+    let cooldownSecRaw = 0;
+    if (body.cooldownSec) {
+      cooldownSecRaw = body.cooldownSec;
+    }
+    const cooldownSec = Number(cooldownSecRaw);
+    let maxExecutionsPerDayRaw = 0;
+    if (body.maxExecutionsPerDay) {
+      maxExecutionsPerDayRaw = body.maxExecutionsPerDay;
+    }
+    const maxExecutionsPerDay = Number(maxExecutionsPerDayRaw);
 
     if (!wallet) {
       return res.status(400).json({ error: 'wallet is required' });
@@ -6388,7 +8287,14 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
     if (side !== 'BUY' && side !== 'SELL') {
       return res.status(400).json({ error: 'side must be BUY or SELL' });
     }
-    if (!Number.isFinite(triggerPriceCents) || triggerPriceCents <= 0) {
+    let invalidTriggerPrice = false;
+    if (!Number.isFinite(triggerPriceCents)) {
+      invalidTriggerPrice = true;
+    }
+    if (triggerPriceCents <= 0) {
+      invalidTriggerPrice = true;
+    }
+    if (invalidTriggerPrice) {
       return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
     }
     if (!(BigInt(qtyWei) > 0n)) {
@@ -6426,9 +8332,19 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
 
 app.post('/api/autotrade/rules/update', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     const ruleId = Number(body.ruleId);
-    if (!Number.isFinite(ruleId) || ruleId <= 0) {
+    let invalidRuleId = false;
+    if (!Number.isFinite(ruleId)) {
+      invalidRuleId = true;
+    }
+    if (ruleId <= 0) {
+      invalidRuleId = true;
+    }
+    if (invalidRuleId) {
       return res.status(400).json({ error: 'ruleId is required' });
     }
     const state = readAutoTradeState();
@@ -6442,30 +8358,37 @@ app.post('/api/autotrade/rules/update', async (req, res) => {
       return res.status(404).json({ error: 'rule not found' });
     }
 
-    if (body.triggerPriceCents !== undefined) {
+    if ('triggerPriceCents' in body) {
       const nextTriggerPrice = Number(body.triggerPriceCents);
-      if (!Number.isFinite(nextTriggerPrice) || nextTriggerPrice <= 0) {
+      let invalidNextTriggerPrice = false;
+      if (!Number.isFinite(nextTriggerPrice)) {
+        invalidNextTriggerPrice = true;
+      }
+      if (nextTriggerPrice <= 0) {
+        invalidNextTriggerPrice = true;
+      }
+      if (invalidNextTriggerPrice) {
         return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
       }
       rule.triggerPriceCents = nextTriggerPrice;
     }
-    if (body.qtyWei !== undefined) {
+    if ('qtyWei' in body) {
       const nextQtyWei = String(body.qtyWei);
       if (!(BigInt(nextQtyWei) > 0n)) {
         return res.status(400).json({ error: 'qtyWei must be > 0' });
       }
       rule.qtyWei = nextQtyWei;
     }
-    if (body.maxSlippageBps !== undefined) {
+    if ('maxSlippageBps' in body) {
       rule.maxSlippageBps = Number(body.maxSlippageBps);
     }
-    if (body.cooldownSec !== undefined) {
+    if ('cooldownSec' in body) {
       rule.cooldownSec = Number(body.cooldownSec);
     }
-    if (body.maxExecutionsPerDay !== undefined) {
+    if ('maxExecutionsPerDay' in body) {
       rule.maxExecutionsPerDay = Number(body.maxExecutionsPerDay);
     }
-    if (body.enabled !== undefined) {
+    if ('enabled' in body) {
       rule.enabled = Boolean(body.enabled);
     }
     rule.updatedAtMs = Date.now();
@@ -6550,13 +8473,23 @@ app.post('/api/autotrade/rules/delete', async (req, res) => {
 
 app.get('/api/autotrade/rules', async (req, res) => {
   try {
-    const walletRaw = String(req.query.wallet || '');
+    let walletRaw = '';
+    if (req.query.wallet) {
+      walletRaw = String(req.query.wallet);
+    }
     const wallet = normalizeAddress(walletRaw);
     const state = readAutoTradeState();
     const rows = [];
     for (let i = 0; i < state.rules.length; i += 1) {
       const row = state.rules[i];
-      if (!wallet || row.wallet === wallet) {
+      let includeRow = false;
+      if (!wallet) {
+        includeRow = true;
+      }
+      if (row.wallet === wallet) {
+        includeRow = true;
+      }
+      if (includeRow) {
         rows.push(normalizeRuleForResponse(row));
       }
     }
@@ -6569,14 +8502,28 @@ app.get('/api/autotrade/rules', async (req, res) => {
 
 app.get('/api/autotrade/executions', async (req, res) => {
   try {
-    const walletRaw = String(req.query.wallet || '');
+    let walletRaw = '';
+    if (req.query.wallet) {
+      walletRaw = String(req.query.wallet);
+    }
     const wallet = normalizeAddress(walletRaw);
-    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    let limitRaw = 50;
+    if (req.query.limit) {
+      limitRaw = Number(req.query.limit);
+    }
+    const limit = Math.min(200, Math.max(1, Number(limitRaw)));
     const state = readAutoTradeState();
     const rows = [];
     for (let i = 0; i < state.executions.length; i += 1) {
       const row = state.executions[i];
-      if (!wallet || row.wallet === wallet) {
+      let includeRow = false;
+      if (!wallet) {
+        includeRow = true;
+      }
+      if (row.wallet === wallet) {
+        includeRow = true;
+      }
+      if (includeRow) {
         rows.push(normalizeExecutionForResponse(row));
       }
     }
@@ -6598,7 +8545,13 @@ app.get('/api/autotrade/status', async (_req, res) => {
     }
     res.json({
       listenerRunning: Boolean(state.listenerRunning),
-      lastTickAtMs: Number(state.lastTickAtMs || 0),
+      lastTickAtMs: (() => {
+        let lastTickAtMs = 0;
+        if (state.lastTickAtMs) {
+          lastTickAtMs = Number(state.lastTickAtMs);
+        }
+        return lastTickAtMs;
+      })(),
       ruleCount: state.rules.length,
       enabledRuleCount: enabledCount,
       executionCount: state.executions.length,
@@ -6612,7 +8565,11 @@ app.post('/api/autotrade/listener/start', async (_req, res) => {
   try {
     const state = readAutoTradeState();
     state.listenerRunning = true;
-    state.lastTickAtMs = Number(state.lastTickAtMs || 0);
+    if (state.lastTickAtMs) {
+      state.lastTickAtMs = Number(state.lastTickAtMs);
+    } else {
+      state.lastTickAtMs = 0;
+    }
     writeAutoTradeState(state);
     await runAutoTradeTick();
     res.json({ listenerRunning: true });
@@ -6636,7 +8593,14 @@ app.post('/api/equity/create', async (req, res) => {
   const body = req.body;
   const symbol = String(body.symbol).toUpperCase();
   const name = String(body.name).trim();
-  if (symbol.length === 0 || name.length === 0) {
+  let missingCreateFields = false;
+  if (symbol.length === 0) {
+    missingCreateFields = true;
+  }
+  if (name.length === 0) {
+    missingCreateFields = true;
+  }
+  if (missingCreateFields) {
     return res.status(400).json({ error: '' });
   }
 
@@ -6674,14 +8638,24 @@ app.post('/api/equity/mint', async (req, res) => {
     return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
-  if (!amountIsNumber || amount < 100) {
+  let invalidAmount = false;
+  if (!amountIsNumber) {
+    invalidAmount = true;
+  }
+  if (amount < 100) {
+    invalidAmount = true;
+  }
+  if (invalidAmount) {
     return res.status(400).json({ error: '' });
   }
 
   try {
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
-    const minter = deployments.defaultMinter || deployments.admin;
+    let minter = deployments.admin;
+    if (deployments.defaultMinter) {
+      minter = deployments.defaultMinter;
+    }
     const registryDeployed = await ensureContract(registryAddr);
     if (!registryDeployed) {
       return res.status(500).json({ error: '' });
@@ -6713,7 +8687,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
   const name = String(body.name).trim();
   const to = String(body.to);
   const amount = Number(body.amount);
-  if (symbol.length === 0 || name.length === 0) {
+  let missingCreateMintFields = false;
+  if (symbol.length === 0) {
+    missingCreateMintFields = true;
+  }
+  if (name.length === 0) {
+    missingCreateMintFields = true;
+  }
+  if (missingCreateMintFields) {
     return res.status(400).json({ error: '' });
   }
   const recipientValid = isValidAddress(to);
@@ -6721,7 +8702,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
     return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
-  if (!amountIsNumber || amount < 100) {
+  let invalidCreateMintAmount = false;
+  if (!amountIsNumber) {
+    invalidCreateMintAmount = true;
+  }
+  if (amount < 100) {
+    invalidCreateMintAmount = true;
+  }
+  if (invalidCreateMintAmount) {
     return res.status(400).json({ error: '' });
   }
 
@@ -6730,10 +8718,20 @@ app.post('/api/equity/create-mint', async (req, res) => {
     const factoryAddr = deployments.equityTokenFactory;
     const registryAddr = deployments.listingsRegistry;
     const admin = deployments.admin;
-    const minter = deployments.defaultMinter || deployments.admin;
+    let minter = deployments.admin;
+    if (deployments.defaultMinter) {
+      minter = deployments.defaultMinter;
+    }
     const factoryDeployed = await ensureContract(factoryAddr);
     const registryDeployed = await ensureContract(registryAddr);
-    if (!factoryDeployed || !registryDeployed) {
+    let missingCoreDeployment = false;
+    if (!factoryDeployed) {
+      missingCoreDeployment = true;
+    }
+    if (!registryDeployed) {
+      missingCoreDeployment = true;
+    }
+    if (missingCoreDeployment) {
       return res.status(500).json({ error: '' });
     }
 
@@ -6794,7 +8792,11 @@ app.get('/api/registry/listings', async (req, res) => {
     const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
 
     let includeDelisted = false;
-    if (String(req.query.includeDelisted || '') === '1') {
+    let includeDelistedRaw = '';
+    if (req.query.includeDelisted) {
+      includeDelistedRaw = String(req.query.includeDelisted);
+    }
+    if (includeDelistedRaw === '1') {
       includeDelisted = true;
     }
 
@@ -6909,7 +8911,17 @@ app.get('/api/candles', async (req, res) => {
   }
 
   const intervalValid = Number.isFinite(interval);
-  if (!intervalValid || interval < 5 || interval % 5 !== 0) {
+  let invalidInterval = false;
+  if (!intervalValid) {
+    invalidInterval = true;
+  }
+  if (interval < 5) {
+    invalidInterval = true;
+  }
+  if (interval % 5 !== 0) {
+    invalidInterval = true;
+  }
+  if (invalidInterval) {
     return res.status(400).json({
       error: '',
     });

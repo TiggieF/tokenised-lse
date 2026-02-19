@@ -18,12 +18,13 @@ Deploy the blockchain app stack to Sepolia with:
 - deployment artifact: `deployments/sepolia.json`
 
 2. Backend:
-- Node/Express API
+- hosting: Render Web Service (Node/Express API)
 - reads/writes contract state through Sepolia RPC
 - runs indexer in JSON-storage mode
+- writes runtime JSON state to persistent disk
 
 3. Frontend:
-- static hosting
+- hosting: Render Static Site
 - uses hosted backend API URL
 - supports wallet connection on Sepolia
 
@@ -43,8 +44,9 @@ Deploy the blockchain app stack to Sepolia with:
 - Etherscan API key for contract verification
 
 4. Hosting targets:
-- backend: Render/Railway/Fly.io/VM
-- frontend: Vercel/Netlify/Cloudflare Pages
+- backend: Render Web Service
+- frontend: Render Static Site
+- chain: Sepolia
 
 ---
 
@@ -119,13 +121,50 @@ Commit `.env.sepolia.example` with placeholders only.
 1. Load `deployments/sepolia.json` at startup.
 2. Fail fast if required addresses are missing.
 3. Start indexer with configured `INDEXER_START_BLOCK`.
+4. Persist runtime cache/state files on disk.
+
+### 6.1.1 Ephemeral storage decision
+
+For this system as currently implemented, **ephemeral filesystem alone is not recommended**.
+
+Why:
+- backend writes runtime files under `cache/*` and `reports/*`
+- Render ephemeral root resets on restart/redeploy
+- you will lose indexer/autotrade/admin session/merkle local artifacts if not persisted
+
+Minimum safe setup on Render backend:
+1. Attach persistent disk (example mount path: `/var/data/tlse`)
+2. Ensure runtime write paths persist:
+- `cache/indexer/*`
+- `cache/autotrade/*`
+- `cache/admin/*`
+- `cache/dividends-merkle/*`
+- `reports/*` (if used)
+3. Bootstrap symlinks before server start
+
+Example startup pre-step:
+```bash
+mkdir -p /var/data/tlse/cache/indexer /var/data/tlse/cache/autotrade /var/data/tlse/cache/admin /var/data/tlse/cache/dividends-merkle /var/data/tlse/reports
+rm -rf cache
+ln -s /var/data/tlse/cache cache
+rm -rf reports
+ln -s /var/data/tlse/reports reports
+node scripts/ui/html/server.js
+```
+
+If you choose ephemeral only:
+- contracts/state on Sepolia remain safe
+- local runtime files reset each redeploy/restart
+- system still runs, but continuity and operator UX degrade
 
 ## 6.2 Hosting process
 
-1. Provision service.
-2. Set environment variables.
-3. Deploy backend branch/tag.
-4. Health-check endpoints:
+1. Provision Render backend service.
+2. Attach persistent disk.
+3. Set environment variables.
+4. Set startup command with persistent-dir bootstrap.
+5. Deploy backend branch/tag.
+6. Health-check endpoints:
 - `/health`
 - `/api/contracts`
 - `/api/market/status`
@@ -140,11 +179,12 @@ Commit `.env.sepolia.example` with placeholders only.
 
 ## 7. Frontend Release Plan
 
-1. Set production API base URL.
-2. Build static assets.
-3. Deploy to hosting platform.
-4. Validate wallet network prompt points to Sepolia.
-5. Confirm pages:
+1. Provision Render Static Site.
+2. Set production API base URL to backend Render URL.
+3. Build static assets.
+4. Deploy to Render.
+5. Validate wallet network prompt points to Sepolia.
+6. Confirm pages:
 - chart / trade / sell
 - portfolio
 - transactions
@@ -201,4 +241,3 @@ Recommended order:
 1. Complete Stage 10 to 13 features
 2. Complete Stage 14 invariant/fuzz validation
 3. Execute this Sepolia deployment plan as Stage 15
-

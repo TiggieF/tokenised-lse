@@ -61,13 +61,25 @@ async function main() {
   const deployments = loadDeployments("localhost");
 
   const envPriceFeedAddress = process.env.PRICE_FEED_ADDRESS;
-  const priceFeedAddress = envPriceFeedAddress || deployments.priceFeed;
+  let priceFeedAddress = deployments.priceFeed;
+  if (envPriceFeedAddress) {
+    priceFeedAddress = envPriceFeedAddress;
+  }
 
   const symbol = process.env.SYMBOL;
-  const finnhubSymbol = process.env.FINNHUB_SYMBOL || symbol;
-  const apiKey = process.env.FINNHUB_API_KEY || DEFAULT_FINNHUB_API_KEY;
+  let finnhubSymbol = symbol;
+  if (process.env.FINNHUB_SYMBOL) {
+    finnhubSymbol = process.env.FINNHUB_SYMBOL;
+  }
+  let apiKey = DEFAULT_FINNHUB_API_KEY;
+  if (process.env.FINNHUB_API_KEY) {
+    apiKey = process.env.FINNHUB_API_KEY;
+  }
 
-  const rawSignerIndex = process.env.ORACLE_SIGNER_INDEX || "2";
+  let rawSignerIndex = "2";
+  if (process.env.ORACLE_SIGNER_INDEX) {
+    rawSignerIndex = process.env.ORACLE_SIGNER_INDEX;
+  }
   const signerIndex = Number.parseInt(rawSignerIndex, 10);
 
   if (!symbol) {

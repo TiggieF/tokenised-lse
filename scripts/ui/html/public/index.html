@@ -5,6 +5,7 @@
   <meta charset="UTF-8" />
   <title>Tokenised NASDAQ Shell</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://fonts.cdnfonts.com/css/digitalix" rel="stylesheet">
   <style>
     :root {
       font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -20,6 +21,7 @@
       margin: 0;
       min-height: 100vh;
       background: radial-gradient(circle at top left, rgba(59, 130, 246, 0.15), transparent), #050910;
+      overflow-x: hidden;
     }
 
     a {
@@ -166,6 +168,7 @@
       padding: 32px;
       display: flex;
       flex-direction: column;
+      overflow-x: hidden;
     }
 
     header {
@@ -173,7 +176,7 @@
       justify-content: space-between;
       align-items: center;
       padding-bottom: 24px;
-      border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      overflow: hidden;
     }
 
     header h1 {
@@ -193,6 +196,78 @@
       color: #93c5fd;
       font-weight: 600;
       font-size: 0.85rem;
+    }
+
+    .index-tape-shell {
+      width: 100%;
+      min-height: 56px;
+      border-radius: 14px;
+      background: rgba(10, 17, 30, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .index-tape-track {
+      display: inline-flex;
+      align-items: center;
+      gap: 30px;
+      padding: 10px 20px;
+      width: max-content;
+      white-space: nowrap;
+      animation: ticker-roll 36s linear infinite;
+    }
+
+    .index-tape-shell:hover .index-tape-track {
+      animation-play-state: paused;
+    }
+
+    .index-tape-item {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 10px;
+      color: #e2e8f0;
+    }
+
+    .index-label {
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #94a3b8;
+      font-weight: 700;
+    }
+
+    .index-price {
+      font-size: 1.5rem;
+      line-height: 1;
+      font-weight: 700;
+      font-family: "Digitalix", "Space Grotesk", sans-serif;
+    }
+
+    .index-change {
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .index-up {
+      color: #22c55e;
+    }
+
+    .index-down {
+      color: #ef4444;
+    }
+
+    .index-flat {
+      color: #cbd5e1;
+    }
+
+    @keyframes ticker-roll {
+      0% {
+        transform: translateX(0%);
+      }
+      100% {
+        transform: translateX(-50%);
+      }
     }
 
     .card {
@@ -250,6 +325,10 @@
       .sidebar footer {
         width: 100%;
       }
+
+      .index-price {
+        font-size: 1.1rem;
+      }
     }
   </style>
 </head>
@@ -281,7 +360,10 @@
 
     <main class="content">
       <header>
-        <div>
+        <div class="index-tape-shell">
+          <div id="index-tape-track" class="index-tape-track">
+            <span class="index-label">Loading index ticker</span>
+          </div>
         </div>
       </header>
 
@@ -305,6 +387,9 @@
     const pageFrame = document.getElementById("page-frame");
     const navLinks = document.querySelectorAll(".nav-link");
     const liveUpdatesToggle = document.getElementById("live-updates-toggle");
+    const indexTapeTrack = document.getElementById("index-tape-track");
+    const LAST_PAGE_KEY = "tlse_last_page";
+    const INDEX_TICKER_ROLL_MS = 36000;
     let liveUpdatesEnabled = true;
     let activeEthereumProvider = null;
 
@@ -405,6 +490,11 @@
     }
 
     function loadPage(page) {
+      let pageToStore = "markets";
+      if (page) {
+        pageToStore = String(page);
+      }
+      localStorage.setItem(LAST_PAGE_KEY, pageToStore);
       // iframe scr switch
       if (page === "ttoken") {
         pageFrame.src = "/ttoken.html";
@@ -451,6 +541,81 @@
       pageFrame.src = "/dataFetch/tsla-yahoo/chart.html";
       pageFrame.title = "Stock information module";
       setActiveNav("markets");
+    }
+
+    function formatTickerPrice(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) {
+        return "-";
+      }
+      return `$${number.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+    }
+
+    function formatTickerPercent(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) {
+        return "-";
+      }
+      const pct = number * 100;
+      let sign = "";
+      if (pct > 0) {
+        sign = "+";
+      }
+      return `${sign}${pct.toFixed(2)}%`;
+    }
+
+    function buildTickerMarkup(rows) {
+      let html = "";
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const changePercent = Number(row.changePercent);
+        let changeClass = "index-flat";
+        if (changePercent > 0) {
+          changeClass = "index-up";
+        } else if (changePercent < 0) {
+          changeClass = "index-down";
+        }
+        let label = "";
+        if (row.symbol) {
+          label = String(row.symbol);
+        } else {
+          if (row.label) {
+            label = String(row.label);
+          }
+        }
+        if (label.startsWith("^")) {
+          label = label.slice(1);
+        }
+        const priceText = formatTickerPrice(row.price);
+        const changeText = formatTickerPercent(changePercent);
+        html += `<span class="index-tape-item"><span class="index-label">${label}</span><span class="index-price ${changeClass}">${priceText}</span><span class="index-change ${changeClass}">${changeText}</span></span>`;
+      }
+      return html;
+    }
+
+    async function loadIndexTicker() {
+      try {
+        const res = await fetch("/api/fmp/index-ticker");
+        const data = await res.json();
+        let hasRows = false;
+        if (data) {
+          if (Array.isArray(data.rows)) {
+            if (data.rows.length > 0) {
+              hasRows = true;
+            }
+          }
+        }
+        if (!res.ok || !hasRows) {
+          return;
+        }
+        const first = buildTickerMarkup(data.rows);
+        const second = buildTickerMarkup(data.rows);
+        indexTapeTrack.innerHTML = `${first}${second}`;
+      } catch (err) {
+      }
     }
 
     function setLiveUpdatesEnabled(enabled) {
@@ -500,7 +665,11 @@
         setWalletStatus(false);
       }
     });
-    loadPage("markets");
+    let startPage = localStorage.getItem(LAST_PAGE_KEY);
+    if (!startPage) {
+      startPage = "markets";
+    }
+    loadPage(startPage);
 
     liveUpdatesToggle.addEventListener("click", () => {
       const nextState = !liveUpdatesEnabled;
@@ -511,6 +680,9 @@
     pageFrame.addEventListener("load", () => {
       setLiveUpdatesEnabled(liveUpdatesEnabled);
     });
+
+    loadIndexTicker();
+    setInterval(loadIndexTicker, INDEX_TICKER_ROLL_MS);
   </script>
 </body>
 

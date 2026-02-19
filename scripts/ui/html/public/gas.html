@@ -1,133 +1,237 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Gas Pack</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gas</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #eef2f6;
-      --card: #ffffff;
-      --ink: #1f2937;
-      --muted: #64748b;
-      --line: #d7dde4;
-      --ok: #0f766e;
-      --warn: #dc2626;
-      --skip: #6b7280;
+      --ink: #101418;
+      --muted: #5b6b7a;
+      --panel: rgba(255, 255, 255, 0.88);
+      --shadow: rgba(16, 20, 24, 0.12);
+      --bg-1: #f6f0e6;
+      --bg-2: #dfe7ef;
+      --ok: #15803d;
+      --down: #dc2626;
+      --line: rgba(16, 20, 24, 0.08);
     }
-    * { box-sizing: border-box; }
+
+    * {
+      box-sizing: border-box;
+    }
+
     body {
       margin: 0;
-      background: linear-gradient(135deg, #f3f7fb 0%, #e8eef5 100%);
+      font-family: "Space Grotesk", sans-serif;
       color: var(--ink);
-      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(1200px 600px at 10% 0%, #fef6d8 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 10%, #d5f2ff 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 32px;
     }
-    .wrap { max-width: 1200px; margin: 24px auto; padding: 0 16px; }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--line);
+
+    .panel {
+      background: var(--panel);
       border-radius: 18px;
-      padding: 18px;
+      box-shadow: 0 12px 30px var(--shadow);
+      padding: 24px;
+      backdrop-filter: blur(8px);
+    }
+
+    .header {
+      display: flex;
+      justify-content: flex-start;
+      align-items: flex-end;
+      gap: 16px;
       margin-bottom: 16px;
     }
-    h1 {
-      margin: 0 0 10px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: #334155;
-      font-size: 32px;
+
+    .title {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
     }
-    .meta {
-      display: flex;
-      gap: 20px;
-      flex-wrap: wrap;
+
+    .sub {
       color: var(--muted);
-      font-size: 14px;
+      font-size: 13px;
+      margin-top: 4px;
     }
+
+    .state {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
     .dot {
       width: 10px;
       height: 10px;
       border-radius: 999px;
-      background: var(--ok);
-      display: inline-block;
-      margin-right: 8px;
+      background: var(--down);
+      box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.1);
     }
+
+    .dot.connected {
+      background: var(--ok);
+      box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.1);
+    }
+
+    .pill {
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 14px;
+      font-size: 13px;
+      background: rgba(255, 255, 255, 0.7);
+      border-radius: 12px;
+      overflow: hidden;
     }
-    th, td {
+
+    th,
+    td {
       text-align: left;
-      padding: 10px 8px;
+      padding: 10px 12px;
       border-bottom: 1px solid var(--line);
       vertical-align: top;
     }
+
     th {
-      text-transform: uppercase;
+      font-size: 11px;
       letter-spacing: 0.08em;
-      color: #475569;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    .status {
+      margin-top: 12px;
+      color: var(--muted);
       font-size: 12px;
     }
-    .status-ok { color: var(--ok); font-weight: 700; }
-    .status-warn { color: var(--warn); font-weight: 700; }
-    .status-skip { color: var(--skip); font-weight: 700; }
-    .mono { font-family: "SFMono-Regular", Menlo, monospace; }
+
+    .ok {
+      color: var(--ok);
+    }
+
+    .error {
+      color: var(--down);
+    }
+
+    @media (max-width: 780px) {
+      body {
+        padding: 20px;
+      }
+
+      .header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      table {
+        display: block;
+        overflow-x: auto;
+      }
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <h1>Gas Cost Monitor</h1>
-      <div class="meta">
-        <div><span class="dot"></span><span id="connection">Loading</span></div>
-        <div>Auto update every <span id="poll-ms">1500</span> ms</div>
-        <div>Last run <span id="last-run">-</span></div>
-        <div>Suite <span id="suite">-</span></div>
-        <div>Warn count <span id="warn-count">0</span></div>
+  <div class="panel">
+    <div class="header">
+      <div>
+        <h1 class="title">Gas</h1>
+        <div class="sub state"><span id="connection-dot" class="dot"></span><span id="connection">Disconnected</span></div>
       </div>
     </div>
 
-    <div class="card">
-      <table>
-        <thead>
-          <tr>
-            <th>Tx</th>
-            <th>Gas</th>
-            <th>Cost Eth</th>
-          </tr>
-        </thead>
-        <tbody id="rows">
-          <tr><td colspan="3">Loading</td></tr>
-        </tbody>
-      </table>
-    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Tx</th>
+          <th>Gas</th>
+          <th>Cost Eth</th>
+        </tr>
+      </thead>
+      <tbody id="rows">
+        <tr><td colspan="3">Loading</td></tr>
+      </tbody>
+    </table>
+
+    <div id="status" class="status">Loading gas rows</div>
   </div>
 
   <script>
     const rowsEl = document.getElementById('rows');
     const connectionEl = document.getElementById('connection');
-    const pollMsEl = document.getElementById('poll-ms');
-    const lastRunEl = document.getElementById('last-run');
-    const suiteEl = document.getElementById('suite');
-    const warnCountEl = document.getElementById('warn-count');
+    const connectionDotEl = document.getElementById('connection-dot');
+    const statusEl = document.getElementById('status');
+    const hiddenTxNames = [
+      'list_symbol',
+      'mint_equity_for_seller_setup',
+      'approve_ttoken_for_dex',
+      'approve_equity_for_dex',
+      'snapshot_dividend_declare',
+      'snapshot_dividend_decla',
+      'merkle_dividend_declare',
+      'approve_ttoken_for_leveraged',
+      'leveraged_mint',
+      'leveraged_unwind',
+    ];
 
-    let pollMs = 1500;
-
-    function fmtTime(ms) {
-      if (!ms) {
-        return '-';
+    function getTxDisplayName(txNameRaw) {
+      const txName = String(txNameRaw);
+      if (txName === 'place_buy_limit') {
+        return 'BUY';
       }
-      const d = new Date(ms);
-      return d.toLocaleString('en-US', {
-        timeZone: 'America/New_York',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
+      if (txName === 'place_sell_limit') {
+        return 'SELL';
+      }
+      if (txName === 'cancel_order') {
+        return 'CANCEL';
+      }
+      if (txName === 'snapshot_dividend_claim') {
+        return 'Claim Dividends';
+      }
+      if (txName === 'merkle_dividend_claim') {
+        return 'Claim Merkle Proof Dividends';
+      }
+      return txName;
+    }
+
+    function setStatus(text, tone) {
+      statusEl.textContent = text;
+      statusEl.classList.remove('ok', 'error');
+      if (tone) {
+        statusEl.classList.add(tone);
+      }
+    }
+
+    function setConnected(connected) {
+      connectionEl.textContent = connected ? 'Connected' : 'Disconnected';
+      connectionDotEl.classList.toggle('connected', connected);
     }
 
     function renderRows(rows) {
@@ -135,16 +239,31 @@
         rowsEl.innerHTML = '<tr><td colspan="3">No rows</td></tr>';
         return;
       }
-      let html = '';
+
+      const visibleRows = [];
       for (let i = 0; i < rows.length; i += 1) {
         const row = rows[i];
-        html += `
-          <tr>
-            <td class="mono">${row.txName}</td>
-            <td>${row.gasUsed}</td>
-            <td>${row.costEth}</td>
-          </tr>
-        `;
+        let hideRow = false;
+        for (let j = 0; j < hiddenTxNames.length; j += 1) {
+          if (row.txName === hiddenTxNames[j]) {
+            hideRow = true;
+          }
+        }
+        if (!hideRow) {
+          visibleRows.push(row);
+        }
+      }
+
+      if (visibleRows.length === 0) {
+        rowsEl.innerHTML = '<tr><td colspan="3">No rows</td></tr>';
+        return;
+      }
+
+      let html = '';
+      for (let i = 0; i < visibleRows.length; i += 1) {
+        const row = visibleRows[i];
+        const displayName = getTxDisplayName(row.txName);
+        html += `<tr><td class="mono">${displayName}</td><td>${row.gasUsed}</td><td>${row.costEth}</td></tr>`;
       }
       rowsEl.innerHTML = html;
     }
@@ -153,23 +272,18 @@
       try {
         const res = await fetch('/api/gas/latest');
         const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || 'cannot load gas');
+
+        if (!res.ok || !data || !data.report) {
+          throw new Error((data && data.error) || 'cannot load gas report');
         }
 
-        connectionEl.textContent = 'Connected';
-
-        const report = data.report || {};
-        pollMs = report.pollMs || 1500;
-        pollMsEl.textContent = String(pollMs);
-        lastRunEl.textContent = fmtTime(data.lastRunAtMs);
-        suiteEl.textContent = report.suite || '-';
-        warnCountEl.textContent = String(report.warnCount || 0);
-
-        renderRows(report.rows || []);
+        setConnected(true);
+        renderRows(data.report.rows || []);
+        setStatus('Live', 'ok');
       } catch (err) {
-        connectionEl.textContent = 'Disconnected';
+        setConnected(false);
         rowsEl.innerHTML = `<tr><td colspan="3">${err.message}</td></tr>`;
+        setStatus(err.message, 'error');
       }
     }
 

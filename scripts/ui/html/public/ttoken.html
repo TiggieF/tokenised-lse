@@ -192,7 +192,11 @@
       equityAmountValue.textContent = String(equityAmount);
     }
 
-    function setEquityStatus(message, tone = "neutral") {
+    function setEquityStatus(message, toneInput) {
+      let tone = toneInput;
+      if (!tone) {
+        tone = "neutral";
+      }
       equityStatus.textContent = message;
       let nextColor = "#5b6b7a";
       if (tone === "error") {
@@ -202,7 +206,11 @@
       // set style for equity status
     }
 
-    function setStatus(message, tone = "neutral") {
+    function setStatus(message, toneInput) {
+      let tone = toneInput;
+      if (!tone) {
+        tone = "neutral";
+      }
       statusText.textContent = message;
       let nextColor = "#5b6b7a";
       if (tone === "error") {
@@ -241,12 +249,16 @@
       return "";
     }
 
-    equityMinusBtn.addEventListener("click", () => {
-      equityAmount = Math.max(100, equityAmount - STEP);
+    equityMinusBtn.addEventListener("click", function () {
+      let nextValue = equityAmount - STEP;
+      if (nextValue < 100) {
+        nextValue = 100;
+      }
+      equityAmount = nextValue;
       renderEquityAmount();
     });
 
-    equityPlusBtn.addEventListener("click", () => {
+    equityPlusBtn.addEventListener("click", function () {
       equityAmount += STEP;
       renderEquityAmount();
     });
@@ -267,7 +279,10 @@
         });
         const data = await res.json();
 
-        const txHash = data.txHash || "";
+        let txHash = "";
+        if (data.txHash) {
+          txHash = data.txHash;
+        }
         if (txHash.length > 0) {
           setStatus(`Airdrop sent: ${txHash}`);
         } else {
@@ -276,13 +291,17 @@
         importHint.style.display = "block";
         importHint.textContent = `token address: ${ttokenAddress}`;
       } catch (err) {
-        setStatus(err.message || "", "error");
+        let message = "";
+        if (err.message) {
+          message = err.message;
+        }
+        setStatus(message, "error");
       }
     }
 
     airdropBtn.addEventListener("click", airdrop);
 
-    mintEquityBtn.addEventListener("click", async () => {
+    mintEquityBtn.addEventListener("click", async function () {
       try {
         // mint on click
         setEquityStatus("Creating & minting equity");
@@ -298,12 +317,22 @@
           }),
         });
         const data = await res.json();
-        const mintHash = data.mintTx || data.txHash || "";
+        let mintHash = "";
+        if (data.mintTx) {
+          mintHash = data.mintTx;
+        }
+        if (!mintHash && data.txHash) {
+          mintHash = data.txHash;
+        }
         setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value} Tx: ${mintHash}`);
         equityImportHint.style.display = "block";
         equityImportHint.textContent = `${equitySymbol.value} address: ${data.tokenAddress}`;
       } catch (err) {
-        setEquityStatus(err.message || "", "error");
+        let message = "";
+        if (err.message) {
+          message = err.message;
+        }
+        setEquityStatus(message, "error");
       }
     });
 
@@ -319,7 +348,7 @@
         }
         listedStocks = [];
         for (const item of listings) {
-          const symbol = String(item.symbol || "").toUpperCase();
+          const symbol = String(item.symbol).toUpperCase();
           if (!symbol) continue;
           listedStocks.push({ symbol });
         }
@@ -344,7 +373,7 @@
       );
       setWalletAddress(chooseDisplayAccount(accounts));
     })();
-    window.ethereum.on("accountsChanged", (accounts) => {
+    window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
     });
   </script>

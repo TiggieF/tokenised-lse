@@ -15,7 +15,7 @@ async function deployPriceFeedFixture() {
   return { feed, admin, otherUser, oracle };
 }
 
-describe("Stage 3 — PriceFeed oracle", function () {
+describe("PriceFeed oracle", function () {
   it("defaults freshness window to 60 seconds", async function () {
     const fixture = await loadFixture(deployPriceFeedFixture);
     const feed = fixture.feed;

@@ -137,6 +137,16 @@
       margin-top: 12px;
       display: flex;
       justify-content: flex-end;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .end-text {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      display: none;
     }
 
     .ok {
@@ -190,6 +200,7 @@
     <div id="status" class="status">Connecting wallet...</div>
     <div class="footer-actions">
       <button id="load-more-btn" class="pill" type="button">Load more</button>
+      <span id="end-text" class="end-text">End</span>
     </div>
   </div>
 
@@ -199,6 +210,7 @@
     const statusEl = document.getElementById("status");
     const refreshBtn = document.getElementById("refresh-btn");
     const loadMoreBtn = document.getElementById("load-more-btn");
+    const endText = document.getElementById("end-text");
     const filterButtons = document.querySelectorAll("[data-type]");
 
     let currentWallet = "";
@@ -218,10 +230,16 @@
       timeZoneName: "short",
     });
 
-    function setStatus(text, tone = "") {
+    function setStatus(text, toneInput) {
+      let tone = toneInput;
+      if (!tone) {
+        tone = "";
+      }
       statusEl.textContent = text;
       statusEl.classList.remove("ok", "error");
-      if (tone) statusEl.classList.add(tone);
+      if (tone) {
+        statusEl.classList.add(tone);
+      }
     }
 
     function formatWeiToToken(valueWei, maxDecimals = 4) {
@@ -232,7 +250,10 @@
           raw = String(valueWei).slice(1);
         }
         const padded = raw.padStart(19, "0");
-        const whole = padded.slice(0, -18).replace(/^0+/, "") || "0";
+        let whole = padded.slice(0, -18).replace(/^0+/, "");
+        if (!whole) {
+          whole = "0";
+        }
         const fractionRaw = padded.slice(-18);
         const fraction = fractionRaw.slice(0, maxDecimals).replace(/0+$/, "");
         let rendered = whole;
@@ -296,39 +317,37 @@
 
     function toDisplay(item) {
       let sideWord = "";
-      if (item.side === "BUY") {
-        sideWord = "bought";
-      }
-      if (item.side === "SELL") {
-        sideWord = "sold";
-      }
-      if (!sideWord) {
-        sideWord = String(item.side || "").toLowerCase();
+      switch (item.side) {
+        case "BUY":
+          sideWord = "bought";
+          break;
+        case "SELL":
+          sideWord = "sold";
+          break;
+        default:
+          sideWord = String(item.side).toLowerCase();
+          break;
       }
 
-      if (item.kind === "ORDER_PLACED") {
-        return `${sideWord} ${formatWeiToToken(item.qtyWei)} unit at price ${formatCentsToTTokenPerUnit(item.priceCents)} ttoken per unit (${item.status})`;
-      }
-      if (item.kind === "ORDER_CANCELLED") {
-        return `${sideWord} refund ${formatWeiToToken(item.refundWei)}`;
-      }
-      if (item.kind === "ORDER_FILLED") {
-        return `${sideWord} ${formatWeiToToken(item.qtyWei)} unit at price ${formatCentsToTTokenPerUnit(item.priceCents)} ttoken per unit`;
-      }
-      if (item.kind === "CASHFLOW") {
-        return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.reason})`;
-      }
-      if (item.kind === "TRANSFER") {
-        return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.from} -> ${item.to})`;
-      }
-      if (item.kind === "LEVERAGE_MINT") {
-        return `mint ${formatWeiToToken(item.productQtyWei)} with ${formatWeiToToken(item.ttokenInWei)} ttoken`;
-      }
-      if (item.kind === "LEVERAGE_UNWIND") {
-        return `unwind ${formatWeiToToken(item.productQtyWei)} for ${formatWeiToToken(item.ttokenOutWei)} ttoken`;
-      }
-      if (item.kind === "LEVERAGE_BURN") {
-        return `burn ${formatWeiToToken(item.productQtyWei)} leveraged token`;
+      switch (item.kind) {
+        case "ORDER_PLACED":
+          return `${sideWord} ${formatWeiToToken(item.qtyWei)} unit at price ${formatCentsToTTokenPerUnit(item.priceCents)} ttoken per unit (${item.status})`;
+        case "ORDER_CANCELLED":
+          return `${sideWord} refund ${formatWeiToToken(item.refundWei)}`;
+        case "ORDER_FILLED":
+          return `${sideWord} ${formatWeiToToken(item.qtyWei)} unit at price ${formatCentsToTTokenPerUnit(item.priceCents)} ttoken per unit`;
+        case "CASHFLOW":
+          return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.reason})`;
+        case "TRANSFER":
+          return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.from} -> ${item.to})`;
+        case "LEVERAGE_MINT":
+          return `mint ${formatWeiToToken(item.productQtyWei)} with ${formatWeiToToken(item.ttokenInWei)} ttoken`;
+        case "LEVERAGE_UNWIND":
+          return `unwind ${formatWeiToToken(item.productQtyWei)} for ${formatWeiToToken(item.ttokenOutWei)} ttoken`;
+        case "LEVERAGE_BURN":
+          return `burn ${formatWeiToToken(item.productQtyWei)} leveraged token`;
+        default:
+          break;
       }
       return "-";
     }
@@ -342,13 +361,25 @@
           body: JSON.stringify({ wallet: currentWallet, orderId }),
         });
         const data = await response.json();
+        let failed = false;
         if (!response.ok || data.error) {
-          throw new Error(data.error || "Cancel failed");
+          failed = true;
+        }
+        if (failed) {
+          let message = "Cancel failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         setStatus(`Cancelled order #${orderId}`, "ok");
         await loadTransactions();
       } catch (err) {
-        setStatus(err.message || "Cancel failed", "error");
+        let message = "Cancel failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setStatus(message, "error");
       }
     }
 
@@ -364,7 +395,13 @@
       for (const item of items) {
         const tr = document.createElement("tr");
         const actionCell = document.createElement("td");
-        if (item.kind === "ORDER_PLACED" && (item.status === "OPEN" || item.status === "PARTIAL")) {
+        let canCancel = false;
+        if (item.kind === "ORDER_PLACED") {
+          if (item.status === "OPEN" || item.status === "PARTIAL") {
+            canCancel = true;
+          }
+        }
+        if (canCancel) {
           const btn = document.createElement("button");
           btn.type = "button";
           btn.className = "cancel-btn";
@@ -375,34 +412,59 @@
           actionCell.textContent = "Completed";
         }
 
+        let symbolText = "-";
+        if (item.symbol) {
+          symbolText = item.symbol;
+        } else if (item.assetSymbol) {
+          symbolText = item.assetSymbol;
+        }
+        let txHashText = "-";
+        if (item.txHash) {
+          txHashText = item.txHash;
+        }
         tr.innerHTML = `
           <td>${formatTime(item.timestampMs)}</td>
           <td>${item.kind}</td>
-          <td>${item.symbol || item.assetSymbol || "-"}</td>
+          <td>${symbolText}</td>
           <td>${toDisplay(item)}</td>
-          <td class="mono">${item.txHash || "-"}</td>
+          <td class="mono">${txHashText}</td>
         `;
         tr.appendChild(actionCell);
         rowsEl.appendChild(tr);
       }
     }
 
-    async function loadTransactions({ append = false } = {}) {
+    async function loadTransactions(options) {
+      let append = false;
+      if (options && options.append) {
+        append = true;
+      }
       if (!currentWallet) return;
       try {
         setStatus("Loading");
         let cursorParam = "";
-        if (append && nextCursor !== null) {
+        if (append && nextCursor) {
           cursorParam = `&cursor=${encodeURIComponent(nextCursor)}`;
         }
         const response = await fetch(
           `/api/txs?wallet=${encodeURIComponent(currentWallet)}&type=${encodeURIComponent(currentType)}&limit=${PAGE_SIZE}${cursorParam}`
         );
         const data = await response.json();
+        let failed = false;
         if (!response.ok || data.error) {
-          throw new Error(data.error || "Failed to load transactions");
+          failed = true;
         }
-        const batch = data.items || [];
+        if (failed) {
+          let message = "Failed to load transactions";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
+        }
+        let batch = [];
+        if (Array.isArray(data.items)) {
+          batch = data.items;
+        }
         if (append) {
           currentItems = currentItems.concat(batch);
         } else {
@@ -410,12 +472,13 @@
         }
         nextCursor = data.nextCursor;
         renderRows(currentItems);
-        if (nextCursor === null) {
-          loadMoreBtn.disabled = true;
-          loadMoreBtn.textContent = "No more items";
+        if (!nextCursor) {
+          loadMoreBtn.style.display = "none";
+          endText.style.display = "inline";
         } else {
-          loadMoreBtn.disabled = false;
+          loadMoreBtn.style.display = "inline-block";
           loadMoreBtn.textContent = "Load more";
+          endText.style.display = "none";
         }
         const loadedCount = currentItems.length;
         const totalCount = data.total;
@@ -424,7 +487,11 @@
         // setStatus(`Loaded ${loadedCount}/${totalCount} items  Synced block: ${syncedBlock}`, "ok");
 
       } catch (err) {
-        setStatus(err.message || "Failed to load transactions", "error");
+        let message = "Failed to load transactions";
+        if (err.message) {
+          message = err.message;
+        }
+        setStatus(message, "error");
       }
     }
 
@@ -439,16 +506,18 @@
     }
 
     for (const button of filterButtons) {
-      button.addEventListener("click", () => setFilter(button.dataset.type));
+      button.addEventListener("click", function () {
+        setFilter(button.dataset.type);
+      });
     }
 
-    refreshBtn.addEventListener("click", () => {
+    refreshBtn.addEventListener("click", function () {
       nextCursor = null;
       currentItems = [];
       loadTransactions({ append: false });
     });
-    loadMoreBtn.addEventListener("click", () => {
-      if (nextCursor === null) {
+    loadMoreBtn.addEventListener("click", function () {
+      if (!nextCursor) {
         return;
       }
       loadTransactions({ append: true });
@@ -457,7 +526,11 @@
     if (window.ethereum) {
       window.ethereum.on("accountsChanged", async (accounts) => {
         currentWallet = chooseDisplayAccount(accounts);
-        walletEl.textContent = currentWallet || "-";
+        let walletText = currentWallet;
+        if (!walletText) {
+          walletText = "-";
+        }
+        walletEl.textContent = walletText;
         nextCursor = null;
         currentItems = [];
         await loadTransactions({ append: false });
@@ -471,7 +544,11 @@
       }
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       currentWallet = chooseDisplayAccount(accounts);
-      walletEl.textContent = currentWallet || "-";
+      let walletText = currentWallet;
+      if (!walletText) {
+        walletText = "-";
+      }
+      walletEl.textContent = walletText;
       nextCursor = null;
       currentItems = [];
       await loadTransactions({ append: false });

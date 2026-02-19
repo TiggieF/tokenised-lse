@@ -239,7 +239,7 @@
         </div>
         <div class="stat-row">
           <span class="muted">Live price</span>
-          <strong>$412.50</strong>
+          <strong id="sell-live-price">-</strong>
         </div>
         <div class="stat-row">
           <span class="muted">Estimated value</span>
@@ -292,6 +292,7 @@
   <script>
     // DOM elements together for reference
     const sellWallet = document.getElementById("sell-wallet");
+    const sellLivePriceEl = document.getElementById("sell-live-price");
     const sellPriceInput = document.getElementById("sell-price");
     const sellButton = document.getElementById("sell-btn");
     const sellStatus = document.getElementById("sell-status");
@@ -309,6 +310,8 @@
     const adminLockBanner = document.getElementById("admin-lock-banner");
     let currentAccount = "";
     let symbolLifecycle = "ACTIVE";
+    let sellLimitPriceTouched = false;
+    let autoSellLimitPriceTouched = false;
 
     function setWalletAddress(address) {
       currentAccount = address;
@@ -362,11 +365,11 @@
       autoPanel.classList.remove("panel-hidden");
     }
 
-    modeSell.addEventListener("click", () => {
+    modeSell.addEventListener("click", function () {
       setMode("sell");
     });
 
-    modeAuto.addEventListener("click", () => {
+    modeAuto.addEventListener("click", function () {
       setMode("auto");
     });
 
@@ -394,21 +397,70 @@
       estimatedProceedsEl.textContent = `$${proceedsText}`;
     }
 
-    sellMinusButton.addEventListener("click", () => {
+    function formatUsd(value) {
+      const numberValue = Number(value);
+      if (Number.isFinite(numberValue)) {
+        return `$${numberValue.toFixed(2)}`;
+      }
+      return "-";
+    }
+
+    function applyDefaultSellPricesFromLive(livePrice) {
+      const formattedLivePrice = formatUsd(livePrice);
+      if (!sellLimitPriceTouched) {
+        sellPriceInput.value = formattedLivePrice;
+      }
+      if (!autoSellLimitPriceTouched) {
+        autoPriceInput.value = formattedLivePrice;
+      }
+      const currentQty = Number(sellQtyValue.textContent);
+      updateEstimatedProceeds(currentQty);
+    }
+
+    async function loadSellLivePrice() {
+      const symbol = String(symbolLabel.textContent).toUpperCase();
+      if (!symbol) {
+        sellLivePriceEl.textContent = "-";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`);
+        const data = await res.json();
+        if (!res.ok) {
+          sellLivePriceEl.textContent = "-";
+          return;
+        }
+        const livePrice = Number(data.price);
+        if (Number.isFinite(livePrice) && livePrice > 0) {
+          sellLivePriceEl.textContent = formatUsd(livePrice);
+          applyDefaultSellPricesFromLive(livePrice);
+          return;
+        }
+        sellLivePriceEl.textContent = "-";
+      } catch {
+        sellLivePriceEl.textContent = "-";
+      }
+    }
+
+    sellMinusButton.addEventListener("click", function () {
       const currentValue = Number(sellQtyValue.textContent);
       const nextValue = currentValue - 100;
       updateSellQty(nextValue);
     });
 
-    sellPlusButton.addEventListener("click", () => {
+    sellPlusButton.addEventListener("click", function () {
       const currentValue = Number(sellQtyValue.textContent);
       const nextValue = currentValue + 100;
       updateSellQty(nextValue);
     });
 
-    sellPriceInput.addEventListener("input", () => {
+    sellPriceInput.addEventListener("input", function () {
+      sellLimitPriceTouched = true;
       const currentValue = Number(sellQtyValue.textContent);
       updateEstimatedProceeds(currentValue);
+    });
+    autoPriceInput.addEventListener("input", function () {
+      autoSellLimitPriceTouched = true;
     });
 
     (async function () {
@@ -421,7 +473,7 @@
       await loadAutoRules();
       updateSellQty(100);
     })();
-    window.ethereum.on("accountsChanged", (accounts) => {
+    window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
       loadAutoRules();
     });
@@ -438,9 +490,13 @@
       symbolTitle.textContent = "(AAPL)";
       symbolLabel.textContent = "AAPL";
     }
+    loadSellLivePrice();
 
     function updateLifecycleUi() {
-      const blocked = symbolLifecycle === "FROZEN" || symbolLifecycle === "DELISTED";
+      let blocked = false;
+      if (symbolLifecycle === "FROZEN" || symbolLifecycle === "DELISTED") {
+        blocked = true;
+      }
       if (blocked) {
         adminLockBanner.style.display = "block";
         adminLockBanner.textContent = `${symbolLabel.textContent} is ${symbolLifecycle} by admin. Selling is disabled`;
@@ -448,21 +504,32 @@
         adminLockBanner.style.display = "none";
         adminLockBanner.textContent = "";
       }
-      sellButton.style.display = blocked ? "none" : "block";
-      autoButton.style.display = blocked ? "none" : "block";
+      let displayMode = "block";
+      if (blocked) {
+        displayMode = "none";
+      }
+      sellButton.style.display = displayMode;
+      autoButton.style.display = displayMode;
     }
 
     async function loadLifecycleForCurrentSymbol() {
       try {
         const res = await fetch("/api/admin/symbols/status");
         const data = await res.json();
-        const rows = Array.isArray(data.symbols) ? data.symbols : [];
+        let rows = [];
+        if (Array.isArray(data.symbols)) {
+          rows = data.symbols;
+        }
         symbolLifecycle = "ACTIVE";
         const currentSymbol = String(symbolLabel.textContent).toUpperCase();
         for (let i = 0; i < rows.length; i += 1) {
           const row = rows[i];
           if (String(row.symbol).toUpperCase() === currentSymbol) {
-            symbolLifecycle = String(row.status || "ACTIVE").toUpperCase();
+            let statusText = String(row.status).toUpperCase();
+            if (!statusText) {
+              statusText = "ACTIVE";
+            }
+            symbolLifecycle = statusText;
           }
         }
       } catch {
@@ -513,34 +580,47 @@
         const res = await fetch(`/api/autotrade/rules?wallet=${encodeURIComponent(currentAccount)}`);
         const data = await res.json();
         autoRulesList.innerHTML = "";
-        const rows = Array.isArray(data.rules) ? data.rules : [];
+        let rows = [];
+        if (Array.isArray(data.rules)) {
+          rows = data.rules;
+        }
         for (let i = 0; i < rows.length; i += 1) {
           const row = rows[i];
-          if (String(row.side).toUpperCase() !== "SELL") {
-            continue;
+          let isSellSide = false;
+          if (String(row.side).toUpperCase() === "SELL") {
+            isSellSide = true;
           }
-          const block = document.createElement("div");
-          block.className = "stat-row";
-          const left = document.createElement("span");
-          left.className = "muted";
-          left.textContent = `${row.symbol} >= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
-          const rightButton = document.createElement("button");
-          rightButton.className = "btn btn-auto";
-          rightButton.style.padding = "6px 10px";
-          rightButton.style.fontSize = "12px";
-          rightButton.textContent = row.enabled ? "Disable" : "Enable";
-          rightButton.addEventListener("click", async () => {
-            const url = row.enabled ? "/api/autotrade/rules/disable" : "/api/autotrade/rules/enable";
-            await fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ruleId: row.id }),
+          if (isSellSide) {
+            const block = document.createElement("div");
+            block.className = "stat-row";
+            const left = document.createElement("span");
+            left.className = "muted";
+            left.textContent = `${row.symbol} >= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
+            const rightButton = document.createElement("button");
+            rightButton.className = "btn btn-auto";
+            rightButton.style.padding = "6px 10px";
+            rightButton.style.fontSize = "12px";
+            let buttonText = "Enable";
+            if (row.enabled) {
+              buttonText = "Disable";
+            }
+            rightButton.textContent = buttonText;
+            rightButton.addEventListener("click", async function () {
+              let url = "/api/autotrade/rules/enable";
+              if (row.enabled) {
+                url = "/api/autotrade/rules/disable";
+              }
+              await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ruleId: row.id }),
+              });
+              await loadAutoRules();
             });
-            await loadAutoRules();
-          });
-          block.appendChild(left);
-          block.appendChild(rightButton);
-          autoRulesList.appendChild(block);
+            block.appendChild(left);
+            block.appendChild(rightButton);
+            autoRulesList.appendChild(block);
+          }
         }
       } catch {
         autoRulesList.innerHTML = "";
@@ -575,8 +655,12 @@
       return data.txHash;
     }
 
-    sellButton.addEventListener("click", async () => {
+    sellButton.addEventListener("click", async function () {
+      let blocked = false;
       if (symbolLifecycle === "FROZEN" || symbolLifecycle === "DELISTED") {
+        blocked = true;
+      }
+      if (blocked) {
         sellStatus.textContent = `${symbolLabel.textContent} is ${symbolLifecycle} by admin`;
         return;
       }
@@ -596,8 +680,12 @@
       }
     });
 
-    autoButton.addEventListener("click", async () => {
+    autoButton.addEventListener("click", async function () {
+      let blocked = false;
       if (symbolLifecycle === "FROZEN" || symbolLifecycle === "DELISTED") {
+        blocked = true;
+      }
+      if (blocked) {
         autoStatus.textContent = `${symbolLabel.textContent} is ${symbolLifecycle} by admin`;
         return;
       }
@@ -619,7 +707,11 @@
       });
       const data = await res.json();
       if (!res.ok) {
-        autoStatus.textContent = data.error || "Rule create failed";
+        let message = "Rule create failed";
+        if (data.error) {
+          message = data.error;
+        }
+        autoStatus.textContent = message;
         return;
       }
       autoStatus.textContent = `Auto sell rule set id ${String(data.rule.id)}`;
@@ -628,6 +720,7 @@
 
     loadLifecycleForCurrentSymbol();
     setInterval(loadLifecycleForCurrentSymbol, 5000);
+    setInterval(loadSellLivePrice, 1000);
 
   </script>
 </body>

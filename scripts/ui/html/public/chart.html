@@ -401,7 +401,11 @@
           }
         } else {
           for (const item of listings) {
-            const symbol = String(item.symbol || "").toUpperCase();
+            let symbolValue = "";
+            if (item.symbol) {
+              symbolValue = item.symbol;
+            }
+            const symbol = String(symbolValue).toUpperCase();
             if (!symbol) continue;
             const opt = document.createElement("option");
             opt.value = symbol;
@@ -418,7 +422,11 @@
           symbolInput.appendChild(opt);
         }
       }
-      const selected = symbolInput.value.trim().toUpperCase() || fallbackSymbols[0];
+      let selected = fallbackSymbols[0];
+      const selectedRaw = symbolInput.value.trim().toUpperCase();
+      if (selectedRaw) {
+        selected = selectedRaw;
+      }
       liveSymbol = selected;
       resetLivePriceState(selected);
       liveSymbolLabel.textContent = `${selected} live price`;
@@ -429,7 +437,11 @@
     }
 
     async function loadStockInfo() {
-      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      let symbol = "TSLA";
+      const symbolRaw = symbolInput.value.trim().toUpperCase();
+      if (symbolRaw) {
+        symbol = symbolRaw;
+      }
       try {
         const res = await fetch(
           `/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`
@@ -566,7 +578,11 @@
     }
 
     async function loadLivePrice() {
-      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      let symbol = "TSLA";
+      const symbolRaw = symbolInput.value.trim().toUpperCase();
+      if (symbolRaw) {
+        symbol = symbolRaw;
+      }
       if (symbol !== liveSymbol) {
         resetLivePriceState(symbol);
       }
@@ -647,7 +663,11 @@
     }
 
     async function loadCandles() {
-      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      let symbol = "TSLA";
+      const symbolRaw = symbolInput.value.trim().toUpperCase();
+      if (symbolRaw) {
+        symbol = symbolRaw;
+      }
       const date = dateInput.value;
       const range = rangeInput.value;
       let interval = "5";

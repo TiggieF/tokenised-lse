@@ -18,7 +18,7 @@ async function deployTTokenFixture() {
   return { token, admin, otherUser, anotherUser };
 }
 
-describe("Stage 1 — TToken token", function () {
+describe("TToken token", function () {
   describe("Deployment", function () {
     it("assigns deployer as admin and minter", async function () {
       const fixture = await loadFixture(deployTTokenFixture);

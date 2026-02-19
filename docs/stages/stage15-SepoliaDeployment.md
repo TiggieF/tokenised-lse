@@ -10,8 +10,8 @@ Execute testnet deployment and hosting rollout after feature completion and veri
 
 - deploy contract suite to Sepolia
 - verify contracts on Etherscan
-- run backend against Sepolia with JSON indexer storage
-- deploy frontend and connect to hosted backend
+- run backend on Render against Sepolia with JSON indexer storage
+- deploy frontend on Render and connect to hosted backend
 - execute smoke tests and publish release artifacts
 
 ---
@@ -32,6 +32,7 @@ This file is the canonical step-by-step deployment plan, including:
 - hosting checklist
 - rollback and recovery
 - evidence collection for report
+- persistent disk requirement for backend runtime state on Render
 
 ---
 
@@ -41,4 +42,3 @@ This file is the canonical step-by-step deployment plan, including:
 2. Backend and frontend are live and connected to Sepolia.
 3. End-to-end smoke tests pass and are documented.
 4. Release artifacts are committed and tagged.
-

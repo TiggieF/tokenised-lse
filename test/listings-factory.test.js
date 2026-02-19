@@ -2,7 +2,7 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
-async function deployStage2Fixture() {
+async function deployListingsFixture() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
   const otherUser = signers[1];
@@ -27,9 +27,9 @@ async function deployStage2Fixture() {
   return { admin, otherUser, minter, registry, factory };
 }
 
-describe("Stage 2 — Listings & Factory", function () {
+describe("Listings & Factory", function () {
   it("deploys and registers a new equity token per symbol", async function () {
-    const fixture = await loadFixture(deployStage2Fixture);
+    const fixture = await loadFixture(deployListingsFixture);
     const admin = fixture.admin;
     const minter = fixture.minter;
     const registry = fixture.registry;
@@ -66,7 +66,7 @@ describe("Stage 2 — Listings & Factory", function () {
   });
 
   it("prevents duplicate symbols", async function () {
-    const fixture = await loadFixture(deployStage2Fixture);
+    const fixture = await loadFixture(deployListingsFixture);
     const admin = fixture.admin;
     const factory = fixture.factory;
 
@@ -77,7 +77,7 @@ describe("Stage 2 — Listings & Factory", function () {
   });
 
   it("registry resolves addresses", async function () {
-    const fixture = await loadFixture(deployStage2Fixture);
+    const fixture = await loadFixture(deployListingsFixture);
     const admin = fixture.admin;
     const registry = fixture.registry;
     const factory = fixture.factory;
@@ -89,7 +89,7 @@ describe("Stage 2 — Listings & Factory", function () {
   });
 
   it("returns full listing info and listed state", async function () {
-    const fixture = await loadFixture(deployStage2Fixture);
+    const fixture = await loadFixture(deployListingsFixture);
     const admin = fixture.admin;
     const registry = fixture.registry;
     const factory = fixture.factory;
@@ -121,7 +121,7 @@ describe("Stage 2 — Listings & Factory", function () {
   });
 
   it("enforces access control", async function () {
-    const fixture = await loadFixture(deployStage2Fixture);
+    const fixture = await loadFixture(deployListingsFixture);
     const admin = fixture.admin;
     const otherUser = fixture.otherUser;
     const registry = fixture.registry;
@@ -139,7 +139,7 @@ describe("Stage 2 — Listings & Factory", function () {
   });
 
   it("rejects symbols with lowercase letters", async function () {
-    const fixture = await loadFixture(deployStage2Fixture);
+    const fixture = await loadFixture(deployListingsFixture);
     const admin = fixture.admin;
     const factory = fixture.factory;
 
@@ -148,7 +148,7 @@ describe("Stage 2 — Listings & Factory", function () {
   });
 
   it("allows digits in symbols", async function () {
-    const fixture = await loadFixture(deployStage2Fixture);
+    const fixture = await loadFixture(deployListingsFixture);
     const admin = fixture.admin;
     const registry = fixture.registry;
     const factory = fixture.factory;

@@ -8,7 +8,7 @@ function quoteAmount(qty, priceCents) {
   return (qty * priceCents) / 100n;
 }
 
-async function deployStage55Fixture() {
+async function deployBuyExactQuoteFixture() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
   const maker1 = signers[1];
@@ -45,9 +45,9 @@ async function deployStage55Fixture() {
   return { admin, maker1, maker2, taker, ttoken, equity, dex };
 }
 
-describe("Stage 5.5 — buyExactQuote", function () {
+describe("buyExactQuote", function () {
   it("respects quote budget and refunds leftover", async function () {
-    const fixture = await loadFixture(deployStage55Fixture);
+    const fixture = await loadFixture(deployBuyExactQuoteFixture);
     const admin = fixture.admin;
     const maker1 = fixture.maker1;
     const taker = fixture.taker;
@@ -86,7 +86,7 @@ describe("Stage 5.5 — buyExactQuote", function () {
   });
 
   it("fills best price then FIFO", async function () {
-    const fixture = await loadFixture(deployStage55Fixture);
+    const fixture = await loadFixture(deployBuyExactQuoteFixture);
     const admin = fixture.admin;
     const maker1 = fixture.maker1;
     const maker2 = fixture.maker2;
@@ -119,7 +119,7 @@ describe("Stage 5.5 — buyExactQuote", function () {
   });
 
   it("stops when remaining quote too small to buy", async function () {
-    const fixture = await loadFixture(deployStage55Fixture);
+    const fixture = await loadFixture(deployBuyExactQuoteFixture);
     const admin = fixture.admin;
     const maker1 = fixture.maker1;
     const taker = fixture.taker;
@@ -146,7 +146,7 @@ describe("Stage 5.5 — buyExactQuote", function () {
   });
 
   it("reverts when no eligible sells", async function () {
-    const fixture = await loadFixture(deployStage55Fixture);
+    const fixture = await loadFixture(deployBuyExactQuoteFixture);
     const admin = fixture.admin;
     const maker1 = fixture.maker1;
     const taker = fixture.taker;

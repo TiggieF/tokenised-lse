@@ -9,7 +9,7 @@ function quoteAmount(qty, price) {
   return (qty * price) / 100n;
 }
 
-async function deployStage4Fixture() {
+async function deployOrderBookFixture() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
   const alice = signers[1];
@@ -47,9 +47,9 @@ async function deployStage4Fixture() {
   return { admin, alice, bob, carol, dave, ttoken, equity, dex };
 }
 
-describe("Stage 4 — OrderBookDEX", function () {
+describe("OrderBookDEX", function () {
   it("processes partial fills on buys", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -89,7 +89,7 @@ describe("Stage 4 — OrderBookDEX", function () {
   });
 
   it("enforces price-time priority on sells", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -133,7 +133,7 @@ describe("Stage 4 — OrderBookDEX", function () {
   });
 
   it("refunds remaining escrow on cancellation (buy)", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -171,7 +171,7 @@ describe("Stage 4 — OrderBookDEX", function () {
   });
 
   it("conserves balances across a trade", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -219,7 +219,7 @@ describe("Stage 4 — OrderBookDEX", function () {
   });
 
   it("blocks self matching orders", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const ttoken = fixture.ttoken;

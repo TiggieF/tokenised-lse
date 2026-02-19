@@ -5,7 +5,7 @@ const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 const ONE_SHARE = 10n ** 18n;
 const ONE_TTOKEN = 10n ** 18n;
 
-async function deployStage5Fixture() {
+async function deployDividendsFixture() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
   const alice = signers[1];
@@ -45,9 +45,9 @@ async function deployStage5Fixture() {
   return { admin, alice, bob, carol, ttoken, registry, equity, dividends };
 }
 
-describe("Stage 5 — Dividends", function () {
+describe("Dividends", function () {
   it("uses snapshot balances for claims", async function () {
-    const fixture = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployDividendsFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -74,7 +74,7 @@ describe("Stage 5 — Dividends", function () {
   });
 
   it("prevents double claims", async function () {
-    const fixture = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployDividendsFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const equity = fixture.equity;
@@ -92,7 +92,7 @@ describe("Stage 5 — Dividends", function () {
   });
 
   it("handles zero balance gracefully", async function () {
-    const fixture = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployDividendsFixture);
     const admin = fixture.admin;
     const carol = fixture.carol;
     const equity = fixture.equity;
@@ -107,7 +107,7 @@ describe("Stage 5 — Dividends", function () {
   });
 
   it("enforces minimum dividend per share", async function () {
-    const fixture = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployDividendsFixture);
     const admin = fixture.admin;
     const equity = fixture.equity;
     const dividends = fixture.dividends;
@@ -119,7 +119,7 @@ describe("Stage 5 — Dividends", function () {
   });
 
   it("uses current balance when a later snapshot has no direct account entry", async function () {
-    const fixture = await loadFixture(deployStage5Fixture);
+    const fixture = await loadFixture(deployDividendsFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;

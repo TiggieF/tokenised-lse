@@ -416,7 +416,7 @@
     ];
 
     function shortAddress(address) {
-      return String(address || "");
+      return String(address);
       // keep full address for transparency
     }
 
@@ -486,7 +486,11 @@
       divSymbol.innerHTML = "";
       merkleDivSymbol.innerHTML = "";
       levAdminSymbol.innerHTML = "";
-      for (const item of data.listings || []) {
+      let rows = [];
+      if (Array.isArray(data.listings)) {
+        rows = data.listings;
+      }
+      for (const item of rows) {
         const option = document.createElement("option");
         option.value = item.symbol;
         option.textContent = item.symbol;
@@ -508,7 +512,10 @@
       lifecycleTableBody.innerHTML = "";
       lifecycleSymbol.innerHTML = "";
       lifecycleBySymbol = {};
-      const rows = Array.isArray(data.symbols) ? data.symbols : [];
+      let rows = [];
+      if (Array.isArray(data.symbols)) {
+        rows = data.symbols;
+      }
       for (let i = 0; i < rows.length; i += 1) {
         const row = rows[i];
         lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
@@ -529,7 +536,7 @@
 
     async function changeSymbolLifecycle(action) {
       try {
-        const symbol = String(lifecycleSymbol.value || "").toUpperCase();
+        const symbol = String(lifecycleSymbol.value).toUpperCase();
         if (!symbol) {
           setLifecycleStatus("Select symbol first", true);
           return;
@@ -541,13 +548,25 @@
           body: JSON.stringify({ symbol }),
         });
         const data = await res.json();
+        let failed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Lifecycle update failed");
+          failed = true;
+        }
+        if (failed) {
+          let message = "Lifecycle update failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         setLifecycleStatus(`${symbol} set to ${data.status}`);
         await loadLifecycleTable();
       } catch (err) {
-        setLifecycleStatus(err.message || "Lifecycle update failed", true);
+        let message = "Lifecycle update failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setLifecycleStatus(message, true);
       }
     }
 
@@ -566,15 +585,21 @@
         if (status === "ACTIVE") {
           option.textContent = `${stock.name} (${stock.symbol}) — LISTED`;
           option.disabled = true;
-        } else if (status === "FROZEN" || status === "DELISTED") {
+        } else {
+          let statusIsRelistable = false;
+          if (status === "FROZEN" || status === "DELISTED") {
+            statusIsRelistable = true;
+          }
+          if (statusIsRelistable) {
           option.textContent = `${stock.name} (${stock.symbol}) — RELIST`;
           option.disabled = false;
           if (!firstRelistValue) {
             firstRelistValue = stock.symbol;
           }
-        } else {
-          option.textContent = `${stock.name} (${stock.symbol})`;
-          option.disabled = false;
+          } else {
+            option.textContent = `${stock.name} (${stock.symbol})`;
+            option.disabled = false;
+          }
         }
         if (!option.disabled && !firstUnlistedValue) {
           firstUnlistedValue = stock.symbol;
@@ -583,8 +608,7 @@
       }
       if (firstRelistValue) {
         listStock.value = firstRelistValue;
-      } else
-      if (firstUnlistedValue) {
+      } else if (firstUnlistedValue) {
         listStock.value = firstUnlistedValue;
       }
     }
@@ -602,20 +626,32 @@
           body: JSON.stringify(payload),
         });
         const data = await res.json();
+        let distributionFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Distribution failed");
+          distributionFailed = true;
+        }
+        if (distributionFailed) {
+          let message = "Distribution failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         setDivStatus(`Distributed for ${payload.symbol} Tx: ${data.txHash}`);
       } catch (err) {
-        setDivStatus(err.message || "Distribution failed", true);
+        let message = "Distribution failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setDivStatus(message, true);
       }
     }
 
     async function declareMerkleDividendAuto() {
       try {
         setMerkleDivStatus("Building snapshot and merkle tree");
-        const symbol = String(merkleDivSymbol.value || "").toUpperCase();
-        const divPerShare = String(merkleDivPerShare.value || "").trim();
+        const symbol = String(merkleDivSymbol.value).toUpperCase();
+        const divPerShare = String(merkleDivPerShare.value).trim();
         const payload = {
           symbol,
           divPerShare,
@@ -627,29 +663,52 @@
           body: JSON.stringify(payload),
         });
         const data = await res.json();
+        let failed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Auto merkle declaration failed");
+          failed = true;
+        }
+        if (failed) {
+          let message = "Auto merkle declaration failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         setMerkleDivStatus(`Merkle epoch ${data.epochId} auto-declared for ${data.symbol} Tx: ${data.txHash}`);
         await viewMerkleTree();
       } catch (err) {
-        setMerkleDivStatus(err.message || "Auto merkle declaration failed", true);
+        let message = "Auto merkle declaration failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setMerkleDivStatus(message, true);
       }
     }
 
     async function viewMerkleTree() {
       try {
-        const symbol = String(merkleDivSymbol.value || "").toUpperCase();
+        const symbol = String(merkleDivSymbol.value).toUpperCase();
         if (!symbol) {
           setMerkleDivStatus("Select symbol first", true);
           return;
         }
         const epochsRes = await fetch(`/api/dividends/merkle/epochs?symbol=${encodeURIComponent(symbol)}`);
         const epochsData = await epochsRes.json();
+        let epochsFailed = false;
         if (!epochsRes.ok || epochsData.error) {
-          throw new Error(epochsData.error || "Could not load merkle epochs");
+          epochsFailed = true;
         }
-        const rows = Array.isArray(epochsData.epochs) ? epochsData.epochs : [];
+        if (epochsFailed) {
+          let message = "Could not load merkle epochs";
+          if (epochsData.error) {
+            message = epochsData.error;
+          }
+          throw new Error(message);
+        }
+        let rows = [];
+        if (Array.isArray(epochsData.epochs)) {
+          rows = epochsData.epochs;
+        }
         if (rows.length === 0) {
           setMerkleDivStatus(`No merkle epochs found for ${symbol}`, true);
           merkleTreePreview.textContent = "";
@@ -665,18 +724,32 @@
         setMerkleDivStatus(`Loading tree for epoch ${epochId}`);
         const res = await fetch(`/api/dividends/merkle/tree?epochId=${encodeURIComponent(epochId)}`);
         const data = await res.json();
+        let treeViewFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Tree view failed");
+          treeViewFailed = true;
+        }
+        if (treeViewFailed) {
+          let message = "Tree view failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         const lines = [];
         lines.push(`${data.claimCount} users eligible for claims on ${data.symbol}`);
         lines.push(`Snapshot ${data.snapshotId}`);
         lines.push(``);
-        const levels = Array.isArray(data.levels) ? data.levels : [];
+        let levels = [];
+        if (Array.isArray(data.levels)) {
+          levels = data.levels;
+        }
         for (let i = 0; i < levels.length; i += 1) {
           const level = levels[i];
           lines.push(`Level ${level.level} size ${level.size}`);
-          const nodes = Array.isArray(level.nodes) ? level.nodes : [];
+          let nodes = [];
+          if (Array.isArray(level.nodes)) {
+            nodes = level.nodes;
+          }
           for (let j = 0; j < nodes.length; j += 1) {
             const node = nodes[j];
             lines.push(`  [${node.index}] ${node.hash}`);
@@ -685,30 +758,49 @@
         merkleTreePreview.textContent = lines.join("\n");
         setMerkleDivStatus(`Tree loaded for epoch ${epochId}`);
       } catch (err) {
-        setMerkleDivStatus(err.message || "Tree view failed", true);
+        let message = "Tree view failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setMerkleDivStatus(message, true);
       }
     }
 
     async function createListing() {
       try {
-        const symbol = String(listStock.value || "").toUpperCase().trim();
+        let listStockValue = "";
+        if (listStock.value) {
+          listStockValue = String(listStock.value);
+        }
+        const symbol = listStockValue.toUpperCase().trim();
         const selected = LISTABLE_STOCKS.find((s) => s.symbol === symbol);
         let name = symbol;
         if (selected) {
           name = selected.name;
         }
+        let missingListingInput = false;
         if (!symbol || !name) {
+          missingListingInput = true;
+        }
+        if (missingListingInput) {
           setListStatus("Please select a company", true);
           return;
         }
         const lifecycleRow = lifecycleBySymbol[symbol];
-        const lifecycleStatus = lifecycleRow ? String(lifecycleRow.status).toUpperCase() : "";
+        let lifecycleStatus = "";
+        if (lifecycleRow) {
+          lifecycleStatus = String(lifecycleRow.status).toUpperCase();
+        }
         if (listStock.selectedOptions[0] && listStock.selectedOptions[0].disabled && lifecycleStatus === "ACTIVE") {
           setListStatus(`${symbol} is already listed`, true);
           return;
         }
         let res;
+        let isRelistStatus = false;
         if (lifecycleStatus === "DELISTED" || lifecycleStatus === "FROZEN") {
+          isRelistStatus = true;
+        }
+        if (isRelistStatus) {
           setListStatus("Reactivating symbol");
           res = await fetch("/api/admin/symbols/list", {
             method: "POST",
@@ -724,10 +816,18 @@
           });
         }
         const data = await res.json();
+        let listingFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Listing failed");
+          listingFailed = true;
         }
-        if (lifecycleStatus === "DELISTED" || lifecycleStatus === "FROZEN") {
+        if (listingFailed) {
+          let message = "Listing failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
+        }
+        if (isRelistStatus) {
           setListStatus(`Relisted ${symbol}`);
         } else {
           setListStatus(`Listed ${symbol} Tx: ${data.txHash}`);
@@ -736,7 +836,11 @@
         await loadListableStocks();
         await loadDividendSymbols();
       } catch (err) {
-        setListStatus(err.message || "Listing failed", true);
+        let message = "Listing failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setListStatus(message, true);
       }
     }
 
@@ -751,12 +855,24 @@
           body: JSON.stringify({ baseSymbol, leverage }),
         });
         const data = await res.json();
+        let leveragedCreateFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Leveraged creation failed");
+          leveragedCreateFailed = true;
+        }
+        if (leveragedCreateFailed) {
+          let message = "Leveraged creation failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         setLeveragedStatus(`Created ${data.productSymbol} Tx: ${data.txHash}`);
       } catch (err) {
-        setLeveragedStatus(err.message || "Leveraged creation failed", true);
+        let message = "Leveraged creation failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setLeveragedStatus(message, true);
       }
     }
 
@@ -764,11 +880,23 @@
       try {
         const res = await fetch("/api/admin/award/session");
         const data = await res.json();
+        let loadAwardSessionFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Failed to load award session controls");
+          loadAwardSessionFailed = true;
+        }
+        if (loadAwardSessionFailed) {
+          let message = "Failed to load award session controls";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
 
-        awardNextWindow.value = String(data.nextAwardWindowSec || 60);
+        let nextAwardWindowValue = 60;
+        if (data.nextAwardWindowSec) {
+          nextAwardWindowValue = data.nextAwardWindowSec;
+        }
+        awardNextWindow.value = String(nextAwardWindowValue);
         if (data.terminateNextSession) {
           awardTerminateNext.value = "true";
         } else {
@@ -777,14 +905,18 @@
 
         let text = "Ready";
         if (Number(data.nextAwardWindowAppliesAtEpoch) >= 0) {
-          text = `Pending apply at epoch ${data.nextAwardWindowAppliesAtEpoch} with ${data.nextAwardWindowSec}s`;
+          text = ``;
           if (data.terminateNextSession) {
             text = `${text} and termination enabled`;
           }
         }
         setAwardSessionStatus(text);
       } catch (err) {
-        setAwardSessionStatus(err.message || "Failed to load award session controls", true);
+        let message = "Failed to load award session controls";
+        if (err.message) {
+          message = err.message;
+        }
+        setAwardSessionStatus(message, true);
       }
     }
 
@@ -799,8 +931,16 @@
           body: JSON.stringify({ nextAwardWindowSec, terminateNextSession }),
         });
         const data = await res.json();
+        let saveAwardSessionFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Failed to save next session controls");
+          saveAwardSessionFailed = true;
+        }
+        if (saveAwardSessionFailed) {
+          let message = "Failed to save next session controls";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         let text = `${data.nextAwardWindowSec}s`;
         if (data.terminateNextSession) {
@@ -808,7 +948,11 @@
         }
         setAwardSessionStatus(text);
       } catch (err) {
-        setAwardSessionStatus(err.message || "Failed to save next session controls", true);
+        let message = "Failed to save next session controls";
+        if (err.message) {
+          message = err.message;
+        }
+        setAwardSessionStatus(message, true);
       }
     }
 

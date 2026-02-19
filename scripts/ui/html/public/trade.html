@@ -272,7 +272,7 @@
         </select>
         <div class="stat-row">
           <span class="muted">Live price</span>
-          <strong>$412.50</strong>
+          <strong id="trade-live-price">-</strong>
         </div>
         <div class="stat-row">
           <span class="muted">Available TToken</span>
@@ -356,6 +356,7 @@
     // dom elements
     const tradeWallet = document.getElementById("trade-wallet");
     const tradeSymbol = document.getElementById("trade-symbol");
+    const tradeLivePriceEl = document.getElementById("trade-live-price");
     const buyPriceInput = document.getElementById("buy-price");
     const buyStatus = document.getElementById("buy-status");
     const buyButton = document.getElementById("buy-btn");
@@ -384,6 +385,8 @@
     let ttokenBalance = 0;
     let leveragedProducts = [];
     let lifecycleBySymbol = {};
+    let buyLimitPriceTouched = false;
+    let autoLimitPriceTouched = false;
 
     function setWalletAddress(address) {
       currentAccount = address;
@@ -478,7 +481,7 @@
         const item = leveragedProducts[i];
         const itemSymbol = String(item.productSymbol).toUpperCase();
         if (itemSymbol === selected) {
-          tokenAddress = String(item.token || "");
+          tokenAddress = String(item.token);
         }
       }
       if (tokenAddress) {
@@ -566,11 +569,14 @@
             pct = pctFromQuote * 100;
           }
         }
-        if (pct === null || !Number.isFinite(pct)) {
+        if (!Number.isFinite(pct)) {
           levBaseChangeEl.textContent = "-";
           levBaseChangeEl.className = "price-change neutral";
         } else {
-          const sign = pct > 0 ? "+" : "";
+          let sign = "";
+          if (pct > 0) {
+            sign = "+";
+          }
           levBaseChangeEl.textContent = `${sign}${pct.toFixed(2)}%`;
           if (pct > 0) {
             levBaseChangeEl.className = "price-change positive";
@@ -652,17 +658,18 @@
         return;
       }
       for (const item of listings) {
-        const symbol = String(item.symbol || "").toUpperCase();
-        if (!symbol) continue;
-        const opt = document.createElement("option");
-        opt.value = symbol;
-        opt.textContent = symbol;
-        tradeSymbol.appendChild(opt);
+        const symbol = String(item.symbol).toUpperCase();
+        if (symbol) {
+          const opt = document.createElement("option");
+          opt.value = symbol;
+          opt.textContent = symbol;
+          tradeSymbol.appendChild(opt);
+        }
       }
     }
 
     function getSymbolFromSelect() {
-      return String(tradeSymbol.value || "").toUpperCase();
+      return String(tradeSymbol.value).toUpperCase();
     }
 
     function parsePriceToCents(text) {
@@ -696,6 +703,43 @@
         maximumFractionDigits: 2,
       });
       estimatedCostEl.textContent = `${costText} TToken`;
+    }
+
+    function applyDefaultLimitPricesFromLive(livePrice) {
+      const formattedLivePrice = formatUsd(livePrice);
+      if (!buyLimitPriceTouched) {
+        buyPriceInput.value = formattedLivePrice;
+      }
+      if (!autoLimitPriceTouched) {
+        autoPriceInput.value = formattedLivePrice;
+      }
+      const currentValue = Number(buyQtyValue.textContent);
+      updateEstimatedCost(currentValue);
+    }
+
+    async function loadTradeLivePrice() {
+      const symbol = getSymbolFromSelect();
+      if (!symbol) {
+        tradeLivePriceEl.textContent = "-";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`);
+        const data = await res.json();
+        if (!res.ok) {
+          tradeLivePriceEl.textContent = "-";
+          return;
+        }
+        const livePrice = Number(data.price);
+        if (Number.isFinite(livePrice) && livePrice > 0) {
+          tradeLivePriceEl.textContent = formatUsd(livePrice);
+          applyDefaultLimitPricesFromLive(livePrice);
+          return;
+        }
+        tradeLivePriceEl.textContent = "-";
+      } catch {
+        tradeLivePriceEl.textContent = "-";
+      }
     }
 
     async function placeLimitOrder(symbol, side, priceCents, qty) {
@@ -742,33 +786,39 @@
         const res = await fetch(`/api/autotrade/rules?wallet=${encodeURIComponent(currentAccount)}`);
         const data = await res.json();
         autoRulesList.innerHTML = "";
-        const rows = Array.isArray(data.rules) ? data.rules : [];
+        let rows = [];
+        if (Array.isArray(data.rules)) {
+          rows = data.rules;
+        }
         for (let i = 0; i < rows.length; i += 1) {
           const row = rows[i];
-          if (String(row.side).toUpperCase() !== "BUY") {
-            continue;
+          let isBuySide = false;
+          if (String(row.side).toUpperCase() === "BUY") {
+            isBuySide = true;
           }
-          const block = document.createElement("div");
-          block.className = "stat-row";
-          const left = document.createElement("span");
-          left.className = "muted";
-          left.textContent = `${row.symbol} <= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
-          const rightButton = document.createElement("button");
-          rightButton.className = "btn btn-buy";
-          rightButton.style.padding = "6px 10px";
-          rightButton.style.fontSize = "12px";
-          rightButton.textContent = "Cancel";
-          rightButton.addEventListener("click", async () => {
-            await fetch("/api/autotrade/rules/delete", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ruleId: row.id }),
+          if (isBuySide) {
+            const block = document.createElement("div");
+            block.className = "stat-row";
+            const left = document.createElement("span");
+            left.className = "muted";
+            left.textContent = `${row.symbol} <= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
+            const rightButton = document.createElement("button");
+            rightButton.className = "btn btn-buy";
+            rightButton.style.padding = "6px 10px";
+            rightButton.style.fontSize = "12px";
+            rightButton.textContent = "Cancel";
+            rightButton.addEventListener("click", async () => {
+              await fetch("/api/autotrade/rules/delete", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ruleId: row.id }),
+              });
+              await loadAutoRules();
             });
-            await loadAutoRules();
-          });
-          block.appendChild(left);
-          block.appendChild(rightButton);
-          autoRulesList.appendChild(block);
+            block.appendChild(left);
+            block.appendChild(rightButton);
+            autoRulesList.appendChild(block);
+          }
         }
       } catch {
         autoRulesList.innerHTML = "";
@@ -782,7 +832,10 @@
       if (row && row.status) {
         lifecycle = String(row.status).toUpperCase();
       }
-      const blocked = lifecycle === "FROZEN" || lifecycle === "DELISTED";
+      let blocked = false;
+      if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+        blocked = true;
+      }
       if (blocked) {
         adminLockBanner.style.display = "block";
         adminLockBanner.textContent = `${symbol} is ${lifecycle} by admin. Buying is disabled`;
@@ -790,15 +843,22 @@
         adminLockBanner.style.display = "none";
         adminLockBanner.textContent = "";
       }
-      buyButton.style.display = blocked ? "none" : "block";
-      autoButton.style.display = blocked ? "none" : "block";
+      let displayMode = "block";
+      if (blocked) {
+        displayMode = "none";
+      }
+      buyButton.style.display = displayMode;
+      autoButton.style.display = displayMode;
     }
 
     async function loadLifecycleStatuses() {
       try {
         const res = await fetch("/api/admin/symbols/status");
         const data = await res.json();
-        const rows = Array.isArray(data.symbols) ? data.symbols : [];
+        let rows = [];
+        if (Array.isArray(data.symbols)) {
+          rows = data.symbols;
+        }
         lifecycleBySymbol = {};
         for (let i = 0; i < rows.length; i += 1) {
           const row = rows[i];
@@ -823,18 +883,20 @@
     }
 
     function prettyTxError(rawMessage) {
-      const text = String(rawMessage || "");
+      const text = String(rawMessage);
       if (text.includes("0xe450d38c") || text.includes("ERC20InsufficientBalance")) {
         return "Insufficient TToken balance";
       }
       if (text.includes("0xfb8f41b2") || text.includes("ERC20InsufficientAllowance")) {
         return "TToken allowance is not enough";
       }
-      if (text.includes("price unavailable")) {
-        return "Base price unavailable please wait for oracle update";
-      }
-      if (text.includes("product not found")) {
-        return "Leveraged product not found";
+      switch (true) {
+        case text.includes("price unavailable"):
+          return "Base price unavailable please wait for oracle update";
+        case text.includes("product not found"):
+          return "Leveraged product not found";
+        default:
+          break;
       }
       return text;
     }
@@ -859,29 +921,33 @@
       autoPanel.classList.remove("panel-hidden");
     }
 
-    modeBuy.addEventListener("click", () => {
+    modeBuy.addEventListener("click", function () {
       setMode("buy");
     });
 
-    modeAuto.addEventListener("click", () => {
+    modeAuto.addEventListener("click", function () {
       setMode("auto");
     });
 
-    buyMinusButton.addEventListener("click", () => {
+    buyMinusButton.addEventListener("click", function () {
       const currentValue = Number(buyQtyValue.textContent);
       const nextValue = currentValue - 100;
       updateBuyQty(nextValue);
     });
 
-    buyPlusButton.addEventListener("click", () => {
+    buyPlusButton.addEventListener("click", function () {
       const currentValue = Number(buyQtyValue.textContent);
       const nextValue = currentValue + 100;
       updateBuyQty(nextValue);
     });
 
-    buyPriceInput.addEventListener("input", () => {
+    buyPriceInput.addEventListener("input", function () {
+      buyLimitPriceTouched = true;
       const currentValue = Number(buyQtyValue.textContent);
       updateEstimatedCost(currentValue);
+    });
+    autoPriceInput.addEventListener("input", function () {
+      autoLimitPriceTouched = true;
     });
 
     buyButton.addEventListener("click", async () => {
@@ -891,7 +957,11 @@
       if (lifecycleRow && lifecycleRow.status) {
         lifecycle = String(lifecycleRow.status).toUpperCase();
       }
+      let blocked = false;
       if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+        blocked = true;
+      }
+      if (blocked) {
         showNoFunds(buyStatus);
         buyStatus.textContent = `${symbol} is ${lifecycle} by admin`;
         return;
@@ -921,7 +991,11 @@
       if (lifecycleRow && lifecycleRow.status) {
         lifecycle = String(lifecycleRow.status).toUpperCase();
       }
+      let blocked = false;
       if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+        blocked = true;
+      }
+      if (blocked) {
         showNoFunds(autoStatus);
         autoStatus.textContent = `${symbol} is ${lifecycle} by admin`;
         return;
@@ -950,20 +1024,27 @@
       const data = await res.json();
       if (!res.ok) {
         showNoFunds(autoStatus);
-        autoStatus.textContent = data.error || "Rule create failed";
+        let message = "Rule create failed";
+        if (data.error) {
+          message = data.error;
+        }
+        autoStatus.textContent = message;
         return;
       }
       showStatus(autoStatus, "Auto buy rule set");
       await loadAutoRules();
     });
 
-    levProduct.addEventListener("change", async () => {
+    levProduct.addEventListener("change", async function () {
       getSelectedLeveragedSymbol();
       updateSelectedLeveragedTokenAddressHint();
       await loadLeveragedBaseQuote();
     });
-    tradeSymbol.addEventListener("change", () => {
+    tradeSymbol.addEventListener("change", function () {
+      buyLimitPriceTouched = false;
+      autoLimitPriceTouched = false;
       updateLifecycleUi();
+      loadTradeLivePrice();
     });
 
 
@@ -1007,6 +1088,7 @@
       await loadListedSymbols();
       await loadLifecycleStatuses();
       await loadLeveragedProducts();
+      await loadTradeLivePrice();
       updateBuyQty(100);
       const accounts = await window.ethereum.request(
         {
@@ -1018,13 +1100,14 @@
       await loadAutoRules();
       await loadLeveragedBaseQuote();
     })();
-    window.ethereum.on("accountsChanged", (accounts) => {
+    window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
       loadTTokenBalance();
       loadAutoRules();
       loadLeveragedBaseQuote();
     });
     setInterval(loadLifecycleStatuses, 5000);
+    setInterval(loadTradeLivePrice, 1000);
   </script>
 </body>
 </html>

@@ -82,7 +82,10 @@ async function main() {
   );
   await dex.waitForDeployment();
 
-  const apiKey = process.env.FINNHUB_API_KEY || "d4699t1r01qj716fvnmgd4699t1r01qj716fvnn0";
+  let apiKey = "d4699t1r01qj716fvnmgd4699t1r01qj716fvnn0";
+  if (process.env.FINNHUB_API_KEY) {
+    apiKey = process.env.FINNHUB_API_KEY;
+  }
   const finnhubSymbol = "AAPL";
   const quote = await fetchFinnhubQuote(finnhubSymbol, apiKey);
 

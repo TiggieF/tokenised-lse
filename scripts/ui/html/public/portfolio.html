@@ -259,7 +259,7 @@
     </table>
 
     <div class="section-header">
-      <h2 class="section-title">Leveraged Positions</h2>
+      <h2 class="section-title">Leveraged Tokens</h2>
       <div id="leveraged-status" class="status">Ready</div>
     </div>
     <table>
@@ -268,7 +268,7 @@
           <th>Product</th>
           <th>Live Price</th>
           <th>Qty</th>
-          <th>Avg Entry NAV (value of one unit)</th>
+          <th>Avg Entry (value of one unit)</th>
           <th>Current Value</th>
           <th>Action</th>
         </tr>
@@ -369,6 +369,14 @@
       return `$${num.toFixed(2)}`;
     }
 
+    function formatEthFromWei(valueWei) {
+      const num = Number(valueWei) / 1e18;
+      if (!Number.isFinite(num) || num < 0) {
+        return "0.000000 ETH";
+      }
+      return `${num.toFixed(6)} ETH`;
+    }
+
     function renderSummary(summary) {
       const totalValueWei = BigInt(String(summary.totalValueWei));
       const totalCostBasisWei = BigInt(String(summary.totalCostBasisWei));
@@ -379,6 +387,7 @@
         ["Leveraged Value", formatUsdFromWei(summary.leveragedValueWei)],
         ["Total Value", formatUsdFromWei(summary.totalValueWei)],
         ["Cost Basis", formatUsdFromWei(summary.totalCostBasisWei)],
+        ["Overall Gas Used", formatEthFromWei(summary.overallGasCostWei)],
         // ["Profit", formatUsdFromWeiExact(profitWei.toString())],
       ];
       summaryGrid.innerHTML = "";
@@ -452,8 +461,11 @@
 
     async function claimDividend(row) {
       try {
-        const symbol = String(row.symbol || "").toUpperCase();
-        const claimType = String(row.claimType || "SNAPSHOT").toUpperCase();
+        const symbol = String(row.symbol).toUpperCase();
+        let claimType = String(row.claimType).toUpperCase();
+        if (!claimType) {
+          claimType = "SNAPSHOT";
+        }
         dividendsStatus.textContent = `Claiming ${symbol} dividend`;
         let res;
         if (claimType === "MERKLE") {
@@ -477,8 +489,15 @@
           });
         }
         const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error);
+        let failed = false;
+        if (!res.ok) {
+          failed = true;
+        }
+        if (data.error) {
+          failed = true;
+        }
+        if (failed) {
+          throw new Error(String(data.error));
         }
         dividendsStatus.textContent = `Claimed ${symbol}. Tx: ${data.txHash}`;
         await refreshPortfolio();
@@ -520,8 +539,12 @@
           actionTd.className = "muted";
         }
 
+        let merkleTag = "";
+        if (row.claimType === "MERKLE") {
+          merkleTag = "(M)";
+        }
         tr.innerHTML = `
-          <td>${row.symbol} ${row.claimType === "MERKLE" ? "(M)" : ""}</td>
+          <td>${row.symbol} ${merkleTag}</td>
           <td>${formatWeiToToken(row.claimableWei, 2)}</td>
         `;
         tr.appendChild(actionTd);
@@ -558,13 +581,28 @@
           }),
         });
         const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error || "Sell failed");
+        let failed = false;
+        if (!res.ok) {
+          failed = true;
+        }
+        if (data.error) {
+          failed = true;
+        }
+        if (failed) {
+          let message = "Sell failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         leveragedStatus.textContent = `Sold ${productSymbol} Tx: ${data.txHash}`;
         await refreshPortfolio();
       } catch (err) {
-        leveragedStatus.textContent = err.message || "Sell failed";
+        let message = "Sell failed";
+        if (err.message) {
+          message = err.message;
+        }
+        leveragedStatus.textContent = message;
       }
     }
 
@@ -572,7 +610,7 @@
       leveragedBody.innerHTML = "";
       if (!items.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="6" class="muted">No leveraged positions</td>';
+        tr.innerHTML = '<td colspan="6" class="muted">Nothing here yet</td>';
         leveragedBody.appendChild(tr);
         return;
       }
@@ -590,7 +628,11 @@
           try {
             await sellLeveragedPosition(item.productSymbol, item.qtyWei);
           } catch (err) {
-            leveragedStatus.textContent = err.message || "Sell failed";
+            let message = "Sell failed";
+            if (err.message) {
+              message = err.message;
+            }
+            leveragedStatus.textContent = message;
           }
         });
 
@@ -628,19 +670,36 @@
       const claimablesData = await claimablesRes.json();
       const leveragedData = await leveragedRes.json();
       const lifecycleData = await lifecycleRes.json();
-      const lifecycleRows = Array.isArray(lifecycleData.symbols) ? lifecycleData.symbols : [];
+      let lifecycleRows = [];
+      if (Array.isArray(lifecycleData.symbols)) {
+        lifecycleRows = lifecycleData.symbols;
+      }
       lifecycleBySymbol = {};
       for (let i = 0; i < lifecycleRows.length; i += 1) {
         const row = lifecycleRows[i];
         lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
       }
 
-      if (!summaryRes.ok || summaryData.error) {
-        holdingsStatus.textContent = summaryData.error;
+      let summaryFailed = false;
+      if (!summaryRes.ok) {
+        summaryFailed = true;
+      }
+      if (summaryData.error) {
+        summaryFailed = true;
+      }
+      if (summaryFailed) {
+        holdingsStatus.textContent = String(summaryData.error);
         return;
       }
-      if (!positionsRes.ok || positionsData.error) {
-        holdingsStatus.textContent = positionsData.error;
+      let positionsFailed = false;
+      if (!positionsRes.ok) {
+        positionsFailed = true;
+      }
+      if (positionsData.error) {
+        positionsFailed = true;
+      }
+      if (positionsFailed) {
+        holdingsStatus.textContent = String(positionsData.error);
         return;
       }
 
@@ -688,7 +747,7 @@
 
     refreshBtn.addEventListener("click", refreshPortfolio);
 
-    window.ethereum.on("accountsChanged", (accounts) => {
+    window.ethereum.on("accountsChanged", function (accounts) {
       currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
       refreshPortfolio();
@@ -701,7 +760,10 @@
       try {
         const lifecycleRes = await fetch("/api/admin/symbols/status");
         const lifecycleData = await lifecycleRes.json();
-        const rows = Array.isArray(lifecycleData.symbols) ? lifecycleData.symbols : [];
+        let rows = [];
+        if (Array.isArray(lifecycleData.symbols)) {
+          rows = lifecycleData.symbols;
+        }
         lifecycleBySymbol = {};
         for (let i = 0; i < rows.length; i += 1) {
           const row = rows[i];

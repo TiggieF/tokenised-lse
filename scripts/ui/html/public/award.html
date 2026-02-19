@@ -250,7 +250,10 @@
 
     async function claimEpoch(epochId) {
       try {
-        const wallet = String(currentWallet || "").trim();
+        let wallet = "";
+        if (currentWallet) {
+          wallet = String(currentWallet).trim();
+        }
         if (!wallet) {
           return;
         }
@@ -261,7 +264,11 @@
         });
         const data = await res.json();
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Claim failed");
+          let errorMessage = "Claim failed";
+          if (data && data.error) {
+            errorMessage = data.error;
+          }
+          throw new Error(errorMessage);
         }
         await refreshAward();
       } catch (err) {
@@ -277,16 +284,35 @@
             currentWallet = chooseDisplayAccount(accounts);
           }
         }
-        const wallet = String(currentWallet || "").trim();
+        let wallet = "";
+        if (currentWallet) {
+          wallet = String(currentWallet).trim();
+        }
         const limit = CLAIMABLE_WINDOW;
         const statusRes = await fetch("/api/award/status");
         const statusData = await statusRes.json();
         if (!statusRes.ok || statusData.error) {
-          throw new Error(statusData.error || "status failed");
+          let statusError = "status failed";
+          if (statusData && statusData.error) {
+            statusError = statusData.error;
+          }
+          throw new Error(statusError);
         }
-        currentEpochId = Number(statusData.currentEpoch || 0);
-        liveSecondsRemaining = Number(statusData.secondsRemaining || 0);
-        liveEpochDurationSec = Number(statusData.epochDurationSec || 60);
+        let nextEpochIdValue = 0;
+        if (statusData.currentEpoch) {
+          nextEpochIdValue = statusData.currentEpoch;
+        }
+        currentEpochId = Number(nextEpochIdValue);
+        let nextSecondsRemaining = 0;
+        if (statusData.secondsRemaining) {
+          nextSecondsRemaining = statusData.secondsRemaining;
+        }
+        liveSecondsRemaining = Number(nextSecondsRemaining);
+        let nextEpochDuration = 60;
+        if (statusData.epochDurationSec) {
+          nextEpochDuration = statusData.epochDurationSec;
+        }
+        liveEpochDurationSec = Number(nextEpochDuration);
         liveSessionTerminated = Boolean(statusData.sessionTerminated);
         lastStatusSyncAtMs = Date.now();
         if (!Number.isFinite(currentEpochId) || currentEpochId < 0) {
@@ -334,7 +360,11 @@
         if (claimableRes && (!claimableRes.ok || claimableData.error)) {
           throw new Error(claimableData.error);
         }
-        leadingVolumeEl.textContent = weiToShares(leaderboardData.maxQtyWei || "0", 2);
+        let maxQtyWei = "0";
+        if (leaderboardData.maxQtyWei) {
+          maxQtyWei = leaderboardData.maxQtyWei;
+        }
+        leadingVolumeEl.textContent = weiToShares(maxQtyWei, 2);
 
         leaderboardBody.innerHTML = "";
         const boardRows = Array.isArray(leaderboardData.items) ? leaderboardData.items : [];
