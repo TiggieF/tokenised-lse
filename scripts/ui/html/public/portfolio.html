@@ -222,7 +222,6 @@
     </div>
 
     <div class="summary-grid" id="summary-grid"></div>
-    <div id="drift-status" class="status status-ok"></div>
     <div id="market-alert" class="market-alert" style="display:none"></div>
 
     <div class="section-header">
@@ -267,7 +266,7 @@
         <tr>
           <th>Product</th>
           <th>Live Price</th>
-          <th>Qty</th>
+          <th>% Change vs Avg</th>
           <th>Avg Entry (value of one unit)</th>
           <th>Current Value</th>
           <th>Action</th>
@@ -285,7 +284,6 @@
     const holdingsStatus = document.getElementById("holdings-status");
     const dividendsStatus = document.getElementById("dividends-status");
     const leveragedStatus = document.getElementById("leveraged-status");
-    const driftStatus = document.getElementById("drift-status");
     const marketAlert = document.getElementById("market-alert");
     const refreshBtn = document.getElementById("refresh-btn");
     const leveragedBody = document.getElementById("leveraged-body");
@@ -294,6 +292,26 @@
     let currentWallet = "";
     let pollingEnabled = false;
     let poller;
+    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+
+    async function ensureSepoliaNetwork() {
+      const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (chainId === SEPOLIA_CHAIN_ID_HEX) {
+        return;
+      }
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+        });
+      } catch (err) {
+        throw new Error("Please switch MetaMask network to Sepolia");
+      }
+      const after = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (after !== SEPOLIA_CHAIN_ID_HEX) {
+        throw new Error("MetaMask network is not Sepolia");
+      }
+    }
 
     function isValidWalletAddress(value) {
       if (!value) {
@@ -331,6 +349,44 @@
         }
       }
       return "";
+    }
+
+    async function waitForWalletReceipt(txHash) {
+      for (let i = 0; i < 120; i += 1) {
+        const receipt = await window.ethereum.request({
+          method: "eth_getTransactionReceipt",
+          params: [txHash],
+        });
+        if (receipt) {
+          return receipt;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error(`tx not mined yet: ${txHash}`);
+    }
+
+    async function submitPreparedTxs(txs) {
+      if (!Array.isArray(txs) || txs.length === 0) {
+        throw new Error("No transactions prepared");
+      }
+      await ensureSepoliaNetwork();
+      let lastTxHash = "";
+      for (let i = 0; i < txs.length; i += 1) {
+        const tx = txs[i];
+        const txParams = {
+          from: currentWallet,
+          to: tx.to,
+          data: tx.data,
+          chainId: SEPOLIA_CHAIN_ID_HEX,
+        };
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [txParams],
+        });
+        await waitForWalletReceipt(txHash);
+        lastTxHash = txHash;
+      }
+      return lastTxHash;
     }
 
     function formatWeiToToken(valueWei, digits = 4) {
@@ -381,6 +437,8 @@
       const totalValueWei = BigInt(String(summary.totalValueWei));
       const totalCostBasisWei = BigInt(String(summary.totalCostBasisWei));
       const profitWei = totalValueWei - totalCostBasisWei;
+      const nativeSymbol = summary.nativeSymbol ? String(summary.nativeSymbol) : "SepoliaETH";
+      const nativeEthWei = summary.nativeEthWei ? summary.nativeEthWei : "0";
       const cards = [
         ["Cash", formatUsdFromWei(summary.cashValueWei)],
         ["Stock Value", formatUsdFromWei(summary.stockValueWei)],
@@ -388,6 +446,7 @@
         ["Total Value", formatUsdFromWei(summary.totalValueWei)],
         ["Cost Basis", formatUsdFromWei(summary.totalCostBasisWei)],
         ["Overall Gas Used", formatEthFromWei(summary.overallGasCostWei)],
+        [nativeSymbol, formatEthFromWei(nativeEthWei)],
         // ["Profit", formatUsdFromWeiExact(profitWei.toString())],
       ];
       summaryGrid.innerHTML = "";
@@ -473,6 +532,7 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              clientSign: true,
               wallet: currentWallet,
               account: currentWallet,
               epochId: row.epochId,
@@ -485,7 +545,7 @@
           res = await fetch("/api/dividends/claim", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ wallet: currentWallet, symbol, epochId: row.epochId }),
+            body: JSON.stringify({ clientSign: true, wallet: currentWallet, symbol, epochId: row.epochId }),
           });
         }
         const data = await res.json();
@@ -499,7 +559,11 @@
         if (failed) {
           throw new Error(String(data.error));
         }
-        dividendsStatus.textContent = `Claimed ${symbol}. Tx: ${data.txHash}`;
+        let txHash = data.txHash;
+        if (data.clientSign && Array.isArray(data.txs)) {
+          txHash = await submitPreparedTxs(data.txs);
+        }
+        dividendsStatus.textContent = `Claimed ${symbol}. Tx: ${txHash}`;
         await refreshPortfolio();
       } catch (err) {
         dividendsStatus.textContent = err.message;
@@ -574,6 +638,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            clientSign: true,
             wallet: currentWallet,
             productSymbol: productSymbol,
             qtyWei: qtyWei,
@@ -595,7 +660,11 @@
           }
           throw new Error(message);
         }
-        leveragedStatus.textContent = `Sold ${productSymbol} Tx: ${data.txHash}`;
+        let txHash = data.txHash;
+        if (data.clientSign && Array.isArray(data.txs)) {
+          txHash = await submitPreparedTxs(data.txs);
+        }
+        leveragedStatus.textContent = `Sold ${productSymbol} Tx: ${txHash}`;
         await refreshPortfolio();
       } catch (err) {
         let message = "Sell failed";
@@ -638,10 +707,50 @@
 
         actionWrap.appendChild(sellBtn);
         actionTd.appendChild(actionWrap);
+        const leverage = Number(item.leverage);
+        let changePct = null;
+        const livePrice = Number(item.navCents) / 100;
+        const avgEntry = Number(item.avgEntryPriceCents) / 100;
+        if (
+          Number.isFinite(livePrice)
+          && livePrice > 0
+          && Number.isFinite(avgEntry)
+          && avgEntry > 0
+          && Number.isFinite(leverage)
+          && leverage > 0
+        ) {
+          changePct = (((livePrice - avgEntry) / avgEntry) * leverage) * 100;
+        } else {
+          const baseChangeRaw = item.baseChangePct;
+          const baseChangePct = (typeof baseChangeRaw === "number" && Number.isFinite(baseChangeRaw))
+            ? baseChangeRaw
+            : NaN;
+          if (Number.isFinite(baseChangePct)) {
+            if (Number.isFinite(leverage) && leverage > 0) {
+              changePct = baseChangePct * leverage;
+            } else {
+              changePct = baseChangePct;
+            }
+          }
+        }
+        let changeClass = "gain neutral";
+        let changeText = "-";
+        if (Number.isFinite(changePct)) {
+          if (changePct > 0) {
+            changeClass = "gain positive";
+            changeText = `+${changePct.toFixed(2)}%`;
+          } else if (changePct < 0) {
+            changeClass = "gain negative";
+            changeText = `${changePct.toFixed(2)}%`;
+          } else {
+            changeClass = "gain neutral";
+            changeText = "0.00%";
+          }
+        }
         tr.innerHTML = `
           <td>${item.productSymbol}</td>
-          <td>${formatCents(item.basePriceCents)}</td>
-          <td>${formatWeiToToken(item.qtyWei, 6)}</td>
+          <td>${formatCents(item.navCents)}</td>
+          <td class="${changeClass}">${changeText}</td>
           <td>${formatCents(item.avgEntryPriceCents)}</td>
           <td>${formatUsdFromWei(item.currentValueWei)}</td>
         `;
@@ -653,6 +762,12 @@
     async function refreshPortfolio() {
       if (!isValidWalletAddress(currentWallet)) {
         holdingsStatus.textContent = "Wallet not connected";
+        return;
+      }
+      try {
+        await ensureSepoliaNetwork();
+      } catch (err) {
+        holdingsStatus.textContent = err.message ? String(err.message) : "Please switch to Sepolia";
         return;
       }
       holdingsStatus.textContent = "Loading";
@@ -708,24 +823,6 @@
       renderMarketAlert(positionsData.positions);
       renderClaimables(claimablesData.claimables);
       renderLeveragedPositions(leveragedData.positions);
-      if (summaryData.drift) {
-        if (summaryData.drift.withinTolerance) {
-          driftStatus.className = "status status-ok";
-          driftStatus.textContent = "Rebuild vs aggregator: in sync";
-        } else {
-          driftStatus.className = "status status-warn";
-          const cashDrift = formatUsdFromWei(summaryData.drift.cashDeltaWei);
-          const stockDrift = formatUsdFromWei(summaryData.drift.stockDeltaWei);
-          const totalDrift = formatUsdFromWei(summaryData.drift.totalDeltaWei);
-          driftStatus.textContent =
-            `Drift detected: cash ${cashDrift}, `
-            + `stock ${stockDrift}, `
-            + `total ${totalDrift}`;
-        }
-      } else {
-        driftStatus.className = "status";
-        driftStatus.textContent = "";
-      }
       holdingsStatus.textContent = ``;
       holdingsStatus.textContent = ``;
       // Loaded ${positionsData.positions.length} positions
@@ -752,8 +849,12 @@
       walletEl.textContent = `Wallet: ${currentWallet}`;
       refreshPortfolio();
     });
+    window.ethereum.on("chainChanged", function () {
+      refreshPortfolio();
+    });
 
     (async function init() {
+      await ensureSepoliaNetwork();
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;

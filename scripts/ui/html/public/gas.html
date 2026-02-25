@@ -171,7 +171,7 @@
       <thead>
         <tr>
           <th>Tx</th>
-          <th>Gas</th>
+          <th>Quantity</th>
           <th>Cost Eth</th>
         </tr>
       </thead>
@@ -188,6 +188,47 @@
     const connectionEl = document.getElementById('connection');
     const connectionDotEl = document.getElementById('connection-dot');
     const statusEl = document.getElementById('status');
+    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+    let currentWallet = "";
+
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
+          }
+        }
+      }
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
+    async function ensureSepoliaNetwork() {
+      const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (chainId === SEPOLIA_CHAIN_ID_HEX) {
+        return;
+      }
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+        });
+      } catch {
+        throw new Error("Please switch MetaMask network to Sepolia");
+      }
+    }
     const hiddenTxNames = [
       'list_symbol',
       'mint_equity_for_seller_setup',
@@ -263,14 +304,19 @@
       for (let i = 0; i < visibleRows.length; i += 1) {
         const row = visibleRows[i];
         const displayName = getTxDisplayName(row.txName);
-        html += `<tr><td class="mono">${displayName}</td><td>${row.gasUsed}</td><td>${row.costEth}</td></tr>`;
+        const qtyText = row.qtyText ? String(row.qtyText) : "-";
+        html += `<tr><td class="mono">${displayName}</td><td>${qtyText}</td><td>${row.costEth}</td></tr>`;
       }
       rowsEl.innerHTML = html;
     }
 
     async function refreshLatest() {
       try {
-        const res = await fetch('/api/gas/latest');
+        let query = '';
+        if (currentWallet) {
+          query = `?wallet=${encodeURIComponent(currentWallet)}`;
+        }
+        const res = await fetch(`/api/gas/latest${query}`);
         const data = await res.json();
 
         if (!res.ok || !data || !data.report) {
@@ -287,8 +333,30 @@
       }
     }
 
-    refreshLatest();
-    setInterval(refreshLatest, 1500);
+    if (window.ethereum) {
+      window.ethereum.on("accountsChanged", async (accounts) => {
+        currentWallet = chooseDisplayAccount(accounts);
+        await refreshLatest();
+      });
+      window.ethereum.on("chainChanged", async () => {
+        await refreshLatest();
+      });
+    }
+
+    (async function init() {
+      try {
+        if (window.ethereum) {
+          await ensureSepoliaNetwork();
+          const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+          currentWallet = chooseDisplayAccount(accounts);
+        }
+      } catch (err) {
+        setConnected(false);
+        setStatus(err.message ? String(err.message) : "Wallet unavailable", "error");
+      }
+      await refreshLatest();
+      setInterval(refreshLatest, 3000);
+    })();
   </script>
 </body>
 </html>

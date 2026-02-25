@@ -204,6 +204,26 @@
     let liveSessionTerminated = false;
     let lastStatusSyncAtMs = 0;
     let statusTicker = null;
+    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+
+    async function ensureSepoliaNetwork() {
+      const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (chainId === SEPOLIA_CHAIN_ID_HEX) {
+        return;
+      }
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+        });
+      } catch (err) {
+        throw new Error("Please switch MetaMask network to Sepolia");
+      }
+      const after = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (after !== SEPOLIA_CHAIN_ID_HEX) {
+        throw new Error("MetaMask network is not Sepolia");
+      }
+    }
 
     function weiToToken(wei, decimals = 2) {
       const num = Number(wei) / 1e18;
@@ -239,8 +259,47 @@
       return "";
     }
 
+    async function waitForWalletReceipt(txHash) {
+      for (let i = 0; i < 120; i += 1) {
+        const receipt = await window.ethereum.request({
+          method: "eth_getTransactionReceipt",
+          params: [txHash],
+        });
+        if (receipt) {
+          return receipt;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error(`tx not mined yet: ${txHash}`);
+    }
+
+    async function submitPreparedTxs(txs) {
+      if (!Array.isArray(txs) || txs.length === 0) {
+        throw new Error("No transactions prepared");
+      }
+      await ensureSepoliaNetwork();
+      let lastTxHash = "";
+      for (let i = 0; i < txs.length; i += 1) {
+        const tx = txs[i];
+        const txParams = {
+          from: currentWallet,
+          to: tx.to,
+          data: tx.data,
+          chainId: SEPOLIA_CHAIN_ID_HEX,
+        };
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [txParams],
+        });
+        await waitForWalletReceipt(txHash);
+        lastTxHash = txHash;
+      }
+      return lastTxHash;
+    }
+
     async function loadWallet() {
       if (window.ethereum) {
+        await ensureSepoliaNetwork();
         const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
         if (accounts && accounts.length > 0) {
           currentWallet = chooseDisplayAccount(accounts);
@@ -260,7 +319,7 @@
         const res = await fetch("/api/award/claim", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wallet, epochId }),
+          body: JSON.stringify({ wallet, epochId, clientSign: true }),
         });
         const data = await res.json();
         if (!res.ok || data.error) {
@@ -269,6 +328,9 @@
             errorMessage = data.error;
           }
           throw new Error(errorMessage);
+        }
+        if (data.clientSign && Array.isArray(data.txs)) {
+          await submitPreparedTxs(data.txs);
         }
         await refreshAward();
       } catch (err) {
@@ -343,13 +405,21 @@
           leaderboardEpoch = 0;
         }
 
-        const leaderboardRes = await fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`);
+        let leaderboardRes = null;
         let claimableRes = null;
         if (wallet) {
-          claimableRes = await fetch(`/api/award/claimable?wallet=${encodeURIComponent(wallet)}&limit=${encodeURIComponent(limit)}`);
+          [leaderboardRes, claimableRes] = await Promise.all([
+            fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`),
+            fetch(`/api/award/claimable?wallet=${encodeURIComponent(wallet)}&limit=${encodeURIComponent(limit)}`),
+          ]);
+        } else {
+          leaderboardRes = await fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`);
         }
-        const leaderboardData = await leaderboardRes.json();
+        let leaderboardData = { items: [] };
         let claimableData = { items: [] };
+        if (leaderboardRes) {
+          leaderboardData = await leaderboardRes.json();
+        }
         if (claimableRes) {
           claimableData = await claimableRes.json();
         }
@@ -436,6 +506,9 @@
         if (!currentWallet) {
           currentWallet = "";
         }
+        refreshAward();
+      });
+      window.ethereum.on("chainChanged", () => {
         refreshAward();
       });
     }

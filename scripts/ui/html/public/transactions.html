@@ -217,6 +217,8 @@
     let currentType = "ALL";
     let nextCursor = null;
     let currentItems = [];
+    let txRequestSerial = 0;
+    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
     const PAGE_SIZE = 50;
     const usTimeFormatter = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
@@ -229,6 +231,25 @@
       hour12: true,
       timeZoneName: "short",
     });
+
+    async function ensureSepoliaNetwork() {
+      const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (chainId === SEPOLIA_CHAIN_ID_HEX) {
+        return;
+      }
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+        });
+      } catch (err) {
+        throw new Error("Please switch MetaMask network to Sepolia");
+      }
+      const after = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (after !== SEPOLIA_CHAIN_ID_HEX) {
+        throw new Error("MetaMask network is not Sepolia");
+      }
+    }
 
     function setStatus(text, toneInput) {
       let tone = toneInput;
@@ -298,6 +319,44 @@
       return "";
     }
 
+    async function waitForWalletReceipt(txHash) {
+      for (let i = 0; i < 120; i += 1) {
+        const receipt = await window.ethereum.request({
+          method: "eth_getTransactionReceipt",
+          params: [txHash],
+        });
+        if (receipt) {
+          return receipt;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error(`tx not mined yet: ${txHash}`);
+    }
+
+    async function submitPreparedTxs(txs) {
+      if (!Array.isArray(txs) || txs.length === 0) {
+        throw new Error("No transactions prepared");
+      }
+      await ensureSepoliaNetwork();
+      let lastTxHash = "";
+      for (let i = 0; i < txs.length; i += 1) {
+        const tx = txs[i];
+        const txParams = {
+          from: currentWallet,
+          to: tx.to,
+          data: tx.data,
+          chainId: SEPOLIA_CHAIN_ID_HEX,
+        };
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [txParams],
+        });
+        await waitForWalletReceipt(txHash);
+        lastTxHash = txHash;
+      }
+      return lastTxHash;
+    }
+
     function formatCentsToTTokenPerUnit(priceCents) {
       const cents = Number(priceCents);
       if (!Number.isFinite(cents)) {
@@ -358,7 +417,7 @@
         const response = await fetch("/api/orders/cancel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wallet: currentWallet, orderId }),
+          body: JSON.stringify({ wallet: currentWallet, orderId, clientSign: true }),
         });
         const data = await response.json();
         let failed = false;
@@ -371,6 +430,9 @@
             message = data.error;
           }
           throw new Error(message);
+        }
+        if (data.clientSign && Array.isArray(data.txs)) {
+          await submitPreparedTxs(data.txs);
         }
         setStatus(`Cancelled order #${orderId}`, "ok");
         await loadTransactions();
@@ -440,16 +502,27 @@
         append = true;
       }
       if (!currentWallet) return;
+      const requestSerial = ++txRequestSerial;
+      const requestType = currentType;
       try {
         setStatus("Loading");
+        if (!append) {
+          rowsEl.innerHTML = '<tr><td colspan="6">Loading</td></tr>';
+        }
         let cursorParam = "";
         if (append && nextCursor) {
           cursorParam = `&cursor=${encodeURIComponent(nextCursor)}`;
         }
         const response = await fetch(
-          `/api/txs?wallet=${encodeURIComponent(currentWallet)}&type=${encodeURIComponent(currentType)}&limit=${PAGE_SIZE}${cursorParam}`
+          `/api/txs?wallet=${encodeURIComponent(currentWallet)}&type=${encodeURIComponent(requestType)}&limit=${PAGE_SIZE}${cursorParam}`
         );
         const data = await response.json();
+        if (requestSerial !== txRequestSerial) {
+          return;
+        }
+        if (requestType !== currentType) {
+          return;
+        }
         let failed = false;
         if (!response.ok || data.error) {
           failed = true;
@@ -464,6 +537,9 @@
         let batch = [];
         if (Array.isArray(data.items)) {
           batch = data.items;
+        }
+        if (requestType === "LEVERAGE") {
+          batch = batch.filter((row) => String(row.kind).startsWith("LEVERAGE_"));
         }
         if (append) {
           currentItems = currentItems.concat(batch);
@@ -487,6 +563,9 @@
         // setStatus(`Loaded ${loadedCount}/${totalCount} items  Synced block: ${syncedBlock}`, "ok");
 
       } catch (err) {
+        if (requestSerial !== txRequestSerial) {
+          return;
+        }
         let message = "Failed to load transactions";
         if (err.message) {
           message = err.message;
@@ -535,6 +614,11 @@
         currentItems = [];
         await loadTransactions({ append: false });
       });
+      window.ethereum.on("chainChanged", async () => {
+        nextCursor = null;
+        currentItems = [];
+        await loadTransactions({ append: false });
+      });
     }
 
     (async function init() {
@@ -542,6 +626,7 @@
         setStatus("Wallet provider not found", "error");
         return;
       }
+      await ensureSepoliaNetwork();
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       currentWallet = chooseDisplayAccount(accounts);
       let walletText = currentWallet;

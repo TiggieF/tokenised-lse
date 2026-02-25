@@ -235,7 +235,7 @@
         </div>
         <div class="stat-row">
           <span class="muted">Owned</span>
-          <strong>100.00</strong>
+          <strong id="sell-owned">0.00</strong>
         </div>
         <div class="stat-row">
           <span class="muted">Live price</span>
@@ -243,7 +243,7 @@
         </div>
         <div class="stat-row">
           <span class="muted">Estimated value</span>
-          <strong>$412,500.00</strong>
+          <strong id="sell-estimated-value">$0.00</strong>
         </div>
       </div>
 
@@ -255,12 +255,12 @@
         </div>
         <div class="qty">
           <button type="button">-</button>
-          <div>100</div>
+          <div>10</div>
           <button type="button">+</button>
         </div>
         <div class="stat-row">
           <span class="muted">Estimated proceeds</span>
-          <strong id="estimated-proceeds">$412,500.00</strong>
+          <strong id="estimated-proceeds">$0.00</strong>
           <!-- estimated cost -->
         </div>
         <div class="actions">
@@ -277,7 +277,7 @@
         </div>
         <div class="input-row">
           <label>Order size</label>
-          <input type="text" id="auto-qty" value="100" />
+          <input type="text" id="auto-qty" value="10" />
         </div>
         <div class="actions">
           <button class="btn btn-auto" id="auto-sell-btn" type="button">Set Auto Sell</button>
@@ -302,16 +302,44 @@
     const sellMinusButton = sellQtyButtons[0];
     const sellPlusButton = sellQtyButtons[1];
     const estimatedProceedsEl = document.getElementById("estimated-proceeds");
+    const sellOwnedEl = document.getElementById("sell-owned");
+    const sellEstimatedValueEl = document.getElementById("sell-estimated-value");
     const autoPriceInput = document.getElementById("auto-price");
     const autoQtyInput = document.getElementById("auto-qty");
     const autoButton = document.getElementById("auto-sell-btn");
     const autoStatus = document.getElementById("auto-status");
     const autoRulesList = document.getElementById("auto-rules-list");
     const adminLockBanner = document.getElementById("admin-lock-banner");
+    const symbolTitle = document.getElementById("symbol-title");
+    const symbolLabel = document.getElementById("symbol-label");
+    const params = new URLSearchParams(window.location.search);
+    const symbol = params.get("symbol");
     let currentAccount = "";
     let symbolLifecycle = "ACTIVE";
     let sellLimitPriceTouched = false;
     let autoSellLimitPriceTouched = false;
+    let ownedQty = 0;
+    let livePrice = 0;
+    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+
+    async function ensureSepoliaNetwork() {
+      const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (chainId === SEPOLIA_CHAIN_ID_HEX) {
+        return;
+      }
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+        });
+      } catch (err) {
+        throw new Error("Please switch MetaMask network to Sepolia");
+      }
+      const after = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (after !== SEPOLIA_CHAIN_ID_HEX) {
+        throw new Error("MetaMask network is not Sepolia");
+      }
+    }
 
     function setWalletAddress(address) {
       currentAccount = address;
@@ -341,6 +369,44 @@
         return String(accounts[0]);
       }
       return "";
+    }
+
+    async function waitForWalletReceipt(txHash) {
+      for (let i = 0; i < 120; i += 1) {
+        const receipt = await window.ethereum.request({
+          method: "eth_getTransactionReceipt",
+          params: [txHash],
+        });
+        if (receipt) {
+          return receipt;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error(`tx not mined yet: ${txHash}`);
+    }
+
+    async function submitPreparedTxs(txs) {
+      if (!Array.isArray(txs) || txs.length === 0) {
+        throw new Error("No transactions prepared");
+      }
+      await ensureSepoliaNetwork();
+      let lastTxHash = "";
+      for (let i = 0; i < txs.length; i += 1) {
+        const tx = txs[i];
+        const txParams = {
+          from: currentAccount,
+          to: tx.to,
+          data: tx.data,
+          chainId: SEPOLIA_CHAIN_ID_HEX,
+        };
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [txParams],
+        });
+        await waitForWalletReceipt(txHash);
+        lastTxHash = txHash;
+      }
+      return lastTxHash;
     }
 
     const modeSell = document.getElementById("mode-sell");
@@ -376,10 +442,15 @@
     function updateSellQty(nextValue) {
       let value = Number(nextValue);
       if (Number.isNaN(value)) {
-        value = 100;
+        value = 10;
       }
-      if (value < 100) {
-        value = 100;
+      value = Math.floor(value);
+      const maxSellQty = Math.floor(Math.max(0, ownedQty));
+      if (value < 10) {
+        value = 10;
+      }
+      if (maxSellQty >= 10 && value > maxSellQty) {
+        value = maxSellQty;
       }
       sellQtyValue.textContent = String(value);
       updateEstimatedProceeds(value);
@@ -400,9 +471,55 @@
     function formatUsd(value) {
       const numberValue = Number(value);
       if (Number.isFinite(numberValue)) {
-        return `$${numberValue.toFixed(2)}`;
+        return `$${numberValue.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
       }
       return "-";
+    }
+
+    function updateOwnedUi() {
+      sellOwnedEl.textContent = ownedQty.toFixed(2);
+      const estimatedValue = ownedQty * livePrice;
+      sellEstimatedValueEl.textContent = formatUsd(estimatedValue);
+      const maxSellQty = Math.floor(Math.max(0, ownedQty));
+      const currentQty = Number(sellQtyValue.textContent);
+      if (!Number.isFinite(currentQty) || currentQty > maxSellQty) {
+        updateSellQty(maxSellQty);
+      } else {
+        updateEstimatedProceeds(currentQty);
+      }
+    }
+
+    async function loadOwnedBalance() {
+      if (!currentAccount) {
+        ownedQty = 0;
+        updateOwnedUi();
+        return;
+      }
+      try {
+        const symbol = String(symbolLabel.textContent).toUpperCase();
+        const res = await fetch(`/api/equity/balances?address=${encodeURIComponent(currentAccount)}`);
+        const data = await res.json();
+        let nextOwned = 0;
+        if (res.ok && Array.isArray(data.balances)) {
+          for (let i = 0; i < data.balances.length; i += 1) {
+            const row = data.balances[i];
+            if (String(row.symbol).toUpperCase() === symbol) {
+              const qty = Number(row.balanceWei) / 1e18;
+              if (Number.isFinite(qty) && qty > 0) {
+                nextOwned = qty;
+              }
+              break;
+            }
+          }
+        }
+        ownedQty = nextOwned;
+      } catch {
+        ownedQty = 0;
+      }
+      updateOwnedUi();
     }
 
     function applyDefaultSellPricesFromLive(livePrice) {
@@ -430,27 +547,33 @@
           sellLivePriceEl.textContent = "-";
           return;
         }
-        const livePrice = Number(data.price);
-        if (Number.isFinite(livePrice) && livePrice > 0) {
-          sellLivePriceEl.textContent = formatUsd(livePrice);
-          applyDefaultSellPricesFromLive(livePrice);
+        const nextLivePrice = Number(data.price);
+        if (Number.isFinite(nextLivePrice) && nextLivePrice > 0) {
+          sellLivePriceEl.textContent = formatUsd(nextLivePrice);
+          applyDefaultSellPricesFromLive(nextLivePrice);
+          livePrice = nextLivePrice;
+          updateOwnedUi();
           return;
         }
+        livePrice = 0;
+        updateOwnedUi();
         sellLivePriceEl.textContent = "-";
       } catch {
+        livePrice = 0;
+        updateOwnedUi();
         sellLivePriceEl.textContent = "-";
       }
     }
 
     sellMinusButton.addEventListener("click", function () {
       const currentValue = Number(sellQtyValue.textContent);
-      const nextValue = currentValue - 100;
+      const nextValue = currentValue - 10;
       updateSellQty(nextValue);
     });
 
     sellPlusButton.addEventListener("click", function () {
       const currentValue = Number(sellQtyValue.textContent);
-      const nextValue = currentValue + 100;
+      const nextValue = currentValue + 10;
       updateSellQty(nextValue);
     });
 
@@ -464,24 +587,29 @@
     });
 
     (async function () {
+      await ensureSepoliaNetwork();
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",
         }
       );
       setWalletAddress(chooseDisplayAccount(accounts));
+      await loadOwnedBalance();
+      await loadSellLivePrice();
       await loadAutoRules();
-      updateSellQty(100);
     })();
     window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
+      loadOwnedBalance();
+      loadSellLivePrice();
       loadAutoRules();
     });
-
-    const symbolTitle = document.getElementById("symbol-title");
-    const symbolLabel = document.getElementById("symbol-label");
-    const params = new URLSearchParams(window.location.search);
-    const symbol = params.get("symbol");
+    window.ethereum.on("chainChanged", function () {
+      loadOwnedBalance();
+      loadAutoRules();
+      loadSellLivePrice();
+      loadLifecycleForCurrentSymbol();
+    });
 
     if (symbol) {
       symbolTitle.textContent = `(${symbol})`;
@@ -490,7 +618,7 @@
       symbolTitle.textContent = "(AAPL)";
       symbolLabel.textContent = "AAPL";
     }
-    loadSellLivePrice();
+    updateOwnedUi();
 
     function updateLifecycleUi() {
       let blocked = false;
@@ -640,7 +768,7 @@
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify({ ...payload, clientSign: true }),
         }
       );
       const data = await res.json(
@@ -651,6 +779,10 @@
           errorText = String(data.error);
         }
         throw new Error(errorText);
+      }
+      if (data.clientSign && Array.isArray(data.txs)) {
+        const txHash = await submitPreparedTxs(data.txs);
+        return txHash;
       }
       return data.txHash;
     }
@@ -667,7 +799,20 @@
       try {
         const priceCents = parsePriceToCents(sellPriceInput.value);
         const qtyText = document.querySelector("#sell-panel + .card .qty div").textContent;
-        const qty = Number(qtyText);
+        const qty = Math.floor(Number(qtyText));
+        const maxSellQty = Math.floor(Math.max(0, ownedQty));
+        if (!Number.isFinite(qty) || qty < 10) {
+          sellStatus.textContent = "Quantity must be at least 10";
+          return;
+        }
+        if (qty % 10 !== 0) {
+          sellStatus.textContent = "Quantity must be in steps of 10";
+          return;
+        }
+        if (qty > maxSellQty) {
+          sellStatus.textContent = `Quantity exceeds owned (${maxSellQty})`;
+          return;
+        }
         sellStatus.textContent = "Submitting";
         const hash = await placeLimitOrder("SELL", priceCents, qty);
         sellStatus.textContent = `Order placed: ${String(hash)}`;
@@ -690,7 +835,17 @@
         return;
       }
       const priceCents = parsePriceToCents(autoPriceInput.value);
-      const qtyWei = tokenTextToWei(autoQtyInput.value);
+      const autoQtyRaw = Number(autoQtyInput.value);
+      const autoQty = Math.floor(autoQtyRaw);
+      if (!Number.isFinite(autoQty) || autoQty < 10) {
+        autoStatus.textContent = "Order size must be at least 10";
+        return;
+      }
+      if (autoQty % 10 !== 0) {
+        autoStatus.textContent = "Order size must be in steps of 10";
+        return;
+      }
+      const qtyWei = tokenTextToWei(String(autoQty));
       autoStatus.textContent = "Submitting";
       const res = await fetch("/api/autotrade/rules/create", {
         method: "POST",

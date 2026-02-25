@@ -31,20 +31,92 @@ if (process.env.FMP_API_KEY) {
   FMP_API_KEY = process.env.FMP_API_KEY;
 }
 let HARDHAT_RPC_URL = 'http://127.0.0.1:8545';
+if (process.env.RPC_URL) {
+  HARDHAT_RPC_URL = process.env.RPC_URL;
+}
 if (process.env.HARDHAT_RPC_URL) {
   HARDHAT_RPC_URL = process.env.HARDHAT_RPC_URL;
 }
-const FMP_INDEX_SYMBOLS = [
-  '^GSPC',
-  '^IXIC',
-  '^DJI',
-  '^RUT',
-  '^VIX',
-  '^N225',
-  '^FTSE',
-  '^GDAXI',
-  '^FCHI',
-  '^HSI',
+let DEPLOYMENTS_NETWORK = 'localhost';
+if (process.env.DEFAULT_NETWORK) {
+  DEPLOYMENTS_NETWORK = process.env.DEFAULT_NETWORK;
+}
+if (process.env.DEPLOYMENTS_NETWORK) {
+  DEPLOYMENTS_NETWORK = process.env.DEPLOYMENTS_NETWORK;
+}
+const NETWORK_NAME = String(DEPLOYMENTS_NETWORK || '').toLowerCase();
+const DEFAULT_ENABLE_BACKGROUND = NETWORK_NAME !== 'sepolia';
+const ENABLE_AUTOTRADE = process.env.ENABLE_AUTOTRADE
+  ? String(process.env.ENABLE_AUTOTRADE).toLowerCase() === 'true'
+  : DEFAULT_ENABLE_BACKGROUND;
+const ENABLE_GAS_PACK = process.env.ENABLE_GAS_PACK
+  ? String(process.env.ENABLE_GAS_PACK).toLowerCase() === 'true'
+  : DEFAULT_ENABLE_BACKGROUND;
+let DEPLOYMENTS_FILE = path.join(__dirname, '../../..', 'deployments', `${DEPLOYMENTS_NETWORK}.json`);
+if (process.env.DEPLOYMENTS_FILE) {
+  DEPLOYMENTS_FILE = process.env.DEPLOYMENTS_FILE;
+}
+const RPC_SIGNERS = new Map();
+let RPC_RELAYER_SIGNER = null;
+const RPC_PROVIDER = new ethers.JsonRpcProvider(HARDHAT_RPC_URL);
+function addRpcSigner(privateKeyRaw) {
+  let privateKey = '';
+  if (privateKeyRaw) {
+    privateKey = String(privateKeyRaw).trim();
+  }
+  if (!privateKey) {
+    return;
+  }
+  try {
+    const wallet = new ethers.Wallet(privateKey, RPC_PROVIDER);
+    RPC_SIGNERS.set(wallet.address.toLowerCase(), wallet);
+  } catch {
+  }
+}
+if (process.env.TX_SIGNER_PRIVATE_KEYS) {
+  const all = String(process.env.TX_SIGNER_PRIVATE_KEYS)
+    .split(',')
+    .map((one) => one.trim())
+    .filter(Boolean);
+  for (let i = 0; i < all.length; i += 1) {
+    addRpcSigner(all[i]);
+  }
+}
+if (process.env.DEPLOYER_PRIVATE_KEY) {
+  addRpcSigner(process.env.DEPLOYER_PRIVATE_KEY);
+}
+if (process.env.MINTER_PRIVATE_KEY) {
+  addRpcSigner(process.env.MINTER_PRIVATE_KEY);
+}
+if (process.env.RPC_RELAYER_PRIVATE_KEY) {
+  try {
+    RPC_RELAYER_SIGNER = new ethers.Wallet(String(process.env.RPC_RELAYER_PRIVATE_KEY).trim(), RPC_PROVIDER);
+    RPC_SIGNERS.set(RPC_RELAYER_SIGNER.address.toLowerCase(), RPC_RELAYER_SIGNER);
+  } catch {
+    RPC_RELAYER_SIGNER = null;
+  }
+}
+const FMP_US_TOP_SYMBOLS = [
+  'AAPL',
+  'MSFT',
+  'NVDA',
+  'AMZN',
+  'GOOGL',
+  'META',
+  'TSLA',
+  'BRK-B',
+  'AVGO',
+  'JPM',
+  'WMT',
+  'LLY',
+  'V',
+  'XOM',
+  'MA',
+  'UNH',
+  'JNJ',
+  'COST',
+  'PG',
+  'HD',
 ];
 // link to hardhat
 
@@ -66,8 +138,16 @@ const TZ = 'America/New_York';
 
 function pick(obj, keys) {
   // pick first existing key from keys in obj
+  if (!obj || typeof obj !== 'object') {
+    return undefined;
+  }
   for (const k of keys) {
-    return obj[k];
+    if (Object.prototype.hasOwnProperty.call(obj, k)) {
+      const value = obj[k];
+      if (value !== undefined && value !== null) {
+        return value;
+      }
+    }
   }
   return undefined;
 }
@@ -90,6 +170,24 @@ async function fetchFmpJson(url) {
   }
 }
 // connec to fmp
+
+async function fetchFmpSpotPrice(symbolRaw) {
+  const symbol = String(symbolRaw).toUpperCase().trim();
+  if (!symbol) {
+    return 0;
+  }
+  const url = getFmpUrl('quote', { symbol });
+  const payload = await fetchFmpJson(url);
+  let quote = payload;
+  if (Array.isArray(payload)) {
+    quote = payload[0];
+  }
+  const price = asNumber(pick(quote || {}, ['price', 'regularMarketPrice']));
+  if (Number.isFinite(price) && price > 0) {
+    return price;
+  }
+  return 0;
+}
 
 function getFmpUrl(pathname, params) {
   const url = new URL(`https://financialmodelingprep.com/stable/${pathname}`);
@@ -180,6 +278,7 @@ const aggregatorInterface = new ethers.Interface([
 ]);
 const priceFeedInterface = new ethers.Interface([
   'function getPrice(string symbol) view returns (uint256 priceCents, uint256 timestamp)',
+  'function isFresh(string symbol) view returns (bool)',
 ]);
 const priceFeedAdminInterface = new ethers.Interface([
   'function setPrice(string symbol, uint256 priceCents)',
@@ -214,21 +313,104 @@ const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
 const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
 const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
 const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
-const AUTOTRADE_POLL_INTERVAL_MS = 3000;
+const MERKLE_HOLDER_SCAN_STATE_FILE = path.join(DIVIDENDS_MERKLE_DIR, 'holder-scan-state.json');
+const MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS = (() => {
+  const raw = Number(process.env.MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS || '');
+  if (Number.isFinite(raw) && raw >= 0) {
+    return Math.floor(raw);
+  }
+  return 2;
+})();
+const MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS = (() => {
+  const raw = Number(process.env.MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS || '');
+  if (Number.isFinite(raw) && raw >= 0) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 5000;
+  }
+  return 0;
+})();
+const MIN_STOCK_QTY_UNITS = 10;
+const AUTOTRADE_POLL_INTERVAL_MS = (() => {
+  const raw = Number(process.env.AUTOTRADE_POLL_INTERVAL_MS || '');
+  if (Number.isFinite(raw) && raw >= 1000) {
+    return Math.floor(raw);
+  }
+  return 3000;
+})();
 const GAS_WARN_THRESHOLD_PCT = 15;
-const GAS_AUTO_RUN_INTERVAL_MS = 60000;
+const GAS_AUTO_RUN_INTERVAL_MS = (() => {
+  const raw = Number(process.env.GAS_AUTO_RUN_INTERVAL_MS || '');
+  if (Number.isFinite(raw) && raw >= 1000) {
+    return Math.floor(raw);
+  }
+  return 60000;
+})();
 const GAS_PAGE_POLL_MS = 1500;
+const INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS = (() => {
+  const raw = Number(process.env.INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS || '');
+  if (Number.isFinite(raw) && raw >= 1) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 300;
+  }
+  return 5000;
+})();
+const GET_LOGS_BLOCK_RANGE = (() => {
+  const raw = Number(process.env.GET_LOGS_BLOCK_RANGE || '');
+  if (Number.isFinite(raw) && raw >= 1) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 10;
+  }
+  return 2000;
+})();
+const INDEXER_ENABLE_TRANSFERS = process.env.INDEXER_ENABLE_TRANSFERS
+  ? String(process.env.INDEXER_ENABLE_TRANSFERS).toLowerCase() === 'true'
+  : NETWORK_NAME !== 'sepolia';
+const INDEXER_ENABLE_LEVERAGED = process.env.INDEXER_ENABLE_LEVERAGED
+  ? String(process.env.INDEXER_ENABLE_LEVERAGED).toLowerCase() === 'true'
+  : true;
+const TXS_ENABLE_LEVERAGE_FALLBACK_SCAN = process.env.TXS_ENABLE_LEVERAGE_FALLBACK_SCAN
+  ? String(process.env.TXS_ENABLE_LEVERAGE_FALLBACK_SCAN).toLowerCase() === 'true'
+  : false;
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
 let autoTradeLoopBusy = false;
+let autoTradeLoopStartedAtMs = 0;
 let gasRunInFlight = null;
 const gasRuntimeState = {
   lastRunAtMs: 0,
   latest: null,
   baseline: {},
 };
+const AWARD_CACHE_TTL_MS = 3000;
+const awardCache = {
+  status: null,
+  leaderboard: new Map(),
+  claimable: new Map(),
+};
 const txReceiptGasCache = new Map();
+const signerTxQueues = new Map();
+
+async function enqueueSignerSend(address, job) {
+  const key = String(address || '').toLowerCase();
+  const previous = signerTxQueues.get(key) || Promise.resolve();
+  const next = previous.catch(() => {}).then(job);
+  signerTxQueues.set(key, next);
+  try {
+    const result = await next;
+    return result;
+  } finally {
+    if (signerTxQueues.get(key) === next) {
+      signerTxQueues.delete(key);
+    }
+  }
+}
 
 async function ensureContract(address) {
   const code = await hardhatRpc('eth_getCode', [address, 'latest']);
@@ -237,8 +419,7 @@ async function ensureContract(address) {
 
 // load deployment and get token addresses from local file
 function loadDeployments() {
-  const deploymentsPath = path.join(__dirname, '../../..', 'deployments', 'localhost.json');
-  const raw = fs.readFileSync(deploymentsPath, 'utf8');
+  const raw = fs.readFileSync(DEPLOYMENTS_FILE, 'utf8');
   return JSON.parse(raw);
 }
 
@@ -296,48 +477,663 @@ function parseRpcInt(value) {
   return 0;
 }
 
-// connect to hardhat and contracts
-async function hardhatRpc(method, params = []) {
-  const res = await fetch(HARDHAT_RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-  });
-  const payload = await res.json();
-  let hasHttpError = false;
-  let hasRpcError = false;
-  if (!res.ok) {
-    hasHttpError = true;
+function toOptionalBigInt(value) {
+  if (value === undefined || value === null) {
+    return undefined;
   }
-  if (payload.error) {
-    hasRpcError = true;
+  try {
+    return BigInt(value);
+  } catch {
+    return undefined;
   }
-  let hasAnyError = false;
-  if (hasHttpError) {
-    hasAnyError = true;
-  }
-  if (hasRpcError) {
-    hasAnyError = true;
-  }
-  if (hasAnyError) {
-    let msg = `Hardhat RPC ${res.status}`;
-    if (payload.error && payload.error.message) {
-      msg = payload.error.message;
-    }
-    throw new Error(msg);
-  }
-  return payload.result;
 }
 
-async function waitForReceipt(txHash, maxTries = 20) {
+function toOptionalNumber(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const parsed = parseRpcInt(value);
+  if (Number.isFinite(parsed)) {
+    return parsed;
+  }
+  return undefined;
+}
+
+function wantsClientSign(body) {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+  if (body.clientSign === true) {
+    return true;
+  }
+  if (String(body.clientSign || '').toLowerCase() === 'true') {
+    return true;
+  }
+  return false;
+}
+
+async function rpcRequest(method, params = []) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      const res = await fetch(HARDHAT_RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      });
+      const text = await res.text();
+      if (res.status === 429) {
+        let retryAfterSec = 0;
+        try {
+          const retryHeader = res.headers.get('retry-after');
+          if (retryHeader) {
+            const parsedRetry = Number(retryHeader);
+            if (Number.isFinite(parsedRetry) && parsedRetry > 0) {
+              retryAfterSec = parsedRetry;
+            }
+          }
+        } catch {
+        }
+        let msg = 'RPC rate limit (status 429)';
+        if (retryAfterSec > 0) {
+          msg += ` retry-after=${retryAfterSec}s`;
+        }
+        throw new Error(msg);
+      }
+      let payload = null;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new Error(`RPC non-JSON response (status ${res.status}): ${String(text).slice(0, 160)}`);
+      }
+      let hasHttpError = false;
+      let hasRpcError = false;
+      if (!res.ok) {
+        hasHttpError = true;
+      }
+      if (payload.error) {
+        hasRpcError = true;
+      }
+      let hasAnyError = false;
+      if (hasHttpError) {
+        hasAnyError = true;
+      }
+      if (hasRpcError) {
+        hasAnyError = true;
+      }
+      if (hasAnyError) {
+        let msg = `RPC ${res.status}`;
+        if (payload.error && payload.error.message) {
+          msg = payload.error.message;
+        }
+        throw new Error(msg);
+      }
+      return payload.result;
+    } catch (err) {
+      lastError = err;
+      const message = String(err && err.message ? err.message : err);
+      const retryable = isRpcRateLimitError(message)
+        || message.includes('RPC non-JSON response')
+        || message.includes('Unexpected end of JSON input');
+      if (!retryable || attempt >= 9) {
+        throw err;
+      }
+      let waitMs = 250 * (attempt + 1);
+      if (isRpcRateLimitError(message)) {
+        waitMs = Math.min(10000, 1000 * (attempt + 1));
+      }
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error('RPC request failed');
+}
+
+async function sendSignedRpcTransaction(txRequest) {
+  if (!txRequest || typeof txRequest !== 'object') {
+    throw new Error('invalid transaction input');
+  }
+  let from = '';
+  if (txRequest.from) {
+    from = normalizeAddress(String(txRequest.from));
+  }
+  let signer = null;
+  if (from) {
+    signer = RPC_SIGNERS.get(from.toLowerCase()) || null;
+  }
+  if (!signer && !from && RPC_RELAYER_SIGNER) {
+    signer = RPC_RELAYER_SIGNER;
+  }
+  if (!signer && RPC_RELAYER_SIGNER) {
+    const relayerAddress = RPC_RELAYER_SIGNER.address.toLowerCase();
+    if (from.toLowerCase() === relayerAddress) {
+      signer = RPC_RELAYER_SIGNER;
+    }
+  }
+  if (!signer) {
+    throw new Error(`cannot sign tx for ${from || 'unknown sender'}; add key in TX_SIGNER_PRIVATE_KEYS`);
+  }
+
+  const tx = {};
+  if (txRequest.to) {
+    tx.to = txRequest.to;
+  }
+  if (txRequest.data) {
+    tx.data = txRequest.data;
+  }
+  if (txRequest.value !== undefined) {
+    tx.value = toOptionalBigInt(txRequest.value);
+  }
+  if (txRequest.gas !== undefined) {
+    tx.gasLimit = toOptionalBigInt(txRequest.gas);
+  }
+  if (txRequest.gasLimit !== undefined) {
+    tx.gasLimit = toOptionalBigInt(txRequest.gasLimit);
+  }
+  if (txRequest.gasPrice !== undefined) {
+    tx.gasPrice = toOptionalBigInt(txRequest.gasPrice);
+  }
+  if (txRequest.maxFeePerGas !== undefined) {
+    tx.maxFeePerGas = toOptionalBigInt(txRequest.maxFeePerGas);
+  }
+  if (txRequest.maxPriorityFeePerGas !== undefined) {
+    tx.maxPriorityFeePerGas = toOptionalBigInt(txRequest.maxPriorityFeePerGas);
+  }
+  if (txRequest.nonce !== undefined) {
+    tx.nonce = toOptionalNumber(txRequest.nonce);
+  }
+  if (txRequest.chainId !== undefined) {
+    tx.chainId = toOptionalNumber(txRequest.chainId);
+  }
+
+  const txHash = await enqueueSignerSend(signer.address, async () => {
+    const txResponse = await signer.sendTransaction(tx);
+    return txResponse.hash;
+  });
+  return txHash;
+}
+
+// connect to rpc and contracts
+async function hardhatRpc(method, params = []) {
+  if (method === 'eth_sendTransaction') {
+    try {
+      return await rpcRequest(method, params);
+    } catch (error) {
+      const txRequest = Array.isArray(params) ? params[0] : null;
+      if (!txRequest) {
+        throw error;
+      }
+      return sendSignedRpcTransaction(txRequest);
+    }
+  }
+  return rpcRequest(method, params);
+}
+
+async function canServerSendFromAddress(addressRaw) {
+  const address = normalizeAddress(addressRaw);
+  if (!address) {
+    return false;
+  }
+  if (RPC_SIGNERS.has(address.toLowerCase())) {
+    return true;
+  }
+  try {
+    const accounts = await rpcRequest('eth_accounts', []);
+    if (Array.isArray(accounts)) {
+      for (let i = 0; i < accounts.length; i += 1) {
+        const account = normalizeAddress(accounts[i]);
+        if (account && account.toLowerCase() === address.toLowerCase()) {
+          return true;
+        }
+      }
+    }
+  } catch {
+  }
+  return false;
+}
+
+async function waitForReceipt(txHash, maxTries = 120, pollMs = 1000) {
   for (let i = 0; i < maxTries; i += 1) {
     const receipt = await hardhatRpc('eth_getTransactionReceipt', [txHash]);
     if (receipt) {
       return receipt;
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
   throw new Error(`tx not mined yet: ${txHash}`);
+}
+
+function parseMaxGetLogsRangeFromError(messageRaw) {
+  const message = String(messageRaw || '');
+  const direct = message.match(/up to a\s+(\d+)\s+block range/i);
+  if (direct && direct[1]) {
+    const parsed = Number(direct[1]);
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      return Math.floor(parsed);
+    }
+  }
+  const hint = message.match(/\[(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\]/);
+  if (hint && hint[1] && hint[2]) {
+    const start = parseInt(hint[1], 16);
+    const end = parseInt(hint[2], 16);
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+      return (end - start) + 1;
+    }
+  }
+  return null;
+}
+
+function isGetLogsRangeError(messageRaw) {
+  const message = String(messageRaw || '').toLowerCase();
+  if (!message.includes('eth_getlogs')) {
+    return false;
+  }
+  if (message.includes('block range')) {
+    return true;
+  }
+  if (message.includes('up to a')) {
+    return true;
+  }
+  return false;
+}
+
+function isRpcRateLimitError(messageRaw) {
+  const message = String(messageRaw || '').toLowerCase();
+  if (message.includes('status 429')) {
+    return true;
+  }
+  if (message.includes('rpc rate limit')) {
+    return true;
+  }
+  if (message.includes('exceeded its compute units per second')) {
+    return true;
+  }
+  if (message.includes('rate limit')) {
+    return true;
+  }
+  if (message.includes('too many requests')) {
+    return true;
+  }
+  return false;
+}
+
+async function getLogsChunked(baseFilter, startBlock, endBlock) {
+  const allLogs = [];
+  let from = Number(startBlock);
+  const end = Number(endBlock);
+  let chunkSize = Math.max(1, GET_LOGS_BLOCK_RANGE);
+  let rateRetryCount = 0;
+  while (from <= end) {
+    const to = Math.min(end, from + chunkSize - 1);
+    try {
+      const part = await hardhatRpc('eth_getLogs', [{
+        ...baseFilter,
+        fromBlock: ethers.toQuantity(from),
+        toBlock: ethers.toQuantity(to),
+      }]);
+      allLogs.push(...part);
+      from = to + 1;
+      rateRetryCount = 0;
+    } catch (err) {
+      if (isRpcRateLimitError(err.message)) {
+        rateRetryCount += 1;
+        if (rateRetryCount > 20) {
+          throw err;
+        }
+        const delayMs = Math.min(3000, 300 * rateRetryCount);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      if (!isGetLogsRangeError(err.message) || chunkSize <= 1) {
+        throw err;
+      }
+      const hinted = parseMaxGetLogsRangeFromError(err.message);
+      if (hinted && hinted >= 1) {
+        chunkSize = Math.max(1, Math.min(chunkSize, hinted));
+      } else {
+        chunkSize = Math.max(1, Math.floor(chunkSize / 2));
+      }
+    }
+  }
+  return allLogs;
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  const rows = Array.isArray(items) ? items : [];
+  const max = Math.max(1, Number(limit) || 1);
+  const results = new Array(rows.length);
+  let cursor = 0;
+  const workers = [];
+  const run = async function () {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= rows.length) {
+        return;
+      }
+      results[index] = await worker(rows[index], index);
+    }
+  };
+  for (let i = 0; i < Math.min(max, rows.length); i += 1) {
+    workers.push(run());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
+function readAwardCacheEntry(store, key) {
+  if (!store || !key) {
+    return null;
+  }
+  const row = store.get(key);
+  if (!row) {
+    return null;
+  }
+  if ((Date.now() - Number(row.timestampMs)) > AWARD_CACHE_TTL_MS) {
+    store.delete(key);
+    return null;
+  }
+  return row.value;
+}
+
+function writeAwardCacheEntry(store, key, value) {
+  if (!store || !key) {
+    return;
+  }
+  store.set(key, { value, timestampMs: Date.now() });
+}
+
+function formatTokenAmountCompact(weiLike, decimals = 18, maxFraction = 4) {
+  try {
+    const raw = ethers.formatUnits(BigInt(String(weiLike || '0')), decimals);
+    const negative = raw.startsWith('-');
+    let text = negative ? raw.slice(1) : raw;
+    const parts = text.split('.');
+    let whole = parts[0] || '0';
+    let fraction = parts[1] || '';
+    if (fraction.length > maxFraction) {
+      fraction = fraction.slice(0, maxFraction);
+    }
+    fraction = fraction.replace(/0+$/, '');
+    let out = whole;
+    if (fraction) {
+      out = `${whole}.${fraction}`;
+    }
+    if (negative) {
+      return `-${out}`;
+    }
+    return out;
+  } catch {
+    return String(weiLike || '0');
+  }
+}
+
+async function fetchRecentLeveragedEventsForWallet(wallet, lookbackBlocksInput) {
+  const deployments = loadDeployments();
+  const leveragedRouterAddress = normalizeAddress(deployments.leveragedProductRouter);
+  if (!leveragedRouterAddress) {
+    return [];
+  }
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = parseRpcInt(latestBlockHex);
+  const lookbackBlocks = Math.max(1, Number(lookbackBlocksInput) || 5000);
+  const fromBlock = Math.max(0, latestBlock - lookbackBlocks + 1);
+  const leveragedTopics = [
+    ethers.id('LeveragedMinted(address,address,string,uint8,uint256,uint256,uint256)'),
+    ethers.id('LeveragedUnwound(address,address,string,uint8,uint256,uint256,uint256)'),
+  ];
+  const logs = await getLogsChunked({
+    address: leveragedRouterAddress,
+    topics: [leveragedTopics],
+  }, fromBlock, latestBlock);
+  logs.sort((a, b) => {
+    const aBlock = Number(a.blockNumber);
+    const bBlock = Number(b.blockNumber);
+    if (aBlock !== bBlock) {
+      return aBlock - bBlock;
+    }
+    return Number(a.logIndex) - Number(b.logIndex);
+  });
+  const walletNorm = normalizeAddress(wallet);
+  const blockTimestampCache = new Map();
+  const events = [];
+  for (let i = 0; i < logs.length; i += 1) {
+    const log = logs[i];
+    let parsed = null;
+    try {
+      parsed = leveragedRouterInterface.parseLog(log);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) {
+      continue;
+    }
+    const rowWallet = normalizeAddress(parsed.args.user);
+    if (rowWallet !== walletNorm) {
+      continue;
+    }
+    const txHash = String(log.transactionHash);
+    const blockNumber = Number(log.blockNumber);
+    const logIndex = Number(log.logIndex);
+    let timestampMs = Date.now();
+    if (blockTimestampCache.has(blockNumber)) {
+      timestampMs = blockTimestampCache.get(blockNumber);
+    } else {
+      const ts = await getBlockTimestampMs(blockNumber);
+      blockTimestampCache.set(blockNumber, ts);
+      timestampMs = ts;
+    }
+    const id = `${txHash}:${logIndex}`;
+    if (parsed.name === 'LeveragedMinted') {
+      events.push({
+        id,
+        kind: 'LEVERAGE_MINT',
+        wallet: rowWallet,
+        productToken: normalizeAddress(parsed.args.productToken),
+        baseSymbol: String(parsed.args.baseSymbol),
+        leverage: Number(parsed.args.leverage),
+        ttokenInWei: parsed.args.ttokenInWei.toString(),
+        productQtyWei: parsed.args.productOutWei.toString(),
+        navCents: parsed.args.navCents.toString(),
+        txHash,
+        blockNumber,
+        logIndex,
+        timestampMs,
+      });
+      continue;
+    }
+    if (parsed.name === 'LeveragedUnwound') {
+      events.push({
+        id,
+        kind: 'LEVERAGE_UNWIND',
+        wallet: rowWallet,
+        productToken: normalizeAddress(parsed.args.productToken),
+        baseSymbol: String(parsed.args.baseSymbol),
+        leverage: Number(parsed.args.leverage),
+        productQtyWei: parsed.args.productInWei.toString(),
+        ttokenOutWei: parsed.args.ttokenOutWei.toString(),
+        navCents: parsed.args.navCents.toString(),
+        txHash,
+        blockNumber,
+        logIndex,
+        timestampMs,
+      });
+      events.push({
+        id: `${id}:burn`,
+        kind: 'LEVERAGE_BURN',
+        wallet: rowWallet,
+        productToken: normalizeAddress(parsed.args.productToken),
+        baseSymbol: String(parsed.args.baseSymbol),
+        leverage: Number(parsed.args.leverage),
+        productQtyWei: parsed.args.productInWei.toString(),
+        txHash,
+        blockNumber,
+        logIndex: logIndex + 1,
+        timestampMs,
+      });
+    }
+  }
+  return events;
+}
+
+function collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount) {
+  const rowsOut = [];
+  const seen = new Set();
+  const pushRow = (txHash, label, timestampMs, qtyText) => {
+    const hash = String(txHash || '');
+    if (!hash) {
+      return;
+    }
+    if (seen.has(hash)) {
+      return;
+    }
+    seen.add(hash);
+    rowsOut.push({
+      txHash: hash,
+      label: String(label || 'wallet_tx'),
+      timestampMs: Number(timestampMs) || 0,
+      qtyText: String(qtyText || '-'),
+    });
+  };
+  const walletNorm = normalizeAddress(wallet);
+  const limit = Math.max(1, Number(maxCount) || 20);
+  const rows = [];
+
+  const orderValues = Object.values(snapshot.orders || {});
+  for (let i = 0; i < orderValues.length; i += 1) {
+    const row = orderValues[i];
+    if (row && row.trader === walletNorm) {
+      const side = String(row.side || '').toUpperCase();
+      const symbol = String(row.symbol || '').toUpperCase();
+      const label = `ORDER ${side} ${symbol}`.trim();
+      const qtyText = `${formatTokenAmountCompact(row.qtyWei)} ${symbol || 'UNITS'}`;
+      rows.push({ timestampMs: Number(row.placedAtMs) || 0, txHash: row.placedTxHash, label, qtyText });
+    }
+  }
+  const fills = Array.isArray(snapshot.fills) ? snapshot.fills : [];
+  for (let i = 0; i < fills.length; i += 1) {
+    const row = fills[i];
+    if (!row) {
+      continue;
+    }
+    if (row.makerTrader === walletNorm || row.takerTrader === walletNorm) {
+      const isMaker = row.makerTrader === walletNorm;
+      const side = isMaker ? 'SELL' : 'BUY';
+      const symbol = String(row.symbol || '').toUpperCase();
+      const label = `FILL ${side} ${symbol}`.trim();
+      const qtyText = `${formatTokenAmountCompact(row.qtyWei)} ${symbol || 'UNITS'}`;
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label, qtyText });
+    }
+  }
+  const cancellations = Array.isArray(snapshot.cancellations) ? snapshot.cancellations : [];
+  for (let i = 0; i < cancellations.length; i += 1) {
+    const row = cancellations[i];
+    if (row && row.trader === walletNorm) {
+      const qtyText = `${formatTokenAmountCompact(row.refundWei)} TTOKEN`;
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label: 'CANCEL ORDER', qtyText });
+    }
+  }
+  const cashflows = Array.isArray(snapshot.cashflows) ? snapshot.cashflows : [];
+  for (let i = 0; i < cashflows.length; i += 1) {
+    const row = cashflows[i];
+    if (row && row.wallet === walletNorm) {
+      const direction = String(row.direction || '').toUpperCase();
+      const symbol = String(row.assetSymbol || row.assetType || 'TOKEN').toUpperCase();
+      const reason = String(row.reason || '').toUpperCase();
+      const label = `CASHFLOW ${direction} ${reason}`.trim();
+      const qtyText = `${formatTokenAmountCompact(row.amountWei)} ${symbol}`;
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label, qtyText });
+    }
+  }
+  const transfers = Array.isArray(snapshot.transfers) ? snapshot.transfers : [];
+  for (let i = 0; i < transfers.length; i += 1) {
+    const row = transfers[i];
+    if (!row) {
+      continue;
+    }
+    if (row.from === walletNorm || row.to === walletNorm) {
+      const direction = row.to === walletNorm ? 'IN' : 'OUT';
+      const symbol = String(row.symbol || 'TOKEN').toUpperCase();
+      const label = `TRANSFER ${direction} ${symbol}`.trim();
+      const qtyText = `${formatTokenAmountCompact(row.amountWei)} ${symbol}`;
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label, qtyText });
+    }
+  }
+  const leveragedEvents = Array.isArray(snapshot.leveragedEvents) ? snapshot.leveragedEvents : [];
+  for (let i = 0; i < leveragedEvents.length; i += 1) {
+    const row = leveragedEvents[i];
+    if (row && row.wallet === walletNorm) {
+      const baseSymbol = String(row.baseSymbol || '').toUpperCase();
+      const leverage = Number(row.leverage);
+      const productSymbol = (baseSymbol && Number.isFinite(leverage) && leverage > 0)
+        ? `${baseSymbol}${leverage}L`
+        : 'LEVERAGE';
+      let label = String(row.kind || 'LEVERAGE');
+      let qtyText = '-';
+      if (row.kind === 'LEVERAGE_MINT') {
+        label = `LEVERAGE MINT ${productSymbol}`;
+        qtyText = `${formatTokenAmountCompact(row.productQtyWei)} ${productSymbol}`;
+      } else if (row.kind === 'LEVERAGE_UNWIND') {
+        label = `LEVERAGE UNWIND ${productSymbol}`;
+        qtyText = `${formatTokenAmountCompact(row.productQtyWei)} ${productSymbol}`;
+      } else if (row.kind === 'LEVERAGE_BURN') {
+        label = `LEVERAGE BURN ${productSymbol}`;
+        qtyText = `${formatTokenAmountCompact(row.productQtyWei)} ${productSymbol}`;
+      }
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label, qtyText });
+    }
+  }
+
+  rows.sort((a, b) => b.timestampMs - a.timestampMs);
+  for (let i = 0; i < rows.length && rowsOut.length < limit; i += 1) {
+    pushRow(rows[i].txHash, rows[i].label, rows[i].timestampMs, rows[i].qtyText);
+  }
+  return rowsOut;
+}
+
+async function buildWalletGasRowsFromIndexer(wallet, maxCount) {
+  await Promise.race([
+    ensureIndexerSynced(),
+    new Promise((resolve) => setTimeout(resolve, 2500)),
+  ]);
+  const snapshot = readIndexerSnapshot();
+  const txRows = collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount);
+  const receipts = await mapWithConcurrency(txRows, 4, async (row) => {
+    const data = await readReceiptGasData(row.txHash);
+    const txName = row.label || 'TX';
+    return {
+      txHash: row.txHash,
+      txName,
+      qtyText: row.qtyText || '-',
+      from: normalizeAddress(data.from),
+      gasUsed: data.gasUsed,
+      costWei: data.costWei,
+    };
+  });
+  const walletNorm = normalizeAddress(wallet);
+  const rows = [];
+  for (let i = 0; i < receipts.length; i += 1) {
+    const row = receipts[i];
+    if (!row || row.from !== walletNorm) {
+      continue;
+    }
+    rows.push({
+      txName: row.txName,
+      txHash: row.txHash,
+      qtyText: row.qtyText || '-',
+      gasUsed: row.gasUsed.toString(),
+      effectiveGasPrice: '0',
+      costWei: row.costWei.toString(),
+      costEth: toEthString(row.costWei),
+      baselineGasUsed: '0',
+      deltaPct: null,
+      status: 'OK',
+      skipReason: '',
+    });
+  }
+  return rows;
 }
 
 function ensureIndexerDir() {
@@ -394,6 +1190,22 @@ async function ensureOnchainPriceForSymbol(symbolRaw) {
     return { ok: false, error: 'pricefeed not deployed' };
   }
 
+  try {
+    const readData = priceFeedInterface.encodeFunctionData('getPrice', [symbol]);
+    const readResult = await hardhatRpc('eth_call', [{ to: priceFeedAddress, data: readData }, 'latest']);
+    const [priceCentsRaw] = priceFeedInterface.decodeFunctionResult('getPrice', readResult);
+    const existingPrice = Number(priceCentsRaw);
+    if (existingPrice > 0) {
+      const freshData = priceFeedInterface.encodeFunctionData('isFresh', [symbol]);
+      const freshResult = await hardhatRpc('eth_call', [{ to: priceFeedAddress, data: freshData }, 'latest']);
+      const [isFresh] = priceFeedInterface.decodeFunctionResult('isFresh', freshResult);
+      if (isFresh) {
+        return { ok: true, priceCents: existingPrice };
+      }
+    }
+  } catch {
+  }
+
   let fetchedPrice = 0;
   try {
     const quote = await fetchQuote(symbol);
@@ -428,6 +1240,15 @@ async function ensureOnchainPriceForSymbol(symbolRaw) {
             fetchedPrice = candlePrice;
           }
         }
+      }
+    } catch {
+    }
+  }
+  if (!(fetchedPrice > 0)) {
+    try {
+      const fmpPrice = await fetchFmpSpotPrice(symbol);
+      if (fmpPrice > 0) {
+        fetchedPrice = fmpPrice;
       }
     } catch {
     }
@@ -491,7 +1312,11 @@ async function setOnchainPriceForSymbol(symbolRaw, priceCentsRaw) {
       to: priceFeedAddress,
       data: writeData,
     }]);
-    await waitForReceipt(txHash);
+    const receipt = await waitForReceipt(txHash);
+    const statusInt = parseRpcInt(receipt.status);
+    if (statusInt === 0) {
+      return { ok: false, error: `price update reverted for ${symbol}` };
+    }
     return { ok: true, priceCents };
   } catch {
     return { ok: false, error: `cannot update onchain price for ${symbol}` };
@@ -1301,6 +2126,73 @@ function addCashflow(cashflows, input) {
   });
 }
 
+async function getBlockTimestampMs(blockNumberRaw) {
+  let blockTag = blockNumberRaw;
+  if (typeof blockTag === 'number') {
+    blockTag = ethers.toQuantity(blockTag);
+  }
+  const block = await hardhatRpc('eth_getBlockByNumber', [blockTag, false]);
+  if (!block || !block.timestamp) {
+    return Date.now();
+  }
+  return Number(block.timestamp) * 1000;
+}
+
+function appendManualMintActivity(input) {
+  ensureIndexerDir();
+  const cashflows = readJsonFile(INDEXER_CASHFLOWS_FILE, []);
+  const transfers = readJsonFile(INDEXER_TRANSFERS_FILE, []);
+  const transferId = `${input.txHash}:manual-mint-transfer:${input.tokenAddress}:${input.wallet}`;
+  let hasTransfer = false;
+  for (let i = 0; i < transfers.length; i += 1) {
+    if (transfers[i].id === transferId) {
+      hasTransfer = true;
+      break;
+    }
+  }
+  if (!hasTransfer) {
+    transfers.push({
+      id: transferId,
+      tokenAddress: normalizeAddress(input.tokenAddress),
+      symbol: input.symbol,
+      from: ethers.ZeroAddress,
+      to: normalizeAddress(input.wallet),
+      amountWei: String(input.amountWei),
+      txHash: input.txHash,
+      blockNumber: Number(input.blockNumber),
+      logIndex: 0,
+      timestampMs: Number(input.timestampMs),
+    });
+  }
+
+  const reason = input.reason || 'MINT';
+  const cashflowId = `${input.txHash}:manual-cashflow:${normalizeAddress(input.wallet)}:${reason}`;
+  let hasCashflow = false;
+  for (let i = 0; i < cashflows.length; i += 1) {
+    if (cashflows[i].id === cashflowId) {
+      hasCashflow = true;
+      break;
+    }
+  }
+  if (!hasCashflow) {
+    cashflows.push({
+      id: cashflowId,
+      wallet: normalizeAddress(input.wallet),
+      assetType: input.assetType || 'TTOKEN',
+      assetSymbol: input.symbol,
+      direction: 'IN',
+      amountWei: String(input.amountWei),
+      reason,
+      txHash: input.txHash,
+      blockNumber: Number(input.blockNumber),
+      timestampMs: Number(input.timestampMs),
+    });
+  }
+
+  writeJsonFile(INDEXER_CASHFLOWS_FILE, cashflows);
+  writeJsonFile(INDEXER_TRANSFERS_FILE, transfers);
+}
+
 async function lookupSymbolByToken(registryAddr, tokenAddr) {
   const normalized = normalizeAddress(tokenAddr);
   if (symbolByTokenCache.has(normalized)) {
@@ -1374,7 +2266,11 @@ async function ensureIndexerSynced() {
       writeJsonFile(INDEXER_LEVERAGED_FILE, leveragedEvents);
     }
 
-    const startBlock = Math.max(0, Number(state.lastIndexedBlock) + 1);
+    let startBlock = Math.max(0, Number(state.lastIndexedBlock) + 1);
+    if (Number(state.lastIndexedBlock) < 0) {
+      const lookbackStart = Math.max(0, latestBlock - INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS + 1);
+      startBlock = lookbackStart;
+    }
     if (startBlock > latestBlock) {
       state.latestKnownBlock = latestBlock;
       state.lastSyncAtMs = Date.now();
@@ -1387,19 +2283,15 @@ async function ensureIndexerSynced() {
       };
     }
 
-    const fromHex = ethers.toQuantity(startBlock);
-    const toHex = ethers.toQuantity(latestBlock);
     const topics = [
       ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)'),
       ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)'),
       ethers.id('OrderCancelled(uint256,address,uint256)'),
     ];
-    const logs = await hardhatRpc('eth_getLogs', [{
-      fromBlock: fromHex,
-      toBlock: toHex,
+    const logs = await getLogsChunked({
       address: orderBookAddr,
       topics: [topics],
-    }]);
+    }, startBlock, latestBlock);
     logs.sort((a, b) => {
       const blockA = Number(a.blockNumber);
       const blockB = Number(b.blockNumber);
@@ -1449,17 +2341,15 @@ async function ensureIndexerSynced() {
 
     let leveragedLogs = [];
     const leveragedRouterAddress = normalizeAddress(deployments.leveragedProductRouter);
-    if (leveragedRouterAddress) {
+    if (INDEXER_ENABLE_LEVERAGED && leveragedRouterAddress) {
       const leveragedTopics = [
         ethers.id('LeveragedMinted(address,address,string,uint8,uint256,uint256,uint256)'),
         ethers.id('LeveragedUnwound(address,address,string,uint8,uint256,uint256,uint256)'),
       ];
-      leveragedLogs = await hardhatRpc('eth_getLogs', [{
-        fromBlock: fromHex,
-        toBlock: toHex,
+      leveragedLogs = await getLogsChunked({
         address: leveragedRouterAddress,
         topics: [leveragedTopics],
-      }]);
+      }, startBlock, latestBlock);
       leveragedLogs.sort((a, b) => {
         const blockA = Number(a.blockNumber);
         const blockB = Number(b.blockNumber);
@@ -1471,16 +2361,14 @@ async function ensureIndexerSynced() {
     }
 
     let transferLogs = [];
-    if (tokenAddresses.length > 0) {
+    if (INDEXER_ENABLE_TRANSFERS && tokenAddresses.length > 0) {
       const transferTopic = ethers.id('Transfer(address,address,uint256)');
       transferLogs = [];
       for (const token of tokenAddresses) {
-        const part = await hardhatRpc('eth_getLogs', [{
-          fromBlock: fromHex,
-          toBlock: toHex,
+        const part = await getLogsChunked({
           address: token,
           topics: [transferTopic],
-        }]);
+        }, startBlock, latestBlock);
         transferLogs.push(...part);
       }
       transferLogs.sort((a, b) => {
@@ -2111,6 +2999,63 @@ function writeMerkleTree(epochId, treePayload) {
   writeJsonFile(file, treePayload);
 }
 
+function readMerkleHolderScanState() {
+  ensureDividendsMerkleDir();
+  return readJsonFile(MERKLE_HOLDER_SCAN_STATE_FILE, { tokens: {} });
+}
+
+function writeMerkleHolderScanState(state) {
+  ensureDividendsMerkleDir();
+  writeJsonFile(MERKLE_HOLDER_SCAN_STATE_FILE, state);
+}
+
+function normalizeHolderArray(rawRows) {
+  const seen = new Set();
+  const holders = [];
+  const rows = Array.isArray(rawRows) ? rawRows : [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const normalized = normalizeAddress(rows[i]);
+    if (!normalized || normalized === ethers.ZeroAddress) {
+      continue;
+    }
+    const lower = normalized.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      holders.push(normalized);
+    }
+  }
+  holders.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  return holders;
+}
+
+function codeExistsAtBlock(codeRaw) {
+  const text = String(codeRaw || '').toLowerCase();
+  return text && text !== '0x';
+}
+
+async function resolveContractDeploymentBlock(address, latestBlock) {
+  const normalized = normalizeAddress(address);
+  if (!normalized) {
+    return 0;
+  }
+  let left = 0;
+  let right = Math.max(0, Number(latestBlock));
+  const latestCode = await hardhatRpc('eth_getCode', [normalized, ethers.toQuantity(right)]);
+  if (!codeExistsAtBlock(latestCode)) {
+    return 0;
+  }
+  while (left < right) {
+    const mid = Math.floor((left + right) / 2);
+    const code = await hardhatRpc('eth_getCode', [normalized, ethers.toQuantity(mid)]);
+    if (codeExistsAtBlock(code)) {
+      right = mid;
+    } else {
+      left = mid + 1;
+    }
+  }
+  return left;
+}
+
 function buildMerkleLevelsLeftRight(leafHashes) {
   const levels = [];
   const firstLevel = [];
@@ -2189,14 +3134,57 @@ function tryParseSnapshotIdFromReceipt(receipt) {
 }
 
 async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
+  const normalizedToken = normalizeAddress(tokenAddress);
+  if (!normalizedToken) {
+    return [];
+  }
   const transferTopic = ethers.id('Transfer(address,address,uint256)');
-  const logs = await hardhatRpc('eth_getLogs', [{
-    fromBlock: '0x0',
-    toBlock: toBlockHex,
-    address: tokenAddress,
-    topics: [transferTopic],
-  }]);
+  const endBlock = parseRpcInt(toBlockHex);
+  if (!Number.isFinite(endBlock) || endBlock < 0) {
+    return [];
+  }
+  const state = readMerkleHolderScanState();
+  if (!state.tokens || typeof state.tokens !== 'object') {
+    state.tokens = {};
+  }
+  const tokenKey = normalizedToken.toLowerCase();
+  const current = state.tokens[tokenKey] || {};
+  let deploymentBlock = Number(current.deploymentBlock);
+  if (!Number.isFinite(deploymentBlock) || deploymentBlock < 0 || deploymentBlock > endBlock) {
+    deploymentBlock = await resolveContractDeploymentBlock(normalizedToken, endBlock);
+  }
+  let lastScannedBlock = Number(current.lastScannedBlock);
+  const hasPriorScan = Number.isFinite(lastScannedBlock);
+  if (!hasPriorScan) {
+    if (MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS > 0) {
+      const initialFrom = Math.max(
+        deploymentBlock,
+        endBlock - MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS + 1,
+      );
+      lastScannedBlock = initialFrom - 1;
+    } else {
+      lastScannedBlock = deploymentBlock - 1;
+    }
+  }
+  if (lastScannedBlock < deploymentBlock - 1) {
+    lastScannedBlock = deploymentBlock - 1;
+  }
+  const fromBlock = Math.max(
+    deploymentBlock,
+    lastScannedBlock + 1 - MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS,
+  );
   const seen = new Set();
+  const cachedHolders = normalizeHolderArray(current.holders);
+  for (let i = 0; i < cachedHolders.length; i += 1) {
+    seen.add(cachedHolders[i].toLowerCase());
+  }
+  let logs = [];
+  if (fromBlock <= endBlock) {
+    logs = await getLogsChunked({
+      address: normalizedToken,
+      topics: [transferTopic],
+    }, fromBlock, endBlock);
+  }
   for (let i = 0; i < logs.length; i += 1) {
     const log = logs[i];
     try {
@@ -2215,9 +3203,19 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
   const rows = [];
   const values = Array.from(seen.values());
   for (let i = 0; i < values.length; i += 1) {
-    rows.push(normalizeAddress(values[i]));
+    const normalized = normalizeAddress(values[i]);
+    if (normalized && normalized !== ethers.ZeroAddress) {
+      rows.push(normalized);
+    }
   }
   rows.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  state.tokens[tokenKey] = {
+    deploymentBlock,
+    lastScannedBlock: endBlock,
+    holders: rows,
+    updatedAtMs: Date.now(),
+  };
+  writeMerkleHolderScanState(state);
   return rows;
 }
 
@@ -2284,6 +3282,10 @@ function setSymbolLifecycleStatus(symbolRaw, statusRaw) {
 async function listAllSymbolsFromRegistry() {
   const deployments = loadDeployments();
   const registryAddr = deployments.listingsRegistry;
+  const registryDeployed = await ensureContract(registryAddr);
+  if (!registryDeployed) {
+    return [];
+  }
   const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
   const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
   const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
@@ -2378,19 +3380,72 @@ async function getBestBookPrices(symbolRaw) {
 function shouldRuleTrigger(rule, book) {
   const side = String(rule.side).toUpperCase();
   const triggerPriceCents = Number(rule.triggerPriceCents);
+  const marketPriceCents = Number(rule.marketPriceCents);
   if (side === 'BUY') {
-    if (!book.hasAsk) {
-      return false;
+    if (book.hasAsk && book.bestAskCents <= triggerPriceCents) {
+      return true;
     }
-    return book.bestAskCents <= triggerPriceCents;
+    if (Number.isFinite(marketPriceCents) && marketPriceCents > 0) {
+      return marketPriceCents <= triggerPriceCents;
+    }
+    return false;
   }
   if (side === 'SELL') {
-    if (!book.hasBid) {
-      return false;
+    if (book.hasBid && book.bestBidCents >= triggerPriceCents) {
+      return true;
     }
-    return book.bestBidCents >= triggerPriceCents;
+    if (Number.isFinite(marketPriceCents) && marketPriceCents > 0) {
+      return marketPriceCents >= triggerPriceCents;
+    }
+    return false;
   }
   return false;
+}
+
+async function readMarketPriceCentsForAutoTrade(symbolRaw) {
+  const symbol = String(symbolRaw).toUpperCase();
+  if (!symbol) {
+    return 0;
+  }
+  try {
+    const deployments = loadDeployments();
+    const priceFeedAddress = normalizeAddress(deployments.priceFeed);
+    if (priceFeedAddress) {
+      const data = priceFeedInterface.encodeFunctionData('getPrice', [symbol]);
+      const result = await hardhatRpc('eth_call', [{ to: priceFeedAddress, data }, 'latest']);
+      const [priceCentsRaw] = priceFeedInterface.decodeFunctionResult('getPrice', result);
+      const onchainPriceCents = Number(priceCentsRaw);
+      if (Number.isFinite(onchainPriceCents) && onchainPriceCents > 0) {
+        return onchainPriceCents;
+      }
+    }
+  } catch {
+  }
+  try {
+    const quote = await fetchQuote(symbol);
+    const price = Number(quote.regularMarketPrice || quote.price || 0);
+    if (Number.isFinite(price) && price > 0) {
+      return Math.round(price * 100);
+    }
+  } catch {
+  }
+  try {
+    const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol }));
+    let row = null;
+    if (Array.isArray(payload) && payload.length > 0) {
+      row = payload[0];
+    } else if (payload && typeof payload === 'object') {
+      row = payload;
+    }
+    if (row) {
+      const price = Number(row.price || 0);
+      if (Number.isFinite(price) && price > 0) {
+        return Math.round(price * 100);
+      }
+    }
+  } catch {
+  }
+  return 0;
 }
 
 function isRulePausedByLifecycle(rule) {
@@ -2453,6 +3508,10 @@ function normalizeExecutionForResponse(entry) {
   if (entry.observedBestAskCents) {
     observedBestAskCents = Number(entry.observedBestAskCents);
   }
+  let observedMarketPriceCents = 0;
+  if (entry.observedMarketPriceCents) {
+    observedMarketPriceCents = Number(entry.observedMarketPriceCents);
+  }
   let error = '';
   if (entry.error) {
     error = entry.error;
@@ -2466,6 +3525,7 @@ function normalizeExecutionForResponse(entry) {
     triggerPriceCents: Number(entry.triggerPriceCents),
     observedBestBidCents,
     observedBestAskCents,
+    observedMarketPriceCents,
     qtyWei: String(entry.qtyWei),
     txHash: entry.txHash,
     status: entry.status,
@@ -2486,6 +3546,10 @@ async function executeAutoTradeRule(rule, book) {
 
   if (!(qtyUi > 0)) {
     throw new Error('rule qty is zero');
+  }
+  const canSend = await canServerSendFromAddress(wallet);
+  if (!canSend) {
+    throw new Error(`autotrade wallet ${wallet} is not available on server signer set`);
   }
 
   let data = '';
@@ -2546,9 +3610,16 @@ function getDateKeyEt() {
 
 async function runAutoTradeTick() {
   if (autoTradeLoopBusy) {
-    return;
+    const busyForMs = Date.now() - autoTradeLoopStartedAtMs;
+    if (busyForMs > 45000) {
+      autoTradeLoopBusy = false;
+      autoTradeLoopStartedAtMs = 0;
+    } else {
+      return;
+    }
   }
   autoTradeLoopBusy = true;
+  autoTradeLoopStartedAtMs = Date.now();
 
   try {
     const state = readAutoTradeState();
@@ -2609,6 +3680,8 @@ async function runAutoTradeTick() {
         }
       }
       if (shouldRunRule) {
+        const marketPriceCents = await readMarketPriceCentsForAutoTrade(rule.symbol);
+        rule.marketPriceCents = marketPriceCents;
         const triggerNow = shouldRuleTrigger(rule, book);
         if (!triggerNow) {
           shouldRunRule = false;
@@ -2641,6 +3714,13 @@ async function runAutoTradeTick() {
           }
           return value;
         })(),
+        observedMarketPriceCents: (() => {
+          let value = 0;
+          if (rule.marketPriceCents) {
+            value = Number(rule.marketPriceCents);
+          }
+          return value;
+        })(),
         qtyWei: String(rule.qtyWei),
         txHash: '',
         status: 'FAILED',
@@ -2667,6 +3747,10 @@ async function runAutoTradeTick() {
           reason = err.message;
         }
         entry.error = reason;
+        if (reason.includes('not available on server signer set')) {
+          rule.enabled = false;
+          rule.updatedAtMs = Date.now();
+        }
       }
 
       state.executions.push(entry);
@@ -2682,6 +3766,7 @@ async function runAutoTradeTick() {
     console.error('[autotrade]', msg);
   } finally {
     autoTradeLoopBusy = false;
+    autoTradeLoopStartedAtMs = 0;
   }
 }
 
@@ -2985,8 +4070,8 @@ app.get('/api/fmp/index-ticker', async (_req, res) => {
   const now = Date.now();
   const rows = [];
 
-  for (let i = 0; i < FMP_INDEX_SYMBOLS.length; i += 1) {
-    const symbol = String(FMP_INDEX_SYMBOLS[i]).toUpperCase();
+  for (let i = 0; i < FMP_US_TOP_SYMBOLS.length; i += 1) {
+    const symbol = String(FMP_US_TOP_SYMBOLS[i]).toUpperCase();
     const cached = fmpIndexTickerCache.get(symbol);
     let shouldUseCache = false;
     if (cached) {
@@ -3062,7 +4147,7 @@ app.get('/api/fmp/index-ticker', async (_req, res) => {
   }
 
   if (rows.length === 0) {
-    return res.status(502).json({ error: 'failed to load index ticker' });
+    return res.status(502).json({ error: 'failed to load stock ticker' });
   }
 
   res.json({
@@ -3985,7 +5070,14 @@ app.get('/api/fmp/market-details', async (req, res) => {
 // rest api to get hardhat accounts
 app.get('/api/hardhat/accounts', async (_req, res) => {
   try {
-    const accounts = await hardhatRpc('eth_accounts');
+    let accounts = await hardhatRpc('eth_accounts');
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+      accounts = [];
+      const signerValues = Array.from(RPC_SIGNERS.values());
+      for (let i = 0; i < signerValues.length; i += 1) {
+        accounts.push(signerValues[i].address);
+      }
+    }
     res.json({ accounts });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -4061,6 +5153,20 @@ app.post('/api/ttoken/mint', async (req, res) => {
       to: ttokenAddress,
       data,
     }]);
+    const receipt = await waitForReceipt(txHash);
+    const blockNumber = parseRpcInt(receipt.blockNumber);
+    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    appendManualMintActivity({
+      wallet: to,
+      tokenAddress: ttokenAddress,
+      symbol: 'TTOKEN',
+      assetType: 'TTOKEN',
+      amountWei: amountWei.toString(),
+      reason: 'MINT_TTOKEN',
+      txHash,
+      blockNumber,
+      timestampMs,
+    });
     res.json({ txHash });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -4072,6 +5178,10 @@ app.post('/api/orderbook/limit', async (req, res) => {
   try {
     const body = req.body;
     const symbol = String(body.symbol).toUpperCase();
+    const ensurePriceResult = await ensureOnchainPriceForSymbol(symbol);
+    if (!ensurePriceResult.ok) {
+      return res.status(400).json({ error: ensurePriceResult.error });
+    }
     const symbolLifecycle = getSymbolLifecycleStatus(symbol);
     let blockedByLifecycle = false;
     if (symbolLifecycle === 'FROZEN') {
@@ -4110,39 +5220,72 @@ app.post('/api/orderbook/limit', async (req, res) => {
     if (sideText !== 'BUY' && sideText !== 'SELL') {
       return res.status(400).json({ error: 'side must be BUY or SELL' });
     }
-
-    const qtyWei = BigInt(Math.round(qty)) * 10n ** 18n;
-    // decimal of 18 for tokens
-
-    if (side === 0) {
-      const quoteWei = (qtyWei * BigInt(priceCents)) / 100n;
-      const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, quoteWei]);
-      await hardhatRpc('eth_sendTransaction', [{
-        from: from,
-        to: ttokenAddr,
-        data: approveData,
-      }]);
-    } else {
-      const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, qtyWei]);
-      await hardhatRpc('eth_sendTransaction', [{
-        from: from,
-        to: tokenAddr,
-        data: approveData,
-      }]);
+    if (!Number.isFinite(qty)) {
+      return res.status(400).json({ error: 'qty must be a number' });
+    }
+    if (!Number.isInteger(qty)) {
+      return res.status(400).json({ error: 'qty must be a whole number' });
+    }
+    if (qty < MIN_STOCK_QTY_UNITS) {
+      return res.status(400).json({ error: `qty must be at least ${MIN_STOCK_QTY_UNITS}` });
+    }
+    if (qty % MIN_STOCK_QTY_UNITS !== 0) {
+      return res.status(400).json({ error: `qty must be in steps of ${MIN_STOCK_QTY_UNITS}` });
     }
 
-    const data = orderBookInterface.encodeFunctionData('placeLimitOrder', [
+    const qtyWei = BigInt(qty) * 10n ** 18n;
+    // decimal of 18 for tokens
+    const clientSign = wantsClientSign(body);
+    const orderData = orderBookInterface.encodeFunctionData('placeLimitOrder', [
       tokenAddr,
       side,
       priceCents,
       qtyWei,
     ]);
 
+    if (side === 0) {
+      const quoteWei = (qtyWei * BigInt(priceCents)) / 100n;
+      const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, quoteWei]);
+      if (clientSign) {
+        return res.json({
+          clientSign: true,
+          txs: [
+            { label: 'approve_ttoken', from, to: ttokenAddr, data: approveData },
+            { label: 'place_limit_order', from, to: orderBookAddr, data: orderData },
+          ],
+        });
+      }
+      const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
+        from: from,
+        to: ttokenAddr,
+        data: approveData,
+      }]);
+      await waitForReceipt(approveTxHash);
+    } else {
+      const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, qtyWei]);
+      if (clientSign) {
+        return res.json({
+          clientSign: true,
+          txs: [
+            { label: 'approve_equity', from, to: tokenAddr, data: approveData },
+            { label: 'place_limit_order', from, to: orderBookAddr, data: orderData },
+          ],
+        });
+      }
+      const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
+        from: from,
+        to: tokenAddr,
+        data: approveData,
+      }]);
+      await waitForReceipt(approveTxHash);
+    }
+
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: from,
       to: orderBookAddr,
-      data: data,
+      data: orderData,
     }]);
+    await waitForReceipt(txHash);
 
     res.json({ txHash: txHash });
   } catch (err) {
@@ -4213,75 +5356,24 @@ app.get('/api/orderbook/open', async (_req, res) => {
 // rest api to get all the filled orders
 app.get('/api/orderbook/fills', async (_req, res) => {
   try {
-    const deployments = loadDeployments();
-    const registryAddr = deployments.listingsRegistry;
-    const orderBookAddr = deployments.orderBookDex;
-    const latestBlock = await hardhatRpc('eth_blockNumber', []);
-    const fromBlock = "0x0";
-
-    const topic = ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)');
-    const logs = await hardhatRpc('eth_getLogs', [{
-      fromBlock: fromBlock,
-      toBlock: latestBlock,
-      address: orderBookAddr,
-      topics: [topic],
-    }]);
-
+    await ensureIndexerSynced();
+    const snapshot = readIndexerSnapshot();
     const fills = [];
-    for (const log of logs) {
-      const parsed = orderBookInterface.parseLog(log);
-      const tokenAddr = parsed.args.equityToken;
-      const symbolData = listingsRegistryInterface.encodeFunctionData('getSymbolByToken', [tokenAddr]);
-      const symbolResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: symbolData }, 'latest']);
-      const [symbol] = listingsRegistryInterface.decodeFunctionResult('getSymbolByToken', symbolResult);
-
-      const block = await hardhatRpc('eth_getBlockByNumber', [log.blockNumber, false]);
-      const blockTimestamp = Number(block.timestamp);
-      const blockTimestampMs = blockTimestamp * 1000;
-
-      const buyData = orderBookInterface.encodeFunctionData('getBuyOrders', [tokenAddr]);
-      const buyResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: buyData }, 'latest']);
-      const [buyOrders] = orderBookInterface.decodeFunctionResult('getBuyOrders', buyResult);
-
-      const sellData = orderBookInterface.encodeFunctionData('getSellOrders', [tokenAddr]);
-      const sellResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: sellData }, 'latest']);
-      const [sellOrders] = orderBookInterface.decodeFunctionResult('getSellOrders', sellResult);
-
-      let makerTrader = "";
-      let takerTrader = "";
-      const makerId = Number(parsed.args.makerId);
-      const takerId = Number(parsed.args.takerId);
-
-      for (const order of buyOrders) {
-        if (Number(order.id) === makerId) {
-          makerTrader = order.trader;
-        }
-        if (Number(order.id) === takerId) {
-          takerTrader = order.trader;
-        }
-      }
-      for (const order of sellOrders) {
-        if (Number(order.id) === makerId) {
-          makerTrader = order.trader;
-        }
-        if (Number(order.id) === takerId) {
-          takerTrader = order.trader;
-        }
-      }
-
+    for (const row of snapshot.fills) {
       fills.push({
-        makerId: makerId,
-        takerId: takerId,
-        makerTrader: makerTrader,
-        takerTrader: takerTrader,
-        symbol: symbol,
-        priceCents: Number(parsed.args.price),
-        qty: parsed.args.qty.toString(),
-        blockNumber: Number(log.blockNumber),
-        txHash: log.transactionHash,
-        timestampMs: blockTimestampMs,
+        makerId: Number(row.makerId),
+        takerId: Number(row.takerId),
+        makerTrader: row.makerTrader,
+        takerTrader: row.takerTrader,
+        symbol: row.symbol,
+        priceCents: Number(row.priceCents),
+        qty: row.qtyWei,
+        blockNumber: Number(row.blockNumber),
+        txHash: row.txHash,
+        timestampMs: Number(row.timestampMs),
       });
     }
+    fills.sort((a, b) => b.timestampMs - a.timestampMs);
     res.json({ fills: fills });
   } catch (err) {
     res.status(500).json({ error: toUserErrorMessage(err.message) });
@@ -4540,6 +5632,15 @@ app.post('/api/orders/cancel', async (req, res) => {
     const deployments = loadDeployments();
     const orderBookAddr = deployments.orderBookDex;
     const data = orderBookInterface.encodeFunctionData('cancelOrder', [BigInt(orderId)]);
+    const clientSign = wantsClientSign(body);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'cancel_order', from: wallet, to: orderBookAddr, data },
+        ],
+      });
+    }
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: orderBookAddr,
@@ -4570,6 +5671,10 @@ app.get('/api/txs', async (req, res) => {
     typeRaw = String(req.query.type);
   }
   const type = typeRaw.toUpperCase();
+  const allowedTypes = new Set(['ALL', 'ORDERS', 'FILLS', 'CASHFLOW', 'TRANSFERS', 'LEVERAGE']);
+  if (!allowedTypes.has(type)) {
+    return res.status(400).json({ error: 'invalid type' });
+  }
 
   let cursorRaw = 0;
   if (req.query.cursor) {
@@ -4585,14 +5690,20 @@ app.get('/api/txs', async (req, res) => {
     limitRaw = req.query.limit;
   }
   const numericLimit = Number(limitRaw);
-  const limit = Math.min(200, Math.max(1, numericLimit));
+  let limit = 50;
+  if (Number.isFinite(numericLimit)) {
+    limit = Math.min(200, Math.max(1, Math.floor(numericLimit)));
+  }
 
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
 
   try {
-    await ensureIndexerSynced();
+    await Promise.race([
+      ensureIndexerSynced(),
+      new Promise((resolve) => setTimeout(resolve, 4000)),
+    ]);
     const snapshot = readIndexerSnapshot();
     const { orders, fills, cancellations, cashflows, transfers, leveragedEvents } = snapshot;
     const items = [];
@@ -4766,8 +5877,11 @@ app.get('/api/txs', async (req, res) => {
       includeLeverage = true;
     }
     if (includeLeverage) {
+      const leveragedRows = [];
+      const seenLeveragedIds = new Set();
       for (const entry of leveragedEvents) {
         if (entry.wallet === wallet) {
+          seenLeveragedIds.add(String(entry.id));
           const row = {
             kind: entry.kind,
             wallet,
@@ -4788,8 +5902,46 @@ app.get('/api/txs', async (req, res) => {
           } else if (entry.kind === 'LEVERAGE_BURN') {
             row.productQtyWei = entry.productQtyWei;
           }
-          items.push(row);
+          leveragedRows.push(row);
         }
+      }
+      if (leveragedRows.length === 0 && type === 'LEVERAGE' && TXS_ENABLE_LEVERAGE_FALLBACK_SCAN) {
+        try {
+          const fallbackRows = await fetchRecentLeveragedEventsForWallet(wallet, INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS);
+          for (let i = 0; i < fallbackRows.length; i += 1) {
+            const entry = fallbackRows[i];
+            const entryId = String(entry.id);
+            if (seenLeveragedIds.has(entryId)) {
+              continue;
+            }
+            seenLeveragedIds.add(entryId);
+            const row = {
+              kind: entry.kind,
+              wallet,
+              symbol: entry.baseSymbol,
+              productToken: entry.productToken,
+              leverage: entry.leverage,
+              navCents: entry.navCents,
+              txHash: entry.txHash,
+              blockNumber: entry.blockNumber,
+              timestampMs: entry.timestampMs,
+            };
+            if (entry.kind === 'LEVERAGE_MINT') {
+              row.ttokenInWei = entry.ttokenInWei;
+              row.productQtyWei = entry.productQtyWei;
+            } else if (entry.kind === 'LEVERAGE_UNWIND') {
+              row.ttokenOutWei = entry.ttokenOutWei;
+              row.productQtyWei = entry.productQtyWei;
+            } else if (entry.kind === 'LEVERAGE_BURN') {
+              row.productQtyWei = entry.productQtyWei;
+            }
+            leveragedRows.push(row);
+          }
+        } catch {
+        }
+      }
+      for (let i = 0; i < leveragedRows.length; i += 1) {
+        items.push(leveragedRows[i]);
       }
     }
 
@@ -5171,6 +6323,14 @@ app.get('/api/portfolio/summary', async (req, res) => {
     await ensureIndexerSynced();
     const snapshot = readIndexerSnapshot();
     const deployments = loadDeployments();
+    const chainIdHex = await hardhatRpc('eth_chainId', []);
+    const chainId = parseRpcInt(chainIdHex);
+    const nativeEthWeiHex = await hardhatRpc('eth_getBalance', [wallet, 'latest']);
+    const nativeEthWei = BigInt(nativeEthWeiHex).toString();
+    let nativeSymbol = 'ETH';
+    if (chainId === 11155111) {
+      nativeSymbol = 'SepoliaETH';
+    }
     const ttokenAddr = deployments.ttoken;
     const ttokenData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
     const ttokenResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: ttokenData }, 'latest']);
@@ -5570,6 +6730,9 @@ app.get('/api/portfolio/summary', async (req, res) => {
 
     res.json({
       wallet,
+      chainId,
+      nativeSymbol,
+      nativeEthWei,
       cashValueWei: cashWei.toString(),
       stockValueWei: stockValueWei.toString(),
       leveragedValueWei: leveragedValueWei.toString(),
@@ -5974,7 +7137,11 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
       claimCount: normalizedClaims.length,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const message = String(err && err.message ? err.message : err);
+    if (isRpcRateLimitError(message) || message.includes('RPC non-JSON response')) {
+      return res.status(429).json({ error: 'RPC rate limited while declaring merkle dividend. Please retry in a few seconds.' });
+    }
+    res.status(500).json({ error: message });
   }
 });
 
@@ -6048,21 +7215,27 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
     const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
     const nextEpochId = Number(countRaw) + 1;
 
-    const claims = [];
-    for (let i = 0; i < holders.length; i += 1) {
-      const account = holders[i];
+    const claimRows = await mapWithConcurrency(holders, 4, async (account) => {
       const balData = equityTokenSnapshotInterface.encodeFunctionData('balanceOfAt', [account, BigInt(snapshotId)]);
       const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
       const [balanceRaw] = equityTokenSnapshotInterface.decodeFunctionResult('balanceOfAt', balResult);
       const balanceWei = BigInt(balanceRaw.toString());
-      if (balanceWei > 0n) {
-        const amountWei = (balanceWei * divPerShareWei) / (10n ** 18n);
-        if (amountWei > 0n) {
-          claims.push({
-            account,
-            amountWei: amountWei.toString(),
-          });
-        }
+      if (!(balanceWei > 0n)) {
+        return null;
+      }
+      const amountWei = (balanceWei * divPerShareWei) / (10n ** 18n);
+      if (!(amountWei > 0n)) {
+        return null;
+      }
+      return {
+        account,
+        amountWei: amountWei.toString(),
+      };
+    });
+    const claims = [];
+    for (let i = 0; i < claimRows.length; i += 1) {
+      if (claimRows[i]) {
+        claims.push(claimRows[i]);
       }
     }
     claims.sort((a, b) => a.account.toLowerCase().localeCompare(b.account.toLowerCase()));
@@ -6176,7 +7349,11 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       levelSizes: levels.map((rows) => rows.length),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const message = String(err && err.message ? err.message : err);
+    if (isRpcRateLimitError(message) || message.includes('RPC non-JSON response')) {
+      return res.status(429).json({ error: 'RPC rate limited while building merkle tree. Please retry in a few seconds.' });
+    }
+    res.status(500).json({ error: message });
   }
 });
 
@@ -6514,6 +7691,15 @@ app.post('/api/dividends/merkle/claim', async (req, res) => {
       BigInt(leafIndex),
       proof,
     ]);
+    const clientSign = wantsClientSign(body);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'claim_merkle_dividend', from: wallet, to: deployments.dividendsMerkle, data },
+        ],
+      });
+    }
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: deployments.dividendsMerkle,
@@ -6829,6 +8015,7 @@ app.post('/api/dividends/declare', async (req, res) => {
 app.post('/api/dividends/claim', async (req, res) => {
   try {
     const body = req.body;
+    const clientSign = wantsClientSign(body);
     const wallet = normalizeAddress(String(body.wallet));
     const symbol = String(body.symbol).toUpperCase();
     const epochId = Number(body.epochId);
@@ -6910,6 +8097,14 @@ app.post('/api/dividends/claim', async (req, res) => {
       await waitForReceipt(txHash);
     }
     const data = dividendsInterface.encodeFunctionData('claimDividend', [tokenAddress, BigInt(epochId)]);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'claim_snapshot_dividend', from: wallet, to: deployments.dividends, data },
+        ],
+      });
+    }
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: deployments.dividends,
@@ -6933,28 +8128,37 @@ async function buildAwardLeaderboardForEpoch(awardAddress, epochId) {
   const [countRaw] = awardInterface.decodeFunctionResult('getEpochTraderCount', countResult);
   const count = Number(countRaw);
 
-  const items = [];
+  const indexes = [];
   for (let i = 0; i < count; i += 1) {
+    indexes.push(i);
+  }
+  const itemRows = await mapWithConcurrency(indexes, 4, async (i) => {
     const traderData = awardInterface.encodeFunctionData('getEpochTraderAt', [BigInt(epochId), BigInt(i)]);
     const traderResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: traderData }, 'latest']);
     const [traderRaw] = awardInterface.decodeFunctionResult('getEpochTraderAt', traderResult);
     const trader = normalizeAddress(traderRaw);
 
     const qtyData = awardInterface.encodeFunctionData('qtyByEpochByTrader', [BigInt(epochId), trader]);
-    const qtyResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: qtyData }, 'latest']);
-    const [qtyRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
-    const qtyWei = qtyRaw.toString();
-
     const winnerData = awardInterface.encodeFunctionData('isWinner', [BigInt(epochId), trader]);
-    const winnerResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: winnerData }, 'latest']);
+    const [qtyResult, winnerResult] = await Promise.all([
+      hardhatRpc('eth_call', [{ to: awardAddress, data: qtyData }, 'latest']),
+      hardhatRpc('eth_call', [{ to: awardAddress, data: winnerData }, 'latest']),
+    ]);
+    const [qtyRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
     const [isWinner] = awardInterface.decodeFunctionResult('isWinner', winnerResult);
 
-    items.push({
+    return {
       epochId,
       trader,
-      qtyWei,
+      qtyWei: qtyRaw.toString(),
       isWinner,
-    });
+    };
+  });
+  const items = [];
+  for (let i = 0; i < itemRows.length; i += 1) {
+    if (itemRows[i]) {
+      items.push(itemRows[i]);
+    }
   }
 
   items.sort((a, b) => {
@@ -6982,6 +8186,10 @@ async function buildAwardLeaderboardForEpoch(awardAddress, epochId) {
 async function getAwardStatusSnapshot() {
   const deployments = loadDeployments();
   if (!deployments.award) {
+    return { available: false };
+  }
+  const awardDeployed = await ensureContract(deployments.award);
+  if (!awardDeployed) {
     return { available: false };
   }
 
@@ -7080,12 +8288,20 @@ async function getAwardStatusSnapshot() {
 
 app.get('/api/award/status', async (_req, res) => {
   try {
+    if (
+      awardCache.status
+      && (Date.now() - Number(awardCache.status.timestampMs)) <= AWARD_CACHE_TTL_MS
+    ) {
+      return res.json(awardCache.status.value);
+    }
     const snapshot = await getAwardStatusSnapshot();
     if (!snapshot.available) {
-      return res.json({ available: false });
+      const unavailable = { available: false };
+      awardCache.status = { value: unavailable, timestampMs: Date.now() };
+      return res.json(unavailable);
     }
 
-    res.json({
+    const payload = {
       available: true,
       currentEpoch: snapshot.currentEpoch,
       nowSec: snapshot.nowSec,
@@ -7097,7 +8313,9 @@ app.get('/api/award/status', async (_req, res) => {
       secondsRemaining: snapshot.secondsRemaining,
       sessionTerminated: snapshot.sessionTerminated,
       sessionControl: snapshot.sessionControl,
-    });
+    };
+    awardCache.status = { value: payload, timestampMs: Date.now() };
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -7126,14 +8344,21 @@ app.get('/api/award/leaderboard', async (req, res) => {
       epochId = Math.max(0, currentEpoch - 1);
     }
 
+    const cacheKey = `${epochId}:${currentEpoch}`;
+    const cached = readAwardCacheEntry(awardCache.leaderboard, cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
     const leaderboard = await buildAwardLeaderboardForEpoch(deployments.award, epochId);
-    res.json({
+    const payload = {
       available: true,
       epochId,
       currentEpoch,
       maxQtyWei: leaderboard.maxQtyWei,
       items: leaderboard.items,
-    });
+    };
+    writeAwardCacheEntry(awardCache.leaderboard, cacheKey, payload);
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -7166,47 +8391,57 @@ app.get('/api/award/claimable', async (req, res) => {
     }
     const limit = Math.min(200, Math.max(1, Number(limitRaw)));
     const startEpoch = Math.max(0, currentEpoch - limit);
-    const items = [];
-
+    const cacheKey = `${wallet.toLowerCase()}:${currentEpoch}:${limit}`;
+    const cached = readAwardCacheEntry(awardCache.claimable, cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+    const epochs = [];
     for (let epochId = startEpoch; epochId < currentEpoch; epochId += 1) {
+      epochs.push(epochId);
+    }
+    const claimRows = await mapWithConcurrency(epochs, 4, async (epochId) => {
       const winnerData = awardInterface.encodeFunctionData('isWinner', [BigInt(epochId), wallet]);
-      const winnerResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: winnerData }, 'latest']);
-      const [isWinner] = awardInterface.decodeFunctionResult('isWinner', winnerResult);
-
       const claimedData = awardInterface.encodeFunctionData('hasClaimed', [BigInt(epochId), wallet]);
-      const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: claimedData }, 'latest']);
+      const [winnerResult, claimedResult] = await Promise.all([
+        hardhatRpc('eth_call', [{ to: deployments.award, data: winnerData }, 'latest']),
+        hardhatRpc('eth_call', [{ to: deployments.award, data: claimedData }, 'latest']),
+      ]);
+      const [isWinner] = awardInterface.decodeFunctionResult('isWinner', winnerResult);
       const [claimed] = awardInterface.decodeFunctionResult('hasClaimed', claimedResult);
+      if (!(isWinner && !claimed)) {
+        return null;
+      }
 
-      if (isWinner && !claimed) {
-        const qtyData = awardInterface.encodeFunctionData('qtyByEpochByTrader', [BigInt(epochId), wallet]);
-        const qtyResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: qtyData }, 'latest']);
-        const [qtyWeiRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
+      const qtyData = awardInterface.encodeFunctionData('qtyByEpochByTrader', [BigInt(epochId), wallet]);
+      const maxData = awardInterface.encodeFunctionData('maxQtyByEpoch', [BigInt(epochId)]);
+      const [qtyResult, maxResult] = await Promise.all([
+        hardhatRpc('eth_call', [{ to: deployments.award, data: qtyData }, 'latest']),
+        hardhatRpc('eth_call', [{ to: deployments.award, data: maxData }, 'latest']),
+      ]);
+      const [qtyWeiRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
+      const [maxQtyWeiRaw] = awardInterface.decodeFunctionResult('maxQtyByEpoch', maxResult);
 
-        const maxData = awardInterface.encodeFunctionData('maxQtyByEpoch', [BigInt(epochId)]);
-        const maxResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: maxData }, 'latest']);
-        const [maxQtyWeiRaw] = awardInterface.decodeFunctionResult('maxQtyByEpoch', maxResult);
-
-        items.push({
-          epochId,
-          qtyWei: qtyWeiRaw.toString(),
-          maxQtyWei: maxQtyWeiRaw.toString(),
-          isWinner,
-          claimed,
-          canClaim: (() => {
-            let canClaim = false;
-            if (isWinner) {
-              if (!claimed) {
-                canClaim = true;
-              }
-            }
-            return canClaim;
-          })(),
-        });
+      return {
+        epochId,
+        qtyWei: qtyWeiRaw.toString(),
+        maxQtyWei: maxQtyWeiRaw.toString(),
+        isWinner,
+        claimed,
+        canClaim: true,
+      };
+    });
+    const items = [];
+    for (let i = 0; i < claimRows.length; i += 1) {
+      if (claimRows[i]) {
+        items.push(claimRows[i]);
       }
     }
 
     items.sort((a, b) => b.epochId - a.epochId);
-    res.json({ available: true, wallet, currentEpoch, items });
+    const payload = { available: true, wallet, currentEpoch, items };
+    writeAwardCacheEntry(awardCache.claimable, cacheKey, payload);
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -7240,12 +8475,24 @@ app.post('/api/award/claim', async (req, res) => {
     }
 
     const data = awardInterface.encodeFunctionData('claimAward', [BigInt(epochId)]);
+    const clientSign = wantsClientSign(req.body);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'claim_award', from: wallet, to: deployments.award, data },
+        ],
+      });
+    }
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: deployments.award,
       data,
     }]);
     await waitForReceipt(txHash);
+    awardCache.claimable.clear();
+    awardCache.leaderboard.clear();
+    awardCache.status = null;
     res.json({ txHash, wallet, epochId });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -7258,7 +8505,11 @@ app.get('/api/award/current', async (_req, res) => {
     if (!deployments.award) {
       return res.json({ available: false });
     }
-    const statusRes = await fetch(`http://127.0.0.1:${PORT}/api/award/status`);
+    let selfBaseUrl = `http://127.0.0.1:${PORT}`;
+    if (process.env.SERVER_BASE_URL) {
+      selfBaseUrl = String(process.env.SERVER_BASE_URL);
+    }
+    const statusRes = await fetch(`${selfBaseUrl}/api/award/status`);
     const statusData = await statusRes.json();
     if (!statusRes.ok) {
       let reason = 'failed to load status';
@@ -7267,7 +8518,7 @@ app.get('/api/award/current', async (_req, res) => {
       }
       return res.status(500).json({ error: reason });
     }
-    const leaderboardRes = await fetch(`http://127.0.0.1:${PORT}/api/award/leaderboard?epochId=${Math.max(0, statusData.currentEpoch - 1)}`);
+    const leaderboardRes = await fetch(`${selfBaseUrl}/api/award/leaderboard?epochId=${Math.max(0, statusData.currentEpoch - 1)}`);
     const leaderboardData = await leaderboardRes.json();
     let topRow = null;
     if (leaderboardData.items) {
@@ -7478,6 +8729,7 @@ app.get('/api/leveraged/products', async (_req, res) => {
 app.post('/api/leveraged/mint', async (req, res) => {
   try {
     const body = req.body;
+    const clientSign = wantsClientSign(body);
     const wallet = normalizeAddress(String(body.wallet));
     const productSymbol = String(body.productSymbol).toUpperCase();
     const ttokenInWei = BigInt(String(body.ttokenInWei));
@@ -7541,6 +8793,20 @@ app.post('/api/leveraged/mint', async (req, res) => {
     }
 
     const approveData = equityTokenInterface.encodeFunctionData('approve', [routerAddress, ttokenInWei]);
+    if (clientSign) {
+      const mintDataPrepared = leveragedRouterInterface.encodeFunctionData('mintLong', [productToken, ttokenInWei, minOutWei]);
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'approve_ttoken_for_leveraged', from: wallet, to: ttokenAddress, data: approveData },
+          { label: 'mint_leveraged', from: wallet, to: routerAddress, data: mintDataPrepared },
+        ],
+        wallet,
+        productSymbol,
+        productToken,
+        ttokenInWei: ttokenInWei.toString(),
+      });
+    }
     const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: ttokenAddress,
@@ -7565,6 +8831,7 @@ app.post('/api/leveraged/mint', async (req, res) => {
 app.post('/api/leveraged/unwind', async (req, res) => {
   try {
     const body = req.body;
+    const clientSign = wantsClientSign(body);
     const wallet = normalizeAddress(String(body.wallet));
     const productSymbol = String(body.productSymbol).toUpperCase();
     const qtyWei = BigInt(String(body.qtyWei));
@@ -7649,6 +8916,18 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     }
 
     const unwindData = leveragedRouterInterface.encodeFunctionData('unwindLong', [productToken, qtyWei, minOutWei]);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'unwind_leveraged', from: wallet, to: routerAddress, data: unwindData },
+        ],
+        wallet,
+        productSymbol,
+        productToken,
+        qtyWei: qtyWei.toString(),
+      });
+    }
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: routerAddress,
@@ -7839,7 +9118,7 @@ app.get('/api/leveraged/positions', async (req, res) => {
         const unrealizedPnlWei = (BigInt(currentValueWei) - BigInt(costBasisWei)).toString();
         const currentPriceWei = ((BigInt(currentValueWei) * 1000000000000000000n) / BigInt(qtyWei)).toString();
         let basePriceCents = 0;
-        let baseChangePct = 0;
+        let baseChangePct = Number.NaN;
         try {
           const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
           let yahooPriceRaw = 0;
@@ -7852,14 +9131,38 @@ app.get('/api/leveraged/positions', async (req, res) => {
           if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
             basePriceCents = Math.round(yahooPrice * 100);
           }
-          if (quote.regularMarketChangePercent) {
-            baseChangePct = Number(quote.regularMarketChangePercent) * 100;
+          const yahooOpen = Number(quote.regularMarketOpen);
+          if (
+            Number.isFinite(yahooOpen)
+            && yahooOpen > 0
+            && Number.isFinite(yahooPrice)
+            && yahooPrice > 0
+          ) {
+            baseChangePct = ((yahooPrice - yahooOpen) / yahooOpen) * 100;
+          }
+          const yahooChangeRaw = Number(quote.regularMarketChangePercent);
+          if (Number.isFinite(yahooChangeRaw) && (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001)) {
+            if (Math.abs(yahooChangeRaw) <= 1) {
+              baseChangePct = yahooChangeRaw * 100;
+            } else {
+              baseChangePct = yahooChangeRaw;
+            }
+          }
+          const yahooPrevClose = Number(quote.regularMarketPreviousClose);
+          if (
+            Number.isFinite(yahooPrevClose)
+            && yahooPrevClose > 0
+            && Number.isFinite(yahooPrice)
+            && yahooPrice > 0
+            && (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001)
+          ) {
+            baseChangePct = ((yahooPrice - yahooPrevClose) / yahooPrevClose) * 100;
           }
         } catch {
         }
-        if (!(basePriceCents > 0)) {
+        if (!(basePriceCents > 0) || !Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001) {
           try {
-            const fmpShort = await fetchFmpJson(getFmpUrl('quote-short', { symbol: String(item.baseSymbol).toUpperCase() }));
+            const fmpShort = await fetchFmpJson(getFmpUrl('quote', { symbol: String(item.baseSymbol).toUpperCase() }));
             let first = null;
             if (Array.isArray(fmpShort) && fmpShort.length > 0) {
               first = fmpShort[0];
@@ -7875,16 +9178,30 @@ app.get('/api/leveraged/positions', async (req, res) => {
               if (Number.isFinite(fmpPrice) && fmpPrice > 0) {
                 basePriceCents = Math.round(fmpPrice * 100);
               }
-              if (!(baseChangePct !== 0)) {
-                let fmpPctRaw = 0;
-                if (first.changePercent) {
+              const fmpOpen = Number(first.open);
+              if (
+                Number.isFinite(fmpOpen)
+                && fmpOpen > 0
+                && Number.isFinite(fmpPrice)
+                && fmpPrice > 0
+              ) {
+                baseChangePct = ((fmpPrice - fmpOpen) / fmpOpen) * 100;
+              }
+              if (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001) {
+                let fmpPctRaw = Number.NaN;
+                if (first.changePercent !== undefined && first.changePercent !== null) {
                   fmpPctRaw = first.changePercent;
-                } else if (first.changesPercentage) {
+                } else if (first.changesPercentage !== undefined && first.changesPercentage !== null) {
                   fmpPctRaw = first.changesPercentage;
                 }
                 const fmpPct = Number(fmpPctRaw);
-                if (Number.isFinite(fmpPct)) {
+                if (Number.isFinite(fmpPct) && Math.abs(fmpPct) >= 0.0001) {
                   baseChangePct = fmpPct;
+                } else {
+                  const fmpPrevClose = Number(first.previousClose);
+                  if (Number.isFinite(fmpPrevClose) && fmpPrevClose > 0 && Number.isFinite(fmpPrice) && fmpPrice > 0) {
+                    baseChangePct = ((fmpPrice - fmpPrevClose) / fmpPrevClose) * 100;
+                  }
                 }
               }
             }
@@ -8012,6 +9329,60 @@ app.get('/api/admin/symbols/status', async (_req, res) => {
   }
 });
 
+app.post('/api/admin/price/set', async (req, res) => {
+  try {
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase().trim();
+    const priceCents = Number(req.body.priceCents);
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    if (!Number.isFinite(priceCents) || priceCents <= 0) {
+      return res.status(400).json({ error: 'priceCents must be > 0' });
+    }
+    const updateResult = await setOnchainPriceForSymbol(symbol, Math.round(priceCents));
+    if (!updateResult.ok) {
+      return res.status(400).json({ error: updateResult.error });
+    }
+    res.json({
+      symbol,
+      priceCents: Math.round(priceCents),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/price-set', async (req, res) => {
+  try {
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase().trim();
+    const priceCents = Number(req.body.priceCents);
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    if (!Number.isFinite(priceCents) || priceCents <= 0) {
+      return res.status(400).json({ error: 'priceCents must be > 0' });
+    }
+    const updateResult = await setOnchainPriceForSymbol(symbol, Math.round(priceCents));
+    if (!updateResult.ok) {
+      return res.status(400).json({ error: updateResult.error });
+    }
+    res.json({
+      symbol,
+      priceCents: Math.round(priceCents),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/admin/award/session', async (_req, res) => {
   try {
     const snapshot = await getAwardStatusSnapshot();
@@ -8113,6 +9484,7 @@ app.post('/api/admin/award/session', async (req, res) => {
     }
     state.updatedAtMs = Date.now();
     writeAwardSessionState(state);
+    awardCache.status = null;
 
     res.json({
       ok: true,
@@ -8155,6 +9527,67 @@ app.post('/api/gas/run', async (req, res) => {
 
 app.get('/api/gas/latest', async (_req, res) => {
   try {
+    let walletText = '';
+    if (_req.query && _req.query.wallet) {
+      walletText = String(_req.query.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    if (!ENABLE_GAS_PACK) {
+      if (wallet) {
+        const walletRows = await buildWalletGasRowsFromIndexer(wallet, 20);
+        const walletReport = {
+          suite: 'wallet',
+          startedAtMs: Date.now(),
+          finishedAtMs: Date.now(),
+          durationMs: 0,
+          chainId: 0,
+          latestBlock: 0,
+          thresholdPct: GAS_WARN_THRESHOLD_PCT,
+          warnCount: 0,
+          skipCount: 0,
+          totalRows: walletRows.length,
+          pollMs: GAS_PAGE_POLL_MS,
+          rows: walletRows,
+        };
+        return res.json({
+          ok: true,
+          disabled: true,
+          source: 'wallet_indexed_receipts',
+          lastRunAtMs: gasRuntimeState.lastRunAtMs,
+          report: walletReport,
+        });
+      }
+      const disabledReport = {
+        suite: 'core',
+        startedAtMs: Date.now(),
+        finishedAtMs: Date.now(),
+        durationMs: 0,
+        chainId: 0,
+        latestBlock: 0,
+        thresholdPct: GAS_WARN_THRESHOLD_PCT,
+        warnCount: 0,
+        skipCount: 1,
+        totalRows: 1,
+        pollMs: GAS_PAGE_POLL_MS,
+        rows: [{
+          txName: 'gas_pack_disabled',
+          gasUsed: '0',
+          effectiveGasPrice: '0',
+          costWei: '0',
+          costEth: '0',
+          baselineGasUsed: '0',
+          deltaPct: null,
+          status: 'SKIP',
+          skipReason: 'disabled on this network',
+        }],
+      };
+      return res.json({
+        ok: true,
+        disabled: true,
+        lastRunAtMs: gasRuntimeState.lastRunAtMs,
+        report: disabledReport,
+      });
+    }
     if (!gasRuntimeState.latest) {
       await runGasPackGuarded('core');
     }
@@ -8297,8 +9730,42 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
     if (invalidTriggerPrice) {
       return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
     }
-    if (!(BigInt(qtyWei) > 0n)) {
+    const qtyWeiBig = BigInt(qtyWei);
+    if (!(qtyWeiBig > 0n)) {
       return res.status(400).json({ error: 'qtyWei must be > 0' });
+    }
+    const oneTokenWei = 10n ** 18n;
+    if (qtyWeiBig % oneTokenWei !== 0n) {
+      return res.status(400).json({ error: 'qtyWei must be whole tokens (18 decimals)' });
+    }
+    const qtyUnits = qtyWeiBig / oneTokenWei;
+    if (qtyUnits < BigInt(MIN_STOCK_QTY_UNITS)) {
+      return res.status(400).json({ error: `qty must be at least ${MIN_STOCK_QTY_UNITS}` });
+    }
+    if (qtyUnits % BigInt(MIN_STOCK_QTY_UNITS) !== 0n) {
+      return res.status(400).json({ error: `qty must be in steps of ${MIN_STOCK_QTY_UNITS}` });
+    }
+    if (side === 'BUY') {
+      const deployments = loadDeployments();
+      const ttokenAddr = normalizeAddress(getTTokenAddressFromDeployments());
+      if (ttokenAddr) {
+        const requiredQuoteWei = quoteAmountWei(qtyWeiBig, triggerPriceCents);
+        const balanceData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+        const balanceResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: balanceData }, 'latest']);
+        const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balanceResult);
+        const balanceWei = BigInt(balanceWeiRaw.toString());
+        if (balanceWei < requiredQuoteWei) {
+          return res.status(400).json({
+            error: `insufficient TToken for auto buy: need ${ethers.formatUnits(requiredQuoteWei, 18)}, have ${ethers.formatUnits(balanceWei, 18)}`,
+          });
+        }
+      }
+    }
+    const canSend = await canServerSendFromAddress(wallet);
+    if (!canSend) {
+      return res.status(400).json({
+        error: `autotrade requires server signer for ${wallet}; add wallet key in TX_SIGNER_PRIVATE_KEYS`,
+      });
     }
 
     const state = readAutoTradeState();
@@ -8308,7 +9775,7 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
       symbol,
       side,
       triggerPriceCents: Number(triggerPriceCents),
-      qtyWei: String(qtyWei),
+      qtyWei: qtyWeiBig.toString(),
       maxSlippageBps,
       enabled,
       cooldownSec,
@@ -8675,6 +10142,20 @@ app.post('/api/equity/mint', async (req, res) => {
       to: tokenAddr,
       data: mintData,
     }]);
+    const receipt = await waitForReceipt(txHash);
+    const blockNumber = parseRpcInt(receipt.blockNumber);
+    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    appendManualMintActivity({
+      wallet: to,
+      tokenAddress: tokenAddr,
+      symbol,
+      assetType: 'EQUITY',
+      amountWei: amountWei.toString(),
+      reason: 'MINT_EQUITY',
+      txHash,
+      blockNumber,
+      timestampMs,
+    });
     res.json({ txHash, tokenAddress: tokenAddr });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -8772,6 +10253,20 @@ app.post('/api/equity/create-mint', async (req, res) => {
       to: tokenAddr,
       data: mintData,
     }]);
+    const receipt = await waitForReceipt(mintTx);
+    const blockNumber = parseRpcInt(receipt.blockNumber);
+    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    appendManualMintActivity({
+      wallet: to,
+      tokenAddress: tokenAddr,
+      symbol,
+      assetType: 'EQUITY',
+      amountWei: amountWei.toString(),
+      reason: 'MINT_EQUITY',
+      txHash: mintTx,
+      blockNumber,
+      timestampMs,
+    });
     res.json({ createTx, mintTx, tokenAddress: tokenAddr });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -8785,7 +10280,7 @@ app.get('/api/registry/listings', async (req, res) => {
     const registryAddr = deployments.listingsRegistry;
     const registryDeployed = await ensureContract(registryAddr);
     if (!registryDeployed) {
-      return res.status(500).json({ error: '' });
+      return res.json({ listings: [] });
     }
     const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
     const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
@@ -9036,30 +10531,39 @@ if (!fs.existsSync(AWARD_SESSION_FILE)) {
 }
 if (fs.existsSync(AUTOTRADE_STATE_FILE)) {
   const autoState = readAutoTradeState();
-  autoState.listenerRunning = true;
+  autoState.listenerRunning = ENABLE_AUTOTRADE;
   writeAutoTradeState(autoState);
 }
 setInterval(() => {
   ensureIndexerSynced();
 }, INDEXER_SYNC_INTERVAL_MS);
-setInterval(() => {
-  runAutoTradeTick().catch((err) => {
-    let msg = 'auto trade interval failed';
-    if (err && err.message) {
-      msg = err.message;
-    }
-    console.error('[autotrade]', msg);
-  });
-}, AUTOTRADE_POLL_INTERVAL_MS);
-setInterval(() => {
-  runGasPackGuarded('core').catch((err) => {
-    let msg = 'gas pack interval failed';
-    if (err && err.message) {
-      msg = err.message;
-    }
-    console.error('[gas]', msg);
-  });
-}, GAS_AUTO_RUN_INTERVAL_MS);
+if (ENABLE_AUTOTRADE) {
+  setInterval(() => {
+    runAutoTradeTick().catch((err) => {
+      let msg = 'auto trade interval failed';
+      if (err && err.message) {
+        msg = err.message;
+      }
+      console.error('[autotrade]', msg);
+    });
+  }, AUTOTRADE_POLL_INTERVAL_MS);
+}
+if (ENABLE_GAS_PACK) {
+  const gasIntervalId = setInterval(() => {
+    runGasPackGuarded('core').catch((err) => {
+      let msg = 'gas pack interval failed';
+      if (err && err.message) {
+        msg = err.message;
+      }
+      if (msg.includes('need at least 2 local accounts')) {
+        console.error('[gas] disabled background gas loop: Sepolia RPC does not expose local unlocked accounts');
+        clearInterval(gasIntervalId);
+        return;
+      }
+      console.error('[gas]', msg);
+    });
+  }, GAS_AUTO_RUN_INTERVAL_MS);
+}
 
 app.use((_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -9068,10 +10572,19 @@ app.use((_req, res) => {
 const DEFAULT_PORT = 3000;
 
 let PORT = DEFAULT_PORT;
-if (process.env.STAGE0_PORT) {
+if (process.env.PORT) {
+  PORT = Number(process.env.PORT);
+} else if (process.env.STAGE0_PORT) {
   PORT = Number(process.env.STAGE0_PORT);
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`RPC URL: ${HARDHAT_RPC_URL}`);
+  console.log(`Deployments file: ${DEPLOYMENTS_FILE}`);
+  console.log(`Signer keys loaded: ${RPC_SIGNERS.size}`);
+  console.log(`Autotrade loop enabled: ${ENABLE_AUTOTRADE}`);
+  console.log(`Autotrade interval ms: ${AUTOTRADE_POLL_INTERVAL_MS}`);
+  console.log(`Gas loop enabled: ${ENABLE_GAS_PACK}`);
+  console.log(`Gas interval ms: ${GAS_AUTO_RUN_INTERVAL_MS}`);
 });

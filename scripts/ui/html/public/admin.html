@@ -977,7 +977,11 @@
 
       openOrdersBody.innerHTML = "";
       const activeOrders = [];
-      for (const order of openData.orders) {
+      let openRows = [];
+      if (openRes.ok && openData && Array.isArray(openData.orders)) {
+        openRows = openData.orders;
+      }
+      for (const order of openRows) {
         if (order.active === true && Number(order.remaining) > 0) {
           activeOrders.push(order);
           // add to existing order if active
@@ -1009,7 +1013,11 @@
       const fillsData = await fillsRes.json();
 
       fillsBody.innerHTML = "";
-      for (const fill of fillsData.fills) {
+      let fillRows = [];
+      if (fillsRes.ok && fillsData && Array.isArray(fillsData.fills)) {
+        fillRows = fillsData.fills;
+      }
+      for (const fill of fillRows) {
         const tr = document.createElement("tr");
         const date = new Date(fill.timestampMs);
         const formatter = new Intl.DateTimeFormat("en-US", {
@@ -1032,6 +1040,12 @@
           <td>${formatQty(fill.qty)}</td>
           <td class="muted">${formatted}</td>
         `;
+        fillsBody.appendChild(tr);
+      }
+      if (fillRows.length === 0) {
+        const tr = document.createElement("tr");
+        const message = (fillsData && fillsData.error) ? String(fillsData.error) : "No completed transactions yet";
+        tr.innerHTML = `<td colspan="6" class="muted">${message}</td>`;
         fillsBody.appendChild(tr);
       }
     })();

@@ -349,7 +349,7 @@
         <a class="nav-link active" href="#" data-page="markets">Markets</a>
         <a class="nav-link" href="#" data-page="portfolio">Portfolio</a>
         <a class="nav-link" href="#" data-page="transactions">Transactions</a>
-        <a class="nav-link" href="#" data-page="ttoken">TToken</a>
+        <a class="nav-link" href="#" data-page="ttoken">Token Factory</a>
         <a class="nav-link" href="#" data-page="trade">Trade</a>
         <a class="nav-link" href="#" data-page="award">Award</a>
         <a class="nav-link" href="#" data-page="gas">Gas</a>
@@ -362,7 +362,7 @@
       <header>
         <div class="index-tape-shell">
           <div id="index-tape-track" class="index-tape-track">
-            <span class="index-label">Loading index ticker</span>
+            <span class="index-label">Loading US stock ticker</span>
           </div>
         </div>
       </header>
@@ -498,7 +498,7 @@
       // iframe scr switch
       if (page === "ttoken") {
         pageFrame.src = "/ttoken.html";
-        pageFrame.title = "TToken airdrop";
+        pageFrame.title = "Token Factory";
         setActiveNav("ttoken");
         return;
       }

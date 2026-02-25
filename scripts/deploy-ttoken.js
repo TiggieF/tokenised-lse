@@ -2,6 +2,34 @@ const { ethers, network } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
 
+async function ensureDir(dirPath) {
+  await fs.promises.mkdir(dirPath, { recursive: true });
+}
+
+async function writeDeployment(networkName, payload) {
+  const dir = path.join(__dirname, "..", "deployments");
+  await ensureDir(dir);
+
+  const filePath = path.join(dir, `${networkName}.json`);
+  let existing = {};
+
+  try {
+    const raw = await fs.promises.readFile(filePath, "utf8");
+    existing = JSON.parse(raw);
+  } catch {
+    existing = { network: networkName };
+  }
+
+  const merged = {
+    ...existing,
+    ...payload,
+  };
+
+  const body = JSON.stringify(merged, null, 2) + "\n";
+  await fs.promises.writeFile(filePath, body);
+  return filePath;
+}
+
 async function main() {
   const signers = await ethers.getSigners();
   const deployer = signers[0];
@@ -22,25 +50,12 @@ async function main() {
   console.log("TToken deployed to:", tokenAddress);
   console.log("Max supply:", maxSupply.toString());
   console.log("Airdrop amount:", airdropAmount.toString());
-
-  const isLocal = network.name === "localhost" || network.name === "hardhat";
-  if (isLocal) {
-    const deploymentsPath = path.join(__dirname, "..", "deployments", "localhost.json");
-
-    let deployments = {};
-    try {
-      const raw = fs.readFileSync(deploymentsPath, "utf8");
-      deployments = JSON.parse(raw);
-    } catch (readError) {
-      deployments = { network: "localhost" };
-    }
-
-    deployments.ttoken = tokenAddress;
-
-    const body = JSON.stringify(deployments, null, 2) + "\n";
-    fs.writeFileSync(deploymentsPath, body);
-    console.log("Updated deployments/localhost.json with TToken address.");
-  }
+  const outputPath = await writeDeployment(network.name, {
+    network: network.name,
+    ttoken: tokenAddress,
+    ttokenAddress: tokenAddress,
+  });
+  console.log("Updated deployment file:", outputPath);
 }
 
 main().catch((error) => {

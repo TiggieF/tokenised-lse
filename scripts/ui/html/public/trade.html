@@ -289,7 +289,7 @@
           </div>
           <div class="qty">
             <button type="button">-</button>
-            <div>100</div>
+            <div>10</div>
             <button type="button">+</button>
           </div>
           <div class="stat-row">
@@ -310,7 +310,7 @@
           </div>
           <div class="input-row">
             <label>Order size</label>
-            <input type="text" id="auto-qty" value="100" />
+            <input type="text" id="auto-qty" value="10" />
           </div>
         <div class="actions">
             <button class="btn btn-buy" id="auto-buy-btn" type="button">Set Auto Buy</button>
@@ -342,7 +342,7 @@
       </div>
       <div class="input-row">
         <label>Buy amount in TToken</label>
-        <input type="text" id="lev-ttoken-in" value="100" />
+        <input type="text" id="lev-ttoken-in" value="10" />
       </div>
       <div class="actions">
         <button class="btn btn-buy" id="lev-mint-btn" type="button">Buy</button>
@@ -387,6 +387,26 @@
     let lifecycleBySymbol = {};
     let buyLimitPriceTouched = false;
     let autoLimitPriceTouched = false;
+    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+
+    async function ensureSepoliaNetwork() {
+      const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (chainId === SEPOLIA_CHAIN_ID_HEX) {
+        return;
+      }
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+        });
+      } catch (err) {
+        throw new Error("Please switch MetaMask network to Sepolia");
+      }
+      const after = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (after !== SEPOLIA_CHAIN_ID_HEX) {
+        throw new Error("MetaMask network is not Sepolia");
+      }
+    }
 
     function setWalletAddress(address) {
       currentAccount = address;
@@ -416,6 +436,44 @@
         return String(accounts[0]);
       }
       return "";
+    }
+
+    async function waitForWalletReceipt(txHash) {
+      for (let i = 0; i < 120; i += 1) {
+        const receipt = await window.ethereum.request({
+          method: "eth_getTransactionReceipt",
+          params: [txHash],
+        });
+        if (receipt) {
+          return receipt;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error(`tx not mined yet: ${txHash}`);
+    }
+
+    async function submitPreparedTxs(txs) {
+      if (!Array.isArray(txs) || txs.length === 0) {
+        throw new Error("No transactions prepared");
+      }
+      await ensureSepoliaNetwork();
+      let lastTxHash = "";
+      for (let i = 0; i < txs.length; i += 1) {
+        const tx = txs[i];
+        const txParams = {
+          from: currentAccount,
+          to: tx.to,
+          data: tx.data,
+          chainId: SEPOLIA_CHAIN_ID_HEX,
+        };
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [txParams],
+        });
+        await waitForWalletReceipt(txHash);
+        lastTxHash = txHash;
+      }
+      return lastTxHash;
     }
 
     function readProductFields(productSymbol) {
@@ -522,45 +580,18 @@
         return;
       }
       try {
-        let onchainPriceShown = false;
-        try {
-          const chainRes = await fetch(`/api/leveraged/quote?mode=MINT&productSymbol=${encodeURIComponent(productSymbol)}&ttokenInWei=1`);
-          const chainData = await chainRes.json();
-          if (chainRes.ok && !chainData.error) {
-            const navCents = Number(chainData.navCents);
-            if (Number.isFinite(navCents) && navCents > 0) {
-              levBasePriceEl.textContent = formatUsd(navCents / 100);
-              onchainPriceShown = true;
-            }
-          }
-        } catch {
-        }
-
         const quoteRes = await fetch(`/api/fmp/quote-short?symbol=${encodeURIComponent(parsed.baseSymbol)}`);
         const quoteData = await quoteRes.json();
         if (!quoteRes.ok) {
-          if (!onchainPriceShown) {
-            levBasePriceEl.textContent = "-";
-          }
+          levBasePriceEl.textContent = "-";
           levBaseChangeEl.textContent = "-";
           levBaseChangeEl.className = "price-change neutral";
           return;
         }
-        let priceText = levBasePriceEl.textContent;
-        if (!onchainPriceShown && quoteData.price) {
-          priceText = formatUsd(quoteData.price);
-        }
-        levBasePriceEl.textContent = priceText;
+        levBasePriceEl.textContent = quoteData.price ? formatUsd(quoteData.price) : "-";
         let pct = null;
         const currentPrice = Number(quoteData.price);
-        let previousClose = Number(quoteData.previousClose);
-        if (!(Number.isFinite(previousClose) && previousClose > 0)) {
-          const infoRes = await fetch(`/api/fmp/stock-info?symbol=${encodeURIComponent(parsed.baseSymbol)}`);
-          const infoData = await infoRes.json();
-          if (infoRes.ok && !infoData.error) {
-            previousClose = Number(infoData.previousClose);
-          }
-        }
+        const previousClose = Number(quoteData.previousClose);
         if (Number.isFinite(currentPrice) && currentPrice > 0 && Number.isFinite(previousClose) && previousClose > 0) {
           pct = ((currentPrice - previousClose) / previousClose) * 100;
         } else {
@@ -683,10 +714,11 @@
     function updateBuyQty(nextValue) {
       let value = Number(nextValue);
       if (Number.isNaN(value)) {
-        value = 100;
+        value = 10;
       }
-      if (value < 100) {
-        value = 100;
+      value = Math.floor(value);
+      if (value < 10) {
+        value = 10;
       }
       buyQtyValue.textContent = String(value);
       updateEstimatedCost(value);
@@ -756,11 +788,22 @@
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify({ ...payload, clientSign: true }),
         }
       );
       const data = await res.json(
       );
+      if (!res.ok) {
+        let message = "Order failed";
+        if (data && data.error) {
+          message = String(data.error);
+        }
+        throw new Error(message);
+      }
+      if (data.clientSign && Array.isArray(data.txs)) {
+        const txHash = await submitPreparedTxs(data.txs);
+        return txHash;
+      }
       return data.txHash;
     }
 
@@ -931,13 +974,13 @@
 
     buyMinusButton.addEventListener("click", function () {
       const currentValue = Number(buyQtyValue.textContent);
-      const nextValue = currentValue - 100;
+      const nextValue = currentValue - 10;
       updateBuyQty(nextValue);
     });
 
     buyPlusButton.addEventListener("click", function () {
       const currentValue = Number(buyQtyValue.textContent);
-      const nextValue = currentValue + 100;
+      const nextValue = currentValue + 10;
       updateBuyQty(nextValue);
     });
 
@@ -1006,7 +1049,19 @@
         return;
       }
       const priceCents = parsePriceToCents(autoPriceInput.value);
-      const qtyWei = tokenTextToWei(autoQtyInput.value);
+      const autoQtyRaw = Number(autoQtyInput.value);
+      const autoQty = Math.floor(autoQtyRaw);
+      if (!Number.isFinite(autoQty) || autoQty < 10) {
+        showNoFunds(autoStatus);
+        autoStatus.textContent = "Order size must be at least 10";
+        return;
+      }
+      if (autoQty % 10 !== 0) {
+        showNoFunds(autoStatus);
+        autoStatus.textContent = "Order size must be in steps of 10";
+        return;
+      }
+      const qtyWei = tokenTextToWei(String(autoQty));
       showStatus(autoStatus, "Submitting");
       const res = await fetch("/api/autotrade/rules/create", {
         method: "POST",
@@ -1056,15 +1111,15 @@
           return;
         }
         const ttokenInWei = tokenTextToWei(levTtokenIn.value);
-        if (!(BigInt(ttokenInWei) > 0n)) {
-          levStatus.textContent = "Buy amount must be greater than 0";
+        if (!(BigInt(ttokenInWei) >= 10n * (10n ** 18n))) {
+          levStatus.textContent = "Buy amount must be at least 10";
           return;
         }
         levStatus.textContent = "Buying leveraged";
         const res = await fetch("/api/leveraged/mint", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wallet: currentAccount, productSymbol, ttokenInWei, minOutWei: "0" }),
+          body: JSON.stringify({ wallet: currentAccount, productSymbol, ttokenInWei, minOutWei: "0", clientSign: true }),
         });
         const data = await res.json();
         if (!res.ok) {
@@ -1072,7 +1127,11 @@
           levStatus.textContent = prettyTxError(data.error);
           return;
         }
-        showStatus(levStatus, `Bought leveraged tx ${data.txHash}`);
+        let txHash = data.txHash;
+        if (data.clientSign && Array.isArray(data.txs)) {
+          txHash = await submitPreparedTxs(data.txs);
+        }
+        showStatus(levStatus, `Bought leveraged tx ${txHash}`);
         if (data.productToken) {
           levTokenAddress.style.display = "block";
           levTokenAddress.textContent = `token address: ${data.productToken}`;
@@ -1085,11 +1144,12 @@
     });
 
     (async function () {
+      await ensureSepoliaNetwork();
       await loadListedSymbols();
       await loadLifecycleStatuses();
       await loadLeveragedProducts();
       await loadTradeLivePrice();
-      updateBuyQty(100);
+      updateBuyQty(10);
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",
@@ -1102,6 +1162,13 @@
     })();
     window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
+      loadTTokenBalance();
+      loadAutoRules();
+      loadLeveragedBaseQuote();
+    });
+    window.ethereum.on("chainChanged", function () {
+      loadLifecycleStatuses();
+      loadTradeLivePrice();
       loadTTokenBalance();
       loadAutoRules();
       loadLeveragedBaseQuote();
