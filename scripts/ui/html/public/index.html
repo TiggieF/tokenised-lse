@@ -451,6 +451,12 @@
       }
       liveUpdatesToggle.style.display = adminFeaturesEnabled ? "inline-flex" : "none";
       liveUpdatesToggle.disabled = !adminFeaturesEnabled;
+      if (adminFeaturesEnabled) {
+        // Keep live updates enabled by default for allowed admin wallets.
+        if (liveUpdatesEnabled) {
+          setLiveUpdatesEnabled(true);
+        }
+      }
       if (!adminFeaturesEnabled) {
         if (liveUpdatesEnabled) {
           setLiveUpdatesEnabled(false);
