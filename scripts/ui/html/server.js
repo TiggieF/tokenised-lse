@@ -4,7 +4,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { ethers } = require('ethers');
 const YahooFinance = require('yahoo-finance2').default;
-const { fetchIntradayCandles, aggregateCandles, fetchQuote } = require('../dataFetch/tsla-yahoo/yahoo');
+const { fetchIntradayCandles, aggregateCandles, fetchQuote } = require('./yahoo');
 
 const app = express();
 app.use(express.json());
