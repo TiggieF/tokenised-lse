@@ -353,7 +353,7 @@
         <a class="nav-link" href="#" data-page="trade">Trade</a>
         <a class="nav-link" href="#" data-page="award">Award</a>
         <a class="nav-link" href="#" data-page="gas">Gas</a>
-        <a class="nav-link" href="#" data-page="admin">Admin</a>
+        <a id="admin-nav-link" class="nav-link" href="#" data-page="admin">Admin</a>
         <button id="live-updates-toggle" class="nav-toggle-btn enabled" type="button">Live updates: Enabled</button>
       </nav>
     </aside>
@@ -386,12 +386,15 @@
     const walletHint = document.getElementById("wallet-hint");
     const pageFrame = document.getElementById("page-frame");
     const navLinks = document.querySelectorAll(".nav-link");
+    const adminNavLink = document.getElementById("admin-nav-link");
     const liveUpdatesToggle = document.getElementById("live-updates-toggle");
     const indexTapeTrack = document.getElementById("index-tape-track");
     const LAST_PAGE_KEY = "tlse_last_page";
     const INDEX_TICKER_ROLL_MS = 36000;
     let liveUpdatesEnabled = true;
     let activeEthereumProvider = null;
+    let currentWalletAddress = "";
+    let adminFeaturesEnabled = false;
 
     function findEthereumProvider() {
       const rootProvider = window.ethereum;
@@ -442,6 +445,50 @@
       return "";
     }
 
+    function applyAdminFeatureVisibility() {
+      if (adminNavLink) {
+        adminNavLink.style.display = adminFeaturesEnabled ? "inline-flex" : "none";
+      }
+      liveUpdatesToggle.style.display = adminFeaturesEnabled ? "inline-flex" : "none";
+      liveUpdatesToggle.disabled = !adminFeaturesEnabled;
+      if (!adminFeaturesEnabled) {
+        if (liveUpdatesEnabled) {
+          setLiveUpdatesEnabled(false);
+        } else {
+          pageFrame.contentWindow.postMessage(
+            {
+              type: "LIVE_UPDATES",
+              enabled: false,
+            },
+            "*"
+          );
+        }
+      }
+      if (!adminFeaturesEnabled && pageFrame.title === "Admin") {
+        loadPage("markets");
+      }
+    }
+
+    async function refreshUiPermissions() {
+      if (!currentWalletAddress) {
+        adminFeaturesEnabled = false;
+        applyAdminFeatureVisibility();
+        return;
+      }
+      try {
+        const res = await fetch(`/api/ui/permissions?wallet=${encodeURIComponent(currentWalletAddress)}`);
+        const data = await res.json();
+        if (res.ok && data && data.canAccessAdminPage === true) {
+          adminFeaturesEnabled = true;
+        } else {
+          adminFeaturesEnabled = false;
+        }
+      } catch {
+        adminFeaturesEnabled = false;
+      }
+      applyAdminFeatureVisibility();
+    }
+
     async function refreshWalletFromProvider() {
       const accounts = await activeEthereumProvider.request(
         {
@@ -449,7 +496,9 @@
         }
       );
       const account = chooseDisplayAccount(activeEthereumProvider, accounts);
+      currentWalletAddress = account;
       setWalletStatus(true, account);
+      await refreshUiPermissions();
     }
 
     async function reconnectWalletInteractive() {
@@ -467,7 +516,9 @@
         }
       );
       const account = chooseDisplayAccount(activeEthereumProvider, accounts);
+      currentWalletAddress = account;
       setWalletStatus(true, account);
+      await refreshUiPermissions();
     }
 
     function setWalletStatus(connected, account) {
@@ -494,45 +545,48 @@
       if (page) {
         pageToStore = String(page);
       }
+      if (pageToStore === "admin" && !adminFeaturesEnabled) {
+        pageToStore = "markets";
+      }
       localStorage.setItem(LAST_PAGE_KEY, pageToStore);
       // iframe scr switch
-      if (page === "ttoken") {
+      if (pageToStore === "ttoken") {
         pageFrame.src = "/ttoken.html";
         pageFrame.title = "Token Factory";
         setActiveNav("ttoken");
         return;
       }
-      if (page === "portfolio") {
+      if (pageToStore === "portfolio") {
         pageFrame.src = "/portfolio.html";
         pageFrame.title = "Portfolio";
         setActiveNav("portfolio");
         return;
       }
-      if (page === "transactions") {
+      if (pageToStore === "transactions") {
         pageFrame.src = "/transactions.html";
         pageFrame.title = "Transactions";
         setActiveNav("transactions");
         return;
       }
-      if (page === "trade") {
+      if (pageToStore === "trade") {
         pageFrame.src = "/trade.html";
         pageFrame.title = "Trade";
         setActiveNav("trade");
         return;
       }
-      if (page === "admin") {
+      if (pageToStore === "admin") {
         pageFrame.src = "/admin.html";
         pageFrame.title = "Admin";
         setActiveNav("admin");
         return;
       }
-      if (page === "award") {
+      if (pageToStore === "award") {
         pageFrame.src = "/award.html";
         pageFrame.title = "Award";
         setActiveNav("award");
         return;
       }
-      if (page === "gas") {
+      if (pageToStore === "gas") {
         pageFrame.src = "/gas.html";
         pageFrame.title = "Gas";
         setActiveNav("gas");
@@ -627,6 +681,7 @@
       }
       liveUpdatesToggle.classList.toggle("enabled", enabled);
       liveUpdatesToggle.classList.toggle("disabled", !enabled);
+      if (pageFrame && pageFrame.contentWindow) {
       pageFrame.contentWindow.postMessage(
         {
           type: "LIVE_UPDATES",
@@ -634,6 +689,7 @@
         },
         "*"
       );
+      }
     }
 
     for (let i = 0; i < navLinks.length; i++) {
@@ -649,20 +705,27 @@
         // connction to wallet and listens for changes
         await refreshWalletFromProvider();
       } catch (err) {
+        currentWalletAddress = "";
         setWalletStatus(false);
+        await refreshUiPermissions();
       }
     })();
     activeEthereumProvider.on("accountsChanged", async (accounts) => {
       const account = chooseDisplayAccount(activeEthereumProvider, accounts);
+      currentWalletAddress = account;
       setWalletStatus(true, account);
+      await refreshUiPermissions();
       pageFrame.contentWindow.location.reload();
     });
     walletStatus.addEventListener("click", async () => {
       try {
         await reconnectWalletInteractive();
+        await refreshUiPermissions();
         pageFrame.contentWindow.location.reload();
       } catch (err) {
+        currentWalletAddress = "";
         setWalletStatus(false);
+        await refreshUiPermissions();
       }
     });
     let startPage = localStorage.getItem(LAST_PAGE_KEY);
@@ -670,15 +733,19 @@
       startPage = "markets";
     }
     loadPage(startPage);
+    applyAdminFeatureVisibility();
 
     liveUpdatesToggle.addEventListener("click", () => {
+      if (!adminFeaturesEnabled) {
+        return;
+      }
       const nextState = !liveUpdatesEnabled;
       setLiveUpdatesEnabled(nextState);
       // event listener for live update
     });
 
     pageFrame.addEventListener("load", () => {
-      setLiveUpdatesEnabled(liveUpdatesEnabled);
+      setLiveUpdatesEnabled(liveUpdatesEnabled && adminFeaturesEnabled);
     });
 
     loadIndexTicker();

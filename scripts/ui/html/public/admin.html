@@ -184,6 +184,9 @@
     <div class="header">
       <h1 class="title">Admin</h1>
     </div>
+    <div id="admin-access-denied" class="status" style="display:none; color:#e04c4c; font-size:14px; margin-bottom:12px;">
+      Admin access denied for this wallet.
+    </div>
 
     <div class="section">
       <h2 class="section-title">Add new company</h2>
@@ -390,6 +393,8 @@
     const symbolDelistBtn = document.getElementById("symbol-delist-btn");
     const lifecycleStatus = document.getElementById("lifecycle-status");
     const lifecycleTableBody = document.getElementById("lifecycle-table-body");
+    const adminAccessDenied = document.getElementById("admin-access-denied");
+    const adminSections = Array.from(document.querySelectorAll(".section"));
     let lifecycleBySymbol = {};
     // JSDOM
     const LISTABLE_STOCKS = [
@@ -418,6 +423,54 @@
     function shortAddress(address) {
       return String(address);
       // keep full address for transparency
+    }
+
+    async function getCurrentWallet() {
+      if (!window.ethereum) {
+        return "";
+      }
+      const accounts = await window.ethereum.request({ method: "eth_accounts" });
+      if (Array.isArray(accounts) && accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
+    async function verifyAdminAccess() {
+      try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          adminAccessDenied.style.display = "block";
+          adminAccessDenied.textContent = "Connect wallet first. Admin access denied.";
+          for (let i = 0; i < adminSections.length; i += 1) {
+            adminSections[i].style.display = "none";
+          }
+          return false;
+        }
+        const res = await fetch(`/api/ui/permissions?wallet=${encodeURIComponent(wallet)}`);
+        const data = await res.json();
+        const allowed = Boolean(res.ok && data && data.canAccessAdminPage === true);
+        if (!allowed) {
+          adminAccessDenied.style.display = "block";
+          adminAccessDenied.textContent = `Admin access denied for wallet ${wallet}`;
+          for (let i = 0; i < adminSections.length; i += 1) {
+            adminSections[i].style.display = "none";
+          }
+          return false;
+        }
+        adminAccessDenied.style.display = "none";
+        for (let i = 0; i < adminSections.length; i += 1) {
+          adminSections[i].style.display = "block";
+        }
+        return true;
+      } catch {
+        adminAccessDenied.style.display = "block";
+        adminAccessDenied.textContent = "Unable to verify admin access.";
+        for (let i = 0; i < adminSections.length; i += 1) {
+          adminSections[i].style.display = "none";
+        }
+        return false;
+      }
     }
 
     function formatQty(wei) {
@@ -966,6 +1019,10 @@
     symbolUnfreezeBtn.addEventListener("click", () => changeSymbolLifecycle("unfreeze"));
     symbolDelistBtn.addEventListener("click", () => changeSymbolLifecycle("delist"));
     (async function () {
+      const hasAccess = await verifyAdminAccess();
+      if (!hasAccess) {
+        return;
+      }
       await loadLifecycleTable();
       await loadListableStocks();
       await loadDividendSymbols();

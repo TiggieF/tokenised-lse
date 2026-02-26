@@ -423,6 +423,40 @@ function loadDeployments() {
   return JSON.parse(raw);
 }
 
+function getAdminWalletAllowlist() {
+  const wallets = new Set();
+  if (process.env.ADMIN_WALLETS) {
+    const rawValues = String(process.env.ADMIN_WALLETS)
+      .split(',')
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+    for (let i = 0; i < rawValues.length; i += 1) {
+      const normalized = normalizeAddress(rawValues[i]);
+      if (normalized) {
+        wallets.add(normalized.toLowerCase());
+      }
+    }
+  }
+  try {
+    const deployments = loadDeployments();
+    const deployedAdmin = normalizeAddress(deployments.admin);
+    if (deployedAdmin) {
+      wallets.add(deployedAdmin.toLowerCase());
+    }
+  } catch {
+  }
+  return wallets;
+}
+
+function isAdminWallet(walletAddress) {
+  const normalized = normalizeAddress(walletAddress);
+  if (!normalized) {
+    return false;
+  }
+  const allowlist = getAdminWalletAllowlist();
+  return allowlist.has(normalized.toLowerCase());
+}
+
 function getTTokenAddressFromDeployments() {
   const deployments = loadDeployments();
   if (deployments.ttoken) {
@@ -5095,6 +5129,21 @@ app.get('/api/ttoken-address', (_req, res) => {
   res.json({ address });
 });
 
+app.get('/api/ui/permissions', (req, res) => {
+  let walletRaw = '';
+  if (req.query && req.query.wallet) {
+    walletRaw = String(req.query.wallet);
+  }
+  const wallet = normalizeAddress(walletRaw);
+  const isAdmin = isAdminWallet(wallet);
+  res.json({
+    wallet,
+    isAdmin,
+    canAccessAdminPage: isAdmin,
+    canUseLiveUpdates: isAdmin,
+  });
+});
+
 // rest api to get balances with fallback if none fetched
 app.get('/api/ttoken/balance', async (req, res) => {
   const address = String(req.query.address);
@@ -5116,21 +5165,22 @@ app.get('/api/ttoken/balance', async (req, res) => {
 app.post('/api/ttoken/mint', async (req, res) => {
   const body = req.body;
   const to = String(body.to);
-  const amount = Number(body.amount);
+  const amountRaw = String(body.amount);
+  const amount = Number(amountRaw);
   const recipientValid = isValidAddress(to);
   if (!recipientValid) {
-    return res.status(400).json({ error: '' });
+    return res.status(400).json({ error: 'invalid recipient address' });
   }
   const amountIsNumber = Number.isFinite(amount);
   let invalidAmount = false;
   if (!amountIsNumber) {
     invalidAmount = true;
   }
-  if (amount < 1000) {
+  if (!(amount > 0)) {
     invalidAmount = true;
   }
   if (invalidAmount) {
-    return res.status(400).json({ error: '' });
+    return res.status(400).json({ error: 'amount must be greater than 0' });
   }
 
   let ttokenAddress = getTTokenAddressFromDeployments();
@@ -5146,7 +5196,15 @@ app.post('/api/ttoken/mint', async (req, res) => {
       return res.status(500).json({ error: 'Admin address missing in deployments' });
     }
 
-    const amountWei = BigInt(Math.round(amount)) * 10n ** 18n;
+    let amountWei = 0n;
+    try {
+      amountWei = ethers.parseUnits(amountRaw, 18);
+    } catch {
+      return res.status(400).json({ error: 'amount must be a valid number' });
+    }
+    if (!(amountWei > 0n)) {
+      return res.status(400).json({ error: 'amount must be greater than 0' });
+    }
     const data = equityTokenInterface.encodeFunctionData('mint', [to, amountWei]);
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from,

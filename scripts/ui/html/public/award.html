@@ -203,7 +203,9 @@
     let liveEpochDurationSec = 60;
     let liveSessionTerminated = false;
     let lastStatusSyncAtMs = 0;
+    let lastAutoRefreshAtMs = 0;
     let statusTicker = null;
+    const AWARD_REFRESH_INTERVAL_MS = 60000;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
 
     async function ensureSepoliaNetwork() {
@@ -521,7 +523,7 @@
         currentEpochId = Number(statusData.currentEpoch);
       }
       await refreshAward();
-      setInterval(refreshAward, 5000);
+      setInterval(refreshAward, AWARD_REFRESH_INTERVAL_MS);
     })();
 
     function updateWindowCountdown() {
@@ -545,7 +547,11 @@
       }
       windowSecondsRemainingEl.textContent = String(Math.floor(displayRemaining));
       if (displayRemaining === 0) {
-        refreshAward();
+        const now = Date.now();
+        if ((now - lastAutoRefreshAtMs) >= AWARD_REFRESH_INTERVAL_MS) {
+          lastAutoRefreshAtMs = now;
+          refreshAward();
+        }
       }
     }
 

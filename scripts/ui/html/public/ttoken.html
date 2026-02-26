@@ -134,7 +134,7 @@
         <input
           id="amount-input"
           type="text"
-          value="1000"
+          value="1"
           style="width: 180px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(16, 20, 24, 0.1); font-family: inherit; text-align: center;"
         />
       </div>
@@ -153,7 +153,7 @@
         </select>
         <div class="counter" style="margin-top: 6px;">
           <button class="counter-btn" id="equity-minus-btn" type="button">−</button>
-          <div class="counter-value" id="equity-amount-value">10</div>
+          <div class="counter-value" id="equity-amount-value">100</div>
           <button class="counter-btn" id="equity-plus-btn" type="button">+</button>
         </div>
         <button class="airdrop-btn" id="mint-equity-btn" type="button">Mint Equity</button>
@@ -182,7 +182,7 @@
     // dom objects
     const STEP = 10;
     // up and down by 10
-    let equityAmount = 10;
+    let equityAmount = 100;
     // default amount
     let currentAccount = "";
 
@@ -251,8 +251,8 @@
 
     equityMinusBtn.addEventListener("click", function () {
       let nextValue = equityAmount - STEP;
-      if (nextValue < 10) {
-        nextValue = 10;
+      if (nextValue < 100) {
+        nextValue = 100;
       }
       equityAmount = nextValue;
       renderEquityAmount();
@@ -278,6 +278,13 @@
           body: JSON.stringify({ to: currentAccount, amount: parsedAmount }),
         });
         const data = await res.json();
+        if (!res.ok || data.error) {
+          let message = "Airdrop failed";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
 
         let txHash = "";
         if (data.txHash) {
@@ -317,6 +324,13 @@
           }),
         });
         const data = await res.json();
+        if (!res.ok || data.error) {
+          let message = "Mint failed";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
         let mintHash = "";
         if (data.mintTx) {
           mintHash = data.mintTx;
