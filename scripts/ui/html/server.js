@@ -312,6 +312,7 @@ const AUTOTRADE_STATE_FILE = path.join(AUTOTRADE_DIR, 'state.json');
 const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
 const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
 const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
+const ADMIN_WALLETS_FILE = path.join(ADMIN_DIR, 'wallets.json');
 const LIVE_UPDATES_STATE_FILE = path.join(ADMIN_DIR, 'liveUpdates.json');
 const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
 const MERKLE_HOLDER_SCAN_STATE_FILE = path.join(DIVIDENDS_MERKLE_DIR, 'holder-scan-state.json');
@@ -424,7 +425,7 @@ function loadDeployments() {
   return JSON.parse(raw);
 }
 
-function getAdminWalletAllowlist() {
+function getDefaultAdminWalletState() {
   const wallets = new Set();
   if (process.env.ADMIN_WALLETS) {
     const rawValues = String(process.env.ADMIN_WALLETS)
@@ -445,6 +446,32 @@ function getAdminWalletAllowlist() {
       wallets.add(deployedAdmin.toLowerCase());
     }
   } catch {
+  }
+  return {
+    wallets: Array.from(wallets),
+    updatedAtMs: 0,
+  };
+}
+
+function readAdminWalletState() {
+  ensureAdminDir();
+  return readJsonFile(ADMIN_WALLETS_FILE, getDefaultAdminWalletState());
+}
+
+function writeAdminWalletState(state) {
+  ensureAdminDir();
+  writeJsonFile(ADMIN_WALLETS_FILE, state);
+}
+
+function getAdminWalletAllowlist() {
+  const state = readAdminWalletState();
+  const wallets = new Set();
+  const source = Array.isArray(state.wallets) ? state.wallets : [];
+  for (let i = 0; i < source.length; i += 1) {
+    const normalized = normalizeAddress(source[i]);
+    if (normalized) {
+      wallets.add(normalized.toLowerCase());
+    }
   }
   return wallets;
 }
@@ -5160,6 +5187,142 @@ app.get('/api/ui/permissions', (req, res) => {
     canAccessAdminPage: isAdmin,
     canUseLiveUpdates: isAdmin,
   });
+});
+
+app.get('/api/admin/wallets', (req, res) => {
+  try {
+    let walletRaw = '';
+    if (req.query && req.query.wallet) {
+      walletRaw = String(req.query.wallet);
+    }
+    const wallet = normalizeAddress(walletRaw);
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
+    const state = readAdminWalletState();
+    const configuredWallets = Array.isArray(state.wallets) ? state.wallets : [];
+    const wallets = [];
+    for (let i = 0; i < configuredWallets.length; i += 1) {
+      const normalized = normalizeAddress(configuredWallets[i]);
+      if (normalized) {
+        wallets.push(normalized);
+      }
+    }
+    const deployments = loadDeployments();
+    const systemAdminWallet = normalizeAddress(deployments.admin);
+    res.json({
+      wallets,
+      systemAdminWallet,
+      updatedAtMs: Number(state.updatedAtMs || 0),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/wallets/add', (req, res) => {
+  try {
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    const actorWallet = normalizeAddress(String(body.wallet || ''));
+    const targetWallet = normalizeAddress(String(body.targetWallet || ''));
+    if (!actorWallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(actorWallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
+    if (!targetWallet) {
+      return res.status(400).json({ error: 'targetWallet must be a valid address' });
+    }
+
+    const state = readAdminWalletState();
+    const nextSet = new Set();
+    const current = Array.isArray(state.wallets) ? state.wallets : [];
+    for (let i = 0; i < current.length; i += 1) {
+      const normalized = normalizeAddress(current[i]);
+      if (normalized) {
+        nextSet.add(normalized.toLowerCase());
+      }
+    }
+    nextSet.add(targetWallet.toLowerCase());
+    const nextWallets = Array.from(nextSet).map((item) => normalizeAddress(item)).filter(Boolean);
+    nextWallets.sort((a, b) => a.localeCompare(b));
+    writeAdminWalletState({
+      wallets: nextWallets,
+      updatedAtMs: Date.now(),
+    });
+
+    const deployments = loadDeployments();
+    const systemAdminWallet = normalizeAddress(deployments.admin);
+    res.json({
+      wallets: nextWallets,
+      systemAdminWallet,
+      updatedAtMs: Date.now(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/wallets/remove', (req, res) => {
+  try {
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    const actorWallet = normalizeAddress(String(body.wallet || ''));
+    const targetWallet = normalizeAddress(String(body.targetWallet || ''));
+    if (!actorWallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(actorWallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
+    if (!targetWallet) {
+      return res.status(400).json({ error: 'targetWallet must be a valid address' });
+    }
+
+    const deployments = loadDeployments();
+    const systemAdminWallet = normalizeAddress(deployments.admin);
+    if (systemAdminWallet && targetWallet.toLowerCase() === systemAdminWallet.toLowerCase()) {
+      return res.status(400).json({ error: 'cannot remove system admin wallet' });
+    }
+
+    const state = readAdminWalletState();
+    const nextSet = new Set();
+    const current = Array.isArray(state.wallets) ? state.wallets : [];
+    for (let i = 0; i < current.length; i += 1) {
+      const normalized = normalizeAddress(current[i]);
+      if (normalized) {
+        const key = normalized.toLowerCase();
+        if (key !== targetWallet.toLowerCase()) {
+          nextSet.add(key);
+        }
+      }
+    }
+    const nextWallets = Array.from(nextSet).map((item) => normalizeAddress(item)).filter(Boolean);
+    if (nextWallets.length === 0) {
+      return res.status(400).json({ error: 'cannot remove last admin wallet' });
+    }
+    nextWallets.sort((a, b) => a.localeCompare(b));
+    writeAdminWalletState({
+      wallets: nextWallets,
+      updatedAtMs: Date.now(),
+    });
+    res.json({
+      wallets: nextWallets,
+      systemAdminWallet,
+      updatedAtMs: Date.now(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/live-updates/status', (_req, res) => {
@@ -10655,6 +10818,9 @@ if (!fs.existsSync(SYMBOL_STATUS_FILE)) {
 }
 if (!fs.existsSync(AWARD_SESSION_FILE)) {
   writeAwardSessionState(getDefaultAwardSessionState());
+}
+if (!fs.existsSync(ADMIN_WALLETS_FILE)) {
+  writeAdminWalletState(getDefaultAdminWalletState());
 }
 if (!fs.existsSync(LIVE_UPDATES_STATE_FILE)) {
   writeLiveUpdatesState(getDefaultLiveUpdatesState());

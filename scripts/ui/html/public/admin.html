@@ -207,6 +207,34 @@
     </div>
 
     <div class="section">
+      <h2 class="section-title">Admin wallets</h2>
+      <div class="form-grid">
+        <div>
+          <label for="admin-wallet-input">Wallet address</label>
+          <input id="admin-wallet-input" type="text" placeholder="0x..." />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="admin-wallet-add-btn" type="button">Add Admin Wallet</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="admin-wallet-remove-btn" type="button">Remove Admin Wallet</button>
+        </div>
+      </div>
+      <div id="admin-wallet-status" class="status">Ready</div>
+      <table style="margin-top:12px">
+        <thead>
+          <tr>
+            <th>Wallet</th>
+            <th>Role</th>
+          </tr>
+        </thead>
+        <tbody id="admin-wallets-body"></tbody>
+      </table>
+    </div>
+
+    <div class="section">
       <h2 class="section-title">Add new company</h2>
       <div class="form-grid">
         <div>
@@ -388,6 +416,11 @@
     const liveUpdatesEnabledSelect = document.getElementById("live-updates-enabled");
     const liveUpdatesSaveBtn = document.getElementById("live-updates-save-btn");
     const liveUpdatesStatus = document.getElementById("live-updates-status");
+    const adminWalletInput = document.getElementById("admin-wallet-input");
+    const adminWalletAddBtn = document.getElementById("admin-wallet-add-btn");
+    const adminWalletRemoveBtn = document.getElementById("admin-wallet-remove-btn");
+    const adminWalletStatus = document.getElementById("admin-wallet-status");
+    const adminWalletsBody = document.getElementById("admin-wallets-body");
     const listCreateBtn = document.getElementById("list-create-btn");
     const listStatus = document.getElementById("list-status");
     const divSymbol = document.getElementById("div-symbol");
@@ -561,6 +594,134 @@
         nextColor = "#e04c4c";
       }
       liveUpdatesStatus.style.color = nextColor;
+    }
+
+    function setAdminWalletStatus(text, isError = false) {
+      adminWalletStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      adminWalletStatus.style.color = nextColor;
+    }
+
+    function renderAdminWalletRows(wallets, systemAdminWallet) {
+      adminWalletsBody.innerHTML = "";
+      const rows = Array.isArray(wallets) ? wallets : [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="2" class="muted">No admin wallets</td>`;
+        adminWalletsBody.appendChild(tr);
+        return;
+      }
+      for (let i = 0; i < rows.length; i += 1) {
+        const wallet = String(rows[i]);
+        const tr = document.createElement("tr");
+        const role = (systemAdminWallet && wallet.toLowerCase() === String(systemAdminWallet).toLowerCase())
+          ? "System Admin"
+          : "Admin";
+        tr.innerHTML = `<td class="muted addr">${wallet}</td><td>${role}</td>`;
+        adminWalletsBody.appendChild(tr);
+      }
+    }
+
+    async function loadAdminWallets() {
+      try {
+        setAdminWalletStatus("Loading admin wallets");
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
+        const res = await fetch(`/api/admin/wallets?wallet=${encodeURIComponent(wallet)}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          let message = "Failed to load admin wallets";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
+        renderAdminWalletRows(data.wallets, data.systemAdminWallet);
+        setAdminWalletStatus(`Loaded ${Array.isArray(data.wallets) ? data.wallets.length : 0} admin wallet(s)`);
+      } catch (err) {
+        let message = "Failed to load admin wallets";
+        if (err.message) {
+          message = err.message;
+        }
+        setAdminWalletStatus(message, true);
+      }
+    }
+
+    async function addAdminWallet() {
+      try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
+        const targetWallet = String(adminWalletInput.value || "").trim();
+        if (!targetWallet) {
+          throw new Error("Enter wallet address");
+        }
+        setAdminWalletStatus("Adding admin wallet");
+        const res = await fetch("/api/admin/wallets/add", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallet, targetWallet }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          let message = "Failed to add admin wallet";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
+        renderAdminWalletRows(data.wallets, data.systemAdminWallet);
+        setAdminWalletStatus("Admin wallet added");
+        adminWalletInput.value = "";
+      } catch (err) {
+        let message = "Failed to add admin wallet";
+        if (err.message) {
+          message = err.message;
+        }
+        setAdminWalletStatus(message, true);
+      }
+    }
+
+    async function removeAdminWallet() {
+      try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
+        const targetWallet = String(adminWalletInput.value || "").trim();
+        if (!targetWallet) {
+          throw new Error("Enter wallet address");
+        }
+        setAdminWalletStatus("Removing admin wallet");
+        const res = await fetch("/api/admin/wallets/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallet, targetWallet }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          let message = "Failed to remove admin wallet";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
+        renderAdminWalletRows(data.wallets, data.systemAdminWallet);
+        setAdminWalletStatus("Admin wallet removed");
+        adminWalletInput.value = "";
+      } catch (err) {
+        let message = "Failed to remove admin wallet";
+        if (err.message) {
+          message = err.message;
+        }
+        setAdminWalletStatus(message, true);
+      }
     }
 
     async function loadLiveUpdatesControl() {
@@ -1100,6 +1261,8 @@
     merkleTreeViewBtn.addEventListener("click", viewMerkleTree);
     levAdminCreateBtn.addEventListener("click", createLeveragedProduct);
     liveUpdatesSaveBtn.addEventListener("click", saveLiveUpdatesControl);
+    adminWalletAddBtn.addEventListener("click", addAdminWallet);
+    adminWalletRemoveBtn.addEventListener("click", removeAdminWallet);
     awardSessionSaveBtn.addEventListener("click", saveAwardSessionControl);
     symbolFreezeBtn.addEventListener("click", () => changeSymbolLifecycle("freeze"));
     symbolUnfreezeBtn.addEventListener("click", () => changeSymbolLifecycle("unfreeze"));
@@ -1113,6 +1276,7 @@
       await loadListableStocks();
       await loadDividendSymbols();
       await loadLiveUpdatesControl();
+      await loadAdminWallets();
       await loadAwardSessionControl();
       await loadLifecycleTable();
       const openRes = await fetch("/api/orderbook/open");
