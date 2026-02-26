@@ -66,7 +66,7 @@
 
     .controls {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
       align-items: end;
     }
@@ -228,6 +228,197 @@
       font-weight: 600;
     }
 
+    .details-panel {
+      margin-top: 24px;
+    }
+
+    .details-status {
+      margin-bottom: 12px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .details-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .detail-box {
+      border: 1px solid rgba(16, 20, 24, 0.1);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.55);
+      overflow: hidden;
+    }
+
+    .detail-header {
+      padding: 12px 14px;
+      font-weight: 600;
+      font-size: 14px;
+      border-bottom: 1px solid rgba(16, 20, 24, 0.08);
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    .detail-content {
+      padding: 12px;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px 16px;
+    }
+
+    .detail-kv {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--muted);
+      min-width: 0;
+    }
+
+    .detail-kv strong {
+      color: var(--ink);
+      font-size: 14px;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow: hidden;
+    }
+
+    .detail-text {
+      font-size: 13px;
+      color: var(--ink);
+      line-height: 1.5;
+      margin-top: 8px;
+    }
+
+    .chip-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .chip {
+      border: 1px solid rgba(16, 20, 24, 0.12);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.8);
+    }
+
+    .detail-table-wrap {
+      overflow-x: auto;
+      margin-top: 8px;
+    }
+
+    .detail-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 520px;
+      font-size: 12px;
+      table-layout: fixed;
+    }
+
+    .detail-table th {
+      text-align: left;
+      color: var(--muted);
+      font-weight: 600;
+      padding: 8px;
+      border-bottom: 1px solid rgba(16, 20, 24, 0.12);
+      white-space: nowrap;
+    }
+
+    .detail-table td {
+      padding: 8px;
+      border-bottom: 1px solid rgba(16, 20, 24, 0.08);
+      color: var(--ink);
+      vertical-align: top;
+      white-space: normal;
+      word-break: break-word;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px;
+      margin-top: 8px;
+      margin-bottom: 8px;
+    }
+
+    .summary-card {
+      border: 1px solid rgba(16, 20, 24, 0.1);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.8);
+      padding: 10px 12px;
+    }
+
+    .summary-card .label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .summary-card .value {
+      margin-top: 6px;
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    .mini-chart {
+      margin-top: 8px;
+      border: 1px solid rgba(16, 20, 24, 0.08);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.75);
+      padding: 10px;
+    }
+
+    .mini-chart-title {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 74px 1fr 90px;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .bar-label {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .bar-track {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(16, 20, 24, 0.08);
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #1b8b8b, #4db6a6);
+    }
+
+    .bar-value {
+      font-size: 11px;
+      color: var(--ink);
+      text-align: right;
+    }
+
     @media (max-width: 720px) {
       body {
         padding: 20px;
@@ -245,7 +436,7 @@
   </header>
 
   <div class="panel">
-    <form id="controls" class="controls">
+    <div id="controls" class="controls">
       <div>
         <label for="symbol">Symbol</label>
         <select id="symbol">
@@ -264,12 +455,7 @@
           <option value="1m">1 month</option>
         </select>
       </div>
-      <div>
-        <label>&nbsp;</label>
-        <button id="loadBtn" type="submit">Load Candles</button>
-        <!-- button to manually load candles to avoid abusing api limits -->
-      </div>
-    </form>
+    </div>
     <div class="live-price">
       <div>
         <div id="live-symbol-label" class="live-label">TSLA live price</div>
@@ -298,7 +484,16 @@
       <div class="info-item"><span>52-week range</span><strong id="info-year-range">-</strong></div>
       <div class="info-item"><span>Volume</span><strong id="info-volume">-</strong></div>
       <div class="info-item"><span>Market cap</span><strong id="info-market-cap">-</strong></div>
+      <div class="info-item"><span>Bid / Ask</span><strong id="info-bid-ask">-</strong></div>
     </div>
+  </div>
+  <div id="market-details" class="panel details-panel">
+    <div class="info-header">
+      <div class="info-title">Market details</div>
+      <div id="details-updated" class="info-updated">Updated -</div>
+    </div>
+    <div id="details-status" class="details-status">Ready</div>
+    <div id="details-body" class="details-stack"></div>
   </div>
   
 
@@ -327,6 +522,10 @@
     const infoYearRangeEl = document.getElementById("info-year-range");
     const infoVolumeEl = document.getElementById("info-volume");
     const infoMarketCapEl = document.getElementById("info-market-cap");
+    const infoBidAskEl = document.getElementById("info-bid-ask");
+    const detailsUpdatedEl = document.getElementById("details-updated");
+    const detailsStatusEl = document.getElementById("details-status");
+    const detailsBodyEl = document.getElementById("details-body");
 
     const CHANGE_CLASSES = ["change-positive", "change-negative", "change-neutral"];
     let liveSymbol = "TSLA";
@@ -336,6 +535,7 @@
     let liveTicker;
     let livePollingEnabled = false;
     let latestStockInfo;
+    let latestMarketDetails;
 
     function setStatus(text, tone = "neutral") {
       statusText.textContent = text;
@@ -373,8 +573,596 @@
       return Math.round(Number(value)).toLocaleString("en-US");
     }
 
+    function formatCompact(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        return "-";
+      }
+      return new Intl.NumberFormat("en-US", {
+        notation: "compact",
+        maximumFractionDigits: 2,
+      }).format(n);
+    }
+
+    function formatNullable(value, formatter) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        return "-";
+      }
+      if (formatter) {
+        return formatter(n);
+      }
+      return n.toLocaleString("en-US");
+    }
+
+    function formatDateText(value) {
+      const text = String(value || "");
+      if (!text) {
+        return "-";
+      }
+      return text;
+    }
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
     function formatRange(low, high) {
-      return `${formatPrice(Number(low))} - ${formatPrice(Number(high))}`;
+      const left = formatNullable(low, formatPrice);
+      const right = formatNullable(high, formatPrice);
+      if (left === "-" && right === "-") {
+        return "-";
+      }
+      return `${left} - ${right}`;
+    }
+
+    function makeKvGrid(items) {
+      const rows = [];
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        const label = escapeHtml(item.label);
+        const value = escapeHtml(item.value);
+        rows.push(`<div class="detail-kv"><span>${label}</span><strong>${value}</strong></div>`);
+      }
+      return `<div class="detail-grid">${rows.join("")}</div>`;
+    }
+
+    function makeTable(columns, rows) {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return "";
+      }
+      const header = columns.map((col) => `<th>${escapeHtml(col.label)}</th>`).join("");
+      const body = rows.map((row) => {
+        const cells = columns.map((col) => {
+          const raw = row[col.key];
+          const val = col.formatter ? col.formatter(raw, row) : raw;
+          if (col.rawHtml === true) {
+            return `<td>${val}</td>`;
+          }
+          return `<td>${escapeHtml(val)}</td>`;
+        }).join("");
+        return `<tr>${cells}</tr>`;
+      }).join("");
+      return `<div class="detail-table-wrap"><table class="detail-table"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+
+    function buildDetailSection(title, contentHtml) {
+      return `<div class="detail-box"><div class="detail-header">${escapeHtml(title)}</div><div class="detail-content">${contentHtml}</div></div>`;
+    }
+
+    function makeSummaryCards(items) {
+      if (!Array.isArray(items) || items.length === 0) {
+        return "";
+      }
+      const cards = [];
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        cards.push(
+          `<div class="summary-card"><div class="label">${escapeHtml(item.label)}</div><div class="value">${escapeHtml(item.value)}</div></div>`
+        );
+      }
+      return `<div class="summary-grid">${cards.join("")}</div>`;
+    }
+
+    function makeMiniBarChart(title, rows) {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return "";
+      }
+      let maxValue = 0;
+      for (let i = 0; i < rows.length; i += 1) {
+        const n = Number(rows[i].value);
+        if (Number.isFinite(n) && n > maxValue) {
+          maxValue = n;
+        }
+      }
+      if (!(maxValue > 0)) {
+        return "";
+      }
+      const body = [];
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i];
+        const value = Number(row.value);
+        if (!Number.isFinite(value) || value <= 0) {
+          continue;
+        }
+        const pct = Math.max(2, Math.min(100, (value / maxValue) * 100));
+        body.push(
+          `<div class="bar-row"><div class="bar-label">${escapeHtml(row.label)}</div><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><div class="bar-value">${escapeHtml(row.display)}</div></div>`
+        );
+      }
+      if (body.length === 0) {
+        return "";
+      }
+      return `<div class="mini-chart"><div class="mini-chart-title">${escapeHtml(title)}</div>${body.join("")}</div>`;
+    }
+
+    async function fetchJsonWithTimeout(url, timeoutMs = 6000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        let data = {};
+        try {
+          data = await res.json();
+        } catch {
+          data = {};
+        }
+        return { ok: res.ok, data };
+      } catch {
+        return { ok: false, data: {} };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function renderMarketDetails(payload) {
+      latestMarketDetails = payload;
+      const sections = payload && payload.sections ? payload.sections : {};
+      const overview = sections.overview || {};
+      const company = sections.company || {};
+      const people = sections.people || {};
+      const financial = sections.financial || {};
+      const analysis = sections.analysis || {};
+      const news = Array.isArray(sections.news) ? sections.news : [];
+      const insider = Array.isArray(sections.insider) ? sections.insider : [];
+
+      const blocks = [];
+
+      const overviewItems = [
+        { label: "Company", value: overview.name || "-" },
+        { label: "Exchange", value: overview.exchange || "-" },
+        { label: "Sector", value: overview.sector || "-" },
+        { label: "Industry", value: overview.industry || "-" },
+        { label: "CEO", value: overview.ceo || "-" },
+        { label: "Country", value: overview.country || "-" },
+        { label: "IPO date", value: formatDateText(overview.ipoDate) },
+        { label: "Price", value: formatNullable(overview.price, formatPrice) },
+        { label: "Previous close", value: formatNullable(overview.previousClose, formatPrice) },
+        { label: "Open", value: formatNullable(overview.open, formatPrice) },
+        { label: "Day low", value: formatNullable(overview.dayLow, formatPrice) },
+        { label: "Day high", value: formatNullable(overview.dayHigh, formatPrice) },
+        { label: "52-week low", value: formatNullable(overview.yearLow, formatPrice) },
+        { label: "52-week high", value: formatNullable(overview.yearHigh, formatPrice) },
+        { label: "Volume", value: formatNullable(overview.volume, formatInt) },
+      ];
+      let overviewHtml = makeKvGrid(overviewItems);
+      if (overview.description) {
+        overviewHtml += `<div class="detail-text">${escapeHtml(overview.description)}</div>`;
+      }
+      if (overview.website) {
+        const safeUrl = escapeHtml(overview.website);
+        overviewHtml += `<div class="detail-text">Website: <a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeUrl}</a></div>`;
+      }
+      blocks.push(buildDetailSection("Overview", overviewHtml));
+
+      const companyItems = [
+        { label: "Phone", value: company.phone || "-" },
+        { label: "ISIN", value: company.isin || "-" },
+        { label: "CUSIP", value: company.cusip || "-" },
+        { label: "Screener exchange", value: company.screener && company.screener.exchangeShortName ? company.screener.exchangeShortName : "-" },
+        { label: "Screener country", value: company.screener && company.screener.country ? company.screener.country : "-" },
+      ];
+      let companyHtml = makeKvGrid(companyItems);
+      if (Array.isArray(company.searchExchangeVariants) && company.searchExchangeVariants.length) {
+        companyHtml += makeTable(
+          [
+            { key: "symbol", label: "Symbol", formatter: (v) => v || "-" },
+            { key: "exchangeShortName", label: "Exchange", formatter: (v) => v || "-" },
+          ],
+          company.searchExchangeVariants
+        );
+      }
+      blocks.push(buildDetailSection("Company", companyHtml));
+
+      const keyExecRows = (Array.isArray(people.keyExecutives) ? people.keyExecutives : []).filter((row) => {
+        const pay = Number(row && row.pay);
+        return Number.isFinite(pay) && pay > 0;
+      });
+      const peopleHtml = makeTable(
+        [
+          { key: "name", label: "Name", formatter: (v) => v || "-" },
+          { key: "title", label: "Title", formatter: (v) => v || "-" },
+          { key: "pay", label: "Pay", formatter: (v) => formatNullable(v, formatCompact) },
+        ],
+        keyExecRows
+      );
+      if (peopleHtml) {
+        blocks.push(buildDetailSection("People", peopleHtml));
+      }
+
+      const ttmRatios = financial.ratiosTtm || {};
+      let financialHtml = makeKvGrid([
+        { label: "Current ratio", value: formatNullable(ttmRatios.currentRatioTTM || ttmRatios.currentRatio, (n) => n.toFixed(2)) },
+        { label: "Quick ratio", value: formatNullable(ttmRatios.quickRatioTTM || ttmRatios.quickRatio, (n) => n.toFixed(2)) },
+        { label: "Net margin", value: formatNullable(ttmRatios.netProfitMarginTTM || ttmRatios.netProfitMargin, (n) => `${n.toFixed(2)}%`) },
+        { label: "Float shares", value: formatNullable(financial.sharesFloat && financial.sharesFloat.floatShares, formatInt) },
+        { label: "Outstanding", value: formatNullable(financial.sharesFloat && financial.sharesFloat.outstandingShares, formatInt) },
+      ]);
+      financialHtml += makeTable(
+        [
+          { key: "date", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "totalAssets", label: "Assets", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "totalLiabilities", label: "Liabilities", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "totalStockholdersEquity", label: "Equity", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "totalDebt", label: "Debt", formatter: (v) => formatNullable(v, formatCompact) },
+        ],
+        Array.isArray(financial.balanceSheet) ? financial.balanceSheet : []
+      );
+      financialHtml += makeTable(
+        [
+          { key: "date", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "currentRatio", label: "Current ratio", formatter: (v) => formatNullable(v, (n) => n.toFixed(2)) },
+          { key: "quickRatio", label: "Quick ratio", formatter: (v) => formatNullable(v, (n) => n.toFixed(2)) },
+          { key: "netProfitMargin", label: "Net margin", formatter: (v) => formatNullable(v, (n) => `${n.toFixed(2)}%`) },
+        ],
+        Array.isArray(financial.ratios) ? financial.ratios : []
+      );
+      financialHtml += makeTable(
+        [
+          { key: "date", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "enterpriseValue", label: "Enterprise value", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "numberOfShares", label: "Shares", formatter: (v) => formatNullable(v, formatInt) },
+        ],
+        Array.isArray(financial.enterpriseValues) ? financial.enterpriseValues : []
+      );
+      const incomeQuarterRows = Array.isArray(financial.incomeStatementQuarterly) ? financial.incomeStatementQuarterly : [];
+      const cashQuarterRows = Array.isArray(financial.cashFlowStatementQuarterly) ? financial.cashFlowStatementQuarterly : [];
+      const balanceQuarterRows = Array.isArray(financial.balanceSheetQuarterly) ? financial.balanceSheetQuarterly : [];
+      financialHtml += makeTable(
+        [
+          { key: "date", label: "Quarter", formatter: (v) => formatDateText(v) },
+          { key: "revenue", label: "Revenue", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "netIncome", label: "Net income", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "ebitda", label: "EBITDA", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "eps", label: "EPS", formatter: (v) => formatNullable(v, (n) => n.toFixed(2)) },
+        ],
+        incomeQuarterRows
+      );
+      financialHtml += makeTable(
+        [
+          { key: "date", label: "Quarter", formatter: (v) => formatDateText(v) },
+          { key: "operatingCashFlow", label: "Operating CF", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "freeCashFlow", label: "Free CF", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "capitalExpenditure", label: "CapEx", formatter: (v) => formatNullable(v, formatCompact) },
+        ],
+        cashQuarterRows
+      );
+      const revenueTrendRows = [];
+      for (let i = 0; i < Math.min(8, incomeQuarterRows.length); i += 1) {
+        const row = incomeQuarterRows[i];
+        const value = Number(row.revenue);
+        if (Number.isFinite(value) && value > 0) {
+          revenueTrendRows.push({
+            label: String(row.date || "").slice(0, 7),
+            value,
+            display: formatCompact(value),
+          });
+        }
+      }
+      financialHtml += makeMiniBarChart("Quarterly revenue trend", revenueTrendRows);
+      const netIncomeTrendRows = [];
+      for (let i = 0; i < Math.min(8, incomeQuarterRows.length); i += 1) {
+        const row = incomeQuarterRows[i];
+        const value = Number(row.netIncome);
+        if (Number.isFinite(value) && value > 0) {
+          netIncomeTrendRows.push({
+            label: String(row.date || "").slice(0, 7),
+            value,
+            display: formatCompact(value),
+          });
+        }
+      }
+      financialHtml += makeMiniBarChart("Quarterly net income trend", netIncomeTrendRows);
+      const opCfTrendRows = [];
+      for (let i = 0; i < Math.min(8, cashQuarterRows.length); i += 1) {
+        const row = cashQuarterRows[i];
+        const value = Number(row.operatingCashFlow);
+        if (Number.isFinite(value) && value > 0) {
+          opCfTrendRows.push({
+            label: String(row.date || "").slice(0, 7),
+            value,
+            display: formatCompact(value),
+          });
+        }
+      }
+      financialHtml += makeMiniBarChart("Quarterly operating cashflow trend", opCfTrendRows);
+      const freeCfTrendRows = [];
+      for (let i = 0; i < Math.min(8, cashQuarterRows.length); i += 1) {
+        const row = cashQuarterRows[i];
+        const value = Number(row.freeCashFlow);
+        if (Number.isFinite(value) && value > 0) {
+          freeCfTrendRows.push({
+            label: String(row.date || "").slice(0, 7),
+            value,
+            display: formatCompact(value),
+          });
+        }
+      }
+      financialHtml += makeMiniBarChart("Quarterly free cashflow trend", freeCfTrendRows);
+      const assetsTrendRows = [];
+      for (let i = 0; i < Math.min(8, balanceQuarterRows.length); i += 1) {
+        const row = balanceQuarterRows[i];
+        const value = Number(row.totalAssets);
+        if (Number.isFinite(value) && value > 0) {
+          assetsTrendRows.push({
+            label: String(row.date || "").slice(0, 7),
+            value,
+            display: formatCompact(value),
+          });
+        }
+      }
+      financialHtml += makeMiniBarChart("Quarterly assets trend", assetsTrendRows);
+      const liabilitiesTrendRows = [];
+      for (let i = 0; i < Math.min(8, balanceQuarterRows.length); i += 1) {
+        const row = balanceQuarterRows[i];
+        const value = Number(row.totalLiabilities);
+        if (Number.isFinite(value) && value > 0) {
+          liabilitiesTrendRows.push({
+            label: String(row.date || "").slice(0, 7),
+            value,
+            display: formatCompact(value),
+          });
+        }
+      }
+      financialHtml += makeMiniBarChart("Quarterly liabilities trend", liabilitiesTrendRows);
+      const debtTrendRows = [];
+      for (let i = 0; i < Math.min(8, balanceQuarterRows.length); i += 1) {
+        const row = balanceQuarterRows[i];
+        const value = Number(row.totalDebt);
+        if (Number.isFinite(value) && value > 0) {
+          debtTrendRows.push({
+            label: String(row.date || "").slice(0, 7),
+            value,
+            display: formatCompact(value),
+          });
+        }
+      }
+      financialHtml += makeMiniBarChart("Quarterly debt trend", debtTrendRows);
+      blocks.push(buildDetailSection("Financial", financialHtml));
+
+      let analysisHtml = "";
+      const estimateRows = Array.isArray(analysis.analystEstimates) ? analysis.analystEstimates : [];
+      const gradeRows = Array.isArray(analysis.grades) ? analysis.grades : [];
+      const earningsRows = Array.isArray(analysis.earningsSurprises) ? analysis.earningsSurprises : [];
+      const priceTargetRows = Array.isArray(analysis.priceTargetHistory) ? analysis.priceTargetHistory : [];
+      let upgrades = 0;
+      let downgrades = 0;
+      let reiterates = 0;
+      for (let i = 0; i < gradeRows.length; i += 1) {
+        const action = String(gradeRows[i].action || "").toLowerCase();
+        if (action.includes("up")) {
+          upgrades += 1;
+        } else if (action.includes("down")) {
+          downgrades += 1;
+        } else if (action) {
+          reiterates += 1;
+        }
+      }
+      analysisHtml += makeSummaryCards([
+        { label: "Upgrades", value: String(upgrades) },
+        { label: "Downgrades", value: String(downgrades) },
+        { label: "Other actions", value: String(reiterates) },
+      ]);
+      const estimateTrend = [];
+      for (let i = 0; i < Math.min(6, estimateRows.length); i += 1) {
+        const row = estimateRows[i];
+        const rev = Number(row.estimatedRevenueAvg);
+        if (Number.isFinite(rev) && rev > 0) {
+          estimateTrend.push({
+            label: String(row.date || "").slice(0, 4) || `R${i + 1}`,
+            value: rev,
+            display: formatCompact(rev),
+          });
+        }
+      }
+      analysisHtml += makeMiniBarChart("Revenue estimate trend", estimateTrend);
+      const netIncomeTrend = [];
+      for (let i = 0; i < Math.min(6, estimateRows.length); i += 1) {
+        const row = estimateRows[i];
+        const net = Number(row.estimatedNetIncomeAvg);
+        if (Number.isFinite(net) && net > 0) {
+          netIncomeTrend.push({
+            label: String(row.date || "").slice(0, 4) || `N${i + 1}`,
+            value: net,
+            display: formatCompact(net),
+          });
+        }
+      }
+      analysisHtml += makeMiniBarChart("Net income estimate trend", netIncomeTrend);
+      const earningsSurpriseTrend = [];
+      for (let i = 0; i < Math.min(8, earningsRows.length); i += 1) {
+        const row = earningsRows[i];
+        const pct = Number(row.surprisePct);
+        if (Number.isFinite(pct)) {
+          earningsSurpriseTrend.push({
+            label: String(row.date || "").slice(0, 7),
+            value: Math.abs(pct),
+            display: `${pct.toFixed(2)}%`,
+          });
+        }
+      }
+      analysisHtml += makeMiniBarChart("Earnings surprise trend", earningsSurpriseTrend);
+      analysisHtml += makeTable(
+        [
+          { key: "date", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "actual", label: "Actual EPS", formatter: (v) => formatNullable(v, (n) => n.toFixed(2)) },
+          { key: "estimate", label: "Estimate EPS", formatter: (v) => formatNullable(v, (n) => n.toFixed(2)) },
+          { key: "surprisePct", label: "Surprise %", formatter: (v) => formatNullable(v, (n) => `${n.toFixed(2)}%`) },
+        ],
+        earningsRows
+      );
+      const priceTargetTrendRows = [];
+      for (let i = 0; i < Math.min(8, priceTargetRows.length); i += 1) {
+        const row = priceTargetRows[i];
+        const target = Number(row.targetPrice);
+        if (Number.isFinite(target) && target > 0) {
+          priceTargetTrendRows.push({
+            label: String(row.date || "").slice(0, 7),
+            value: target,
+            display: formatPrice(target),
+          });
+        }
+      }
+      analysisHtml += makeMiniBarChart("Price target history trend", priceTargetTrendRows);
+      analysisHtml += makeTable(
+        [
+          { key: "date", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "analyst", label: "Analyst", formatter: (v) => v || "-" },
+          { key: "targetPrice", label: "Target", formatter: (v) => formatNullable(v, formatPrice) },
+          { key: "newsUrl", label: "Source", formatter: (v) => {
+            const url = String(v || "").trim();
+            if (!url) {
+              return "-";
+            }
+            const safe = escapeHtml(url);
+            return `<a href="${safe}" target="_blank" rel="noopener noreferrer">Link</a>`;
+          }, rawHtml: true },
+        ],
+        priceTargetRows
+      );
+      analysisHtml += makeTable(
+        [
+          { key: "date", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "estimatedRevenueAvg", label: "Revenue est", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "estimatedNetIncomeAvg", label: "Net income est", formatter: (v) => formatNullable(v, formatCompact) },
+          { key: "estimatedEpsAvg", label: "EPS est", formatter: (v) => formatNullable(v, (n) => n.toFixed(2)) },
+        ],
+        Array.isArray(analysis.analystEstimates) ? analysis.analystEstimates : []
+      );
+      analysisHtml += makeTable(
+        [
+          { key: "date", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "gradingCompany", label: "Firm", formatter: (v) => v || "-" },
+          { key: "previousGrade", label: "Prev", formatter: (v) => v || "-" },
+          { key: "newGrade", label: "New", formatter: (v) => v || "-" },
+          { key: "action", label: "Action", formatter: (v) => v || "-" },
+        ],
+        Array.isArray(analysis.grades) ? analysis.grades : []
+      );
+      if (analysisHtml) {
+        blocks.push(buildDetailSection("Analysis", analysisHtml));
+      }
+
+      const newsHtml = makeTable(
+        [
+          { key: "publishedDate", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "title", label: "Title", formatter: (v, row) => {
+            const titleText = escapeHtml(v || "Untitled");
+            if (row.url && String(row.url).trim()) {
+              const safeUrl = escapeHtml(String(row.url));
+              return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${titleText}</a>`;
+            }
+            return titleText;
+          }, rawHtml: true },
+        ],
+        news.slice(0, 20)
+      );
+      if (newsHtml) {
+        blocks.push(buildDetailSection("News", newsHtml));
+      }
+
+      const insiderHtml = makeTable(
+        [
+          { key: "date", label: "Date", formatter: (v) => formatDateText(v) },
+          { key: "reportingName", label: "Reporter", formatter: (v) => v || "-" },
+          { key: "transactionType", label: "Type", formatter: (v) => v || "-" },
+          { key: "securitiesTransacted", label: "Shares", formatter: (v) => formatNullable(v, formatInt) },
+          { key: "price", label: "Price", formatter: (v) => formatNullable(v, formatPrice) },
+        ],
+        insider.slice(0, 20)
+      );
+      let insiderBuy = 0;
+      let insiderSell = 0;
+      let insiderUnknown = 0;
+      for (let i = 0; i < insider.length; i += 1) {
+        const row = insider[i];
+        const qty = Number(row.securitiesTransacted);
+        const amount = Number.isFinite(qty) ? Math.abs(qty) : 0;
+        const type = String(row.transactionType || "").toLowerCase();
+        if (type.includes("buy") || type.includes("acquire") || type.includes("purchase")) {
+          insiderBuy += amount;
+        } else if (type.includes("sell") || type.includes("dispose") || type.includes("sale")) {
+          insiderSell += amount;
+        } else {
+          insiderUnknown += amount;
+        }
+      }
+      let insiderSectionHtml = "";
+      insiderSectionHtml += makeSummaryCards([
+        { label: "Insider buys (shares)", value: formatInt(insiderBuy) },
+        { label: "Insider sells (shares)", value: formatInt(insiderSell) },
+        { label: "Unclassified (shares)", value: formatInt(insiderUnknown) },
+      ]);
+      insiderSectionHtml += insiderHtml;
+      if (insiderSectionHtml) {
+        blocks.push(buildDetailSection("Insider activity", insiderSectionHtml));
+      }
+
+      const enterpriseRows = Array.isArray(financial.enterpriseValues) ? financial.enterpriseValues : [];
+      const enterpriseTrend = [];
+      for (let i = 0; i < Math.min(6, enterpriseRows.length); i += 1) {
+        const row = enterpriseRows[i];
+        const ev = Number(row.enterpriseValue);
+        if (Number.isFinite(ev) && ev > 0) {
+          enterpriseTrend.push({
+            label: String(row.date || "").slice(0, 4) || `E${i + 1}`,
+            value: ev,
+            display: formatCompact(ev),
+          });
+        }
+      }
+      const enterpriseTrendHtml = makeMiniBarChart("Enterprise value trend", enterpriseTrend);
+      if (enterpriseTrendHtml) {
+        blocks.push(buildDetailSection("Enterprise value trend", enterpriseTrendHtml));
+      }
+
+      detailsBodyEl.innerHTML = blocks.join("");
+    }
+
+    async function loadMarketDetails() {
+      let symbol = "TSLA";
+      const symbolRaw = symbolInput.value.trim().toUpperCase();
+      if (symbolRaw) {
+        symbol = symbolRaw;
+      }
+      detailsStatusEl.textContent = "Loading market details";
+      try {
+        const res = await fetch(`/api/fmp/market-details?symbol=${encodeURIComponent(symbol)}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to load market details");
+        }
+        renderMarketDetails(data);
+        detailsUpdatedEl.textContent = "Updated now";
+        detailsStatusEl.textContent = "Ready";
+      } catch (err) {
+        detailsStatusEl.textContent = err.message ? String(err.message) : "Failed to load market details";
+      }
     }
 
     function renderLiveUpdated() {
@@ -446,22 +1234,24 @@
         const res = await fetch(
           `/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`
         );
-        const data = await res.json(
-        );
+        const data = await res.json();
         latestStockInfo = data;
-        setInfoText(infoPrevCloseEl, formatPrice(Number(data.previousClose)));
-        setInfoText(infoOpenEl, formatPrice(Number(data.open)));
+        setInfoText(infoPrevCloseEl, formatNullable(data.previousClose, formatPrice));
+        setInfoText(infoOpenEl, formatNullable(data.open, formatPrice));
         setInfoText(infoDayRangeEl, formatRange(data.dayLow, data.dayHigh));
         setInfoText(infoYearRangeEl, formatRange(data.yearLow, data.yearHigh));
-        setInfoText(infoVolumeEl, formatInt(data.volume));
-        setInfoText(infoMarketCapEl, formatInt(data.marketCap));
+        setInfoText(infoVolumeEl, formatNullable(data.volume, formatInt));
+        setInfoText(infoMarketCapEl, formatCompact(data.marketCap));
+        const bidText = formatNullable(data.bid, formatPrice);
+        const askText = formatNullable(data.ask, formatPrice);
+        setInfoText(infoBidAskEl, `${bidText} / ${askText}`);
         let infoLabel = "Snapshot";
         if (data.stale) {
           infoLabel = "Snapshot (stale)";
         }
         infoUpdatedEl.textContent = infoLabel;
         liveOpenPrice = Number(data.open);
-        liveOpenEl.textContent = formatPrice(liveOpenPrice);
+        liveOpenEl.textContent = formatNullable(liveOpenPrice, formatPrice);
       } catch (err) {
         infoUpdatedEl.textContent = "Updated -";
       }
@@ -762,26 +1552,24 @@
       }
     }
 
-    form.addEventListener("submit", (e) => {
-      e.preventDefault();
-      loadCandles();
-      loadLivePrice();
-    });
-
     symbolInput.addEventListener("change", () => {
       setStatus("Ready");
       resetLivePriceState(symbolInput.value.trim().toUpperCase() || "TSLA");
       loadLivePrice();
       loadStockInfo();
+      loadMarketDetails();
+      loadCandles();
     });
 
     rangeInput.addEventListener("change", () => {
       setStatus("Ready");
+      loadCandles();
     });
 
     (async function init() {
       await loadListedSymbols();
       await loadStockInfo();
+      await loadMarketDetails();
       await loadCandles();
       applyLiveUpdatesState(true);
     })();

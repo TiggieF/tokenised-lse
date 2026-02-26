@@ -22,6 +22,9 @@
     "hardhat": "^2.20.0"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.0.2"
+    "@openzeppelin/contracts": "^5.0.2",
+    "ethers": "^6.16.0",
+    "express": "^5.2.1",
+    "yahoo-finance2": "^3.13.1"
   }
 }

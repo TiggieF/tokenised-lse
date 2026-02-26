@@ -313,6 +313,7 @@ const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
 const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
 const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
 const LIVE_UPDATES_STATE_FILE = path.join(ADMIN_DIR, 'liveUpdates.json');
+const ADMIN_WALLETS_STATE_FILE = path.join(ADMIN_DIR, 'adminWallets.json');
 const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
 const MERKLE_HOLDER_SCAN_STATE_FILE = path.join(DIVIDENDS_MERKLE_DIR, 'holder-scan-state.json');
 const MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS = (() => {
@@ -333,6 +334,7 @@ const MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS = (() => {
   return 0;
 })();
 const MIN_STOCK_QTY_UNITS = 10;
+const IMMUTABLE_ADMIN_WALLET = normalizeAddress('0x831B6E09dD00D2Cf2f37fe400Fe721DadD044945');
 const AUTOTRADE_POLL_INTERVAL_MS = (() => {
   const raw = Number(process.env.AUTOTRADE_POLL_INTERVAL_MS || '');
   if (Number.isFinite(raw) && raw >= 1000) {
@@ -424,8 +426,11 @@ function loadDeployments() {
   return JSON.parse(raw);
 }
 
-function getAdminWalletAllowlist() {
+function getBaseAdminWalletAllowlist() {
   const wallets = new Set();
+  if (IMMUTABLE_ADMIN_WALLET) {
+    wallets.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
+  }
   if (process.env.ADMIN_WALLETS) {
     const rawValues = String(process.env.ADMIN_WALLETS)
       .split(',')
@@ -445,6 +450,40 @@ function getAdminWalletAllowlist() {
       wallets.add(deployedAdmin.toLowerCase());
     }
   } catch {
+  }
+  return wallets;
+}
+
+function getDefaultAdminWalletState() {
+  const base = Array.from(getBaseAdminWalletAllowlist())
+    .map((item) => normalizeAddress(item))
+    .filter(Boolean);
+  base.sort((a, b) => a.localeCompare(b));
+  return {
+    wallets: base,
+    updatedAtMs: 0,
+  };
+}
+
+function readAdminWalletState() {
+  ensureAdminDir();
+  return readJsonFile(ADMIN_WALLETS_STATE_FILE, getDefaultAdminWalletState());
+}
+
+function writeAdminWalletState(state) {
+  ensureAdminDir();
+  writeJsonFile(ADMIN_WALLETS_STATE_FILE, state);
+}
+
+function getAdminWalletAllowlist() {
+  const wallets = getBaseAdminWalletAllowlist();
+  const state = readAdminWalletState();
+  const rows = Array.isArray(state.wallets) ? state.wallets : [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const normalized = normalizeAddress(rows[i]);
+    if (normalized) {
+      wallets.add(normalized.toLowerCase());
+    }
   }
   return wallets;
 }
@@ -4371,6 +4410,9 @@ app.get('/api/fmp/market-details', async (req, res) => {
       ['historicalMarketCapitalization', getFmpUrl('historical-market-capitalization', { symbol })],
       ['sharesFloat', getFmpUrl('shares-float', { symbol })],
       ['balanceSheet', getFmpUrl('balance-sheet-statement', { symbol, limit: '4' })],
+      ['balanceSheetQuarterly', getFmpUrl('balance-sheet-statement', { symbol, period: 'quarter', limit: '8' })],
+      ['incomeStatementQuarterly', getFmpUrl('income-statement', { symbol, period: 'quarter', limit: '8' })],
+      ['cashFlowStatementQuarterly', getFmpUrl('cash-flow-statement', { symbol, period: 'quarter', limit: '8' })],
       ['keyMetrics', getFmpUrl('key-metrics', { symbol, limit: '4' })],
       ['ratios', getFmpUrl('ratios', { symbol, limit: '4' })],
       ['keyMetricsTtm', getFmpUrl('key-metrics-ttm', { symbol })],
@@ -4380,6 +4422,8 @@ app.get('/api/fmp/market-details', async (req, res) => {
       ['ratingsHistorical', getFmpUrl('ratings-historical', { symbol, limit: '20' })],
       ['analystEstimates', getFmpUrl('analyst-estimates', { symbol, period: 'annual', page: '0', limit: '20' })],
       ['priceTargetSummary', getFmpUrl('price-target-summary', { symbol })],
+      ['priceTargetHistory', getFmpUrl('price-target', { symbol, page: '0', limit: '20' })],
+      ['earningsSurprises', getFmpUrl('earnings-surprises', { symbol, limit: '20' })],
       ['grades', getFmpUrl('grades', { symbol, limit: '20' })],
       ['insiderLatest', getFmpUrl('insider-trading/latest', { page: '0', limit: '200' })],
       ['mergersAcquisitionsLatest', getFmpUrl('mergers-acquisitions-latest', { page: '0', limit: '100' })],
@@ -4631,6 +4675,64 @@ app.get('/api/fmp/market-details', async (req, res) => {
       });
     }
 
+    const balanceQuarterlyRows = [];
+    const balanceQuarterlySourceRows = asArray(collected.balanceSheetQuarterly);
+    const balanceQuarterlyLimit = Math.min(8, balanceQuarterlySourceRows.length);
+    for (let i = 0; i < balanceQuarterlyLimit; i += 1) {
+      const row = balanceQuarterlySourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.fillingDate) {
+        date = String(row.fillingDate);
+      }
+      balanceQuarterlyRows.push({
+        date,
+        totalAssets: keepNumber(row.totalAssets),
+        totalLiabilities: keepNumber(row.totalLiabilities),
+        totalDebt: keepNumber(row.totalDebt),
+      });
+    }
+
+    const incomeQuarterlyRows = [];
+    const incomeQuarterlySourceRows = asArray(collected.incomeStatementQuarterly);
+    const incomeQuarterlyLimit = Math.min(8, incomeQuarterlySourceRows.length);
+    for (let i = 0; i < incomeQuarterlyLimit; i += 1) {
+      const row = incomeQuarterlySourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.fillingDate) {
+        date = String(row.fillingDate);
+      }
+      incomeQuarterlyRows.push({
+        date,
+        revenue: keepNumber(row.revenue),
+        netIncome: keepNumber(row.netIncome),
+        ebitda: keepNumber(row.ebitda),
+        eps: keepNumber(row.eps),
+      });
+    }
+
+    const cashFlowQuarterlyRows = [];
+    const cashFlowQuarterlySourceRows = asArray(collected.cashFlowStatementQuarterly);
+    const cashFlowQuarterlyLimit = Math.min(8, cashFlowQuarterlySourceRows.length);
+    for (let i = 0; i < cashFlowQuarterlyLimit; i += 1) {
+      const row = cashFlowQuarterlySourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.fillingDate) {
+        date = String(row.fillingDate);
+      }
+      cashFlowQuarterlyRows.push({
+        date,
+        operatingCashFlow: keepNumber(row.operatingCashFlow),
+        freeCashFlow: keepNumber(row.freeCashFlow),
+        capitalExpenditure: keepNumber(row.capitalExpenditure),
+      });
+    }
+
     const metricsRows = [];
     const metricsSourceRows = asArray(collected.keyMetrics);
     const metricsLimit = Math.min(4, metricsSourceRows.length);
@@ -4760,6 +4862,88 @@ app.get('/api/fmp/market-details', async (req, res) => {
         previousGrade,
         newGrade,
         action,
+      });
+    }
+
+    const priceTargetHistoryRows = [];
+    const priceTargetHistorySourceRows = asArray(collected.priceTargetHistory);
+    const priceTargetHistoryLimit = Math.min(20, priceTargetHistorySourceRows.length);
+    for (let i = 0; i < priceTargetHistoryLimit; i += 1) {
+      const row = priceTargetHistorySourceRows[i];
+      let date = '';
+      if (row.publishedDate) {
+        date = String(row.publishedDate);
+      } else if (row.date) {
+        date = String(row.date);
+      }
+      let analyst = '';
+      if (row.analystName) {
+        analyst = String(row.analystName);
+      } else if (row.analyst) {
+        analyst = String(row.analyst);
+      } else if (row.gradingCompany) {
+        analyst = String(row.gradingCompany);
+      }
+      let newsUrl = '';
+      if (row.newsURL) {
+        newsUrl = String(row.newsURL);
+      } else if (row.url) {
+        newsUrl = String(row.url);
+      }
+      let targetSource = row.priceTarget;
+      if (!targetSource) {
+        targetSource = row.targetPrice;
+      }
+      if (!targetSource) {
+        targetSource = row.target;
+      }
+      priceTargetHistoryRows.push({
+        date,
+        analyst,
+        targetPrice: keepNumber(targetSource),
+        newsUrl,
+      });
+    }
+
+    const earningsSurpriseRows = [];
+    const earningsSurpriseSourceRows = asArray(collected.earningsSurprises);
+    const earningsSurpriseLimit = Math.min(20, earningsSurpriseSourceRows.length);
+    for (let i = 0; i < earningsSurpriseLimit; i += 1) {
+      const row = earningsSurpriseSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.fiscalDateEnding) {
+        date = String(row.fiscalDateEnding);
+      }
+      let actualSource = row.actualEarningResult;
+      if (!actualSource) {
+        actualSource = row.actualEPS;
+      }
+      if (!actualSource) {
+        actualSource = row.actual;
+      }
+      let estimateSource = row.estimatedEarning;
+      if (!estimateSource) {
+        estimateSource = row.consensusEPS;
+      }
+      if (!estimateSource) {
+        estimateSource = row.estimated;
+      }
+      let surpriseSource = row.earningsSurprise;
+      if (!surpriseSource) {
+        surpriseSource = row.surprise;
+      }
+      let surprisePctSource = row.earningsSurprisePercentage;
+      if (!surprisePctSource) {
+        surprisePctSource = row.surprisePercentage;
+      }
+      earningsSurpriseRows.push({
+        date,
+        actual: keepNumber(actualSource),
+        estimate: keepNumber(estimateSource),
+        surprise: keepNumber(surpriseSource),
+        surprisePct: keepNumber(surprisePctSource),
       });
     }
 
@@ -5083,6 +5267,9 @@ app.get('/api/fmp/market-details', async (req, res) => {
         },
         financial: {
           balanceSheet: balanceRows,
+          balanceSheetQuarterly: balanceQuarterlyRows,
+          incomeStatementQuarterly: incomeQuarterlyRows,
+          cashFlowStatementQuarterly: cashFlowQuarterlyRows,
           keyMetrics: metricsRows,
           ratios: ratiosRows,
           keyMetricsTtm: keyMetricsTtmRow,
@@ -5100,6 +5287,8 @@ app.get('/api/fmp/market-details', async (req, res) => {
           ratingsHistorical: ratingsRows,
           analystEstimates: estimatesRows,
           priceTargetSummary: priceTargetRow,
+          priceTargetHistory: priceTargetHistoryRows,
+          earningsSurprises: earningsSurpriseRows,
           grades: gradesRows,
         },
         news: newsRows,
@@ -5160,6 +5349,136 @@ app.get('/api/ui/permissions', (req, res) => {
     canAccessAdminPage: isAdmin,
     canUseLiveUpdates: isAdmin,
   });
+});
+
+app.get('/api/admin/wallets', (req, res) => {
+  try {
+    let walletRaw = '';
+    if (req.query && req.query.wallet) {
+      walletRaw = String(req.query.wallet);
+    }
+    const wallet = normalizeAddress(walletRaw);
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
+    const state = readAdminWalletState();
+    const rows = Array.isArray(state.wallets) ? state.wallets : [];
+    const set = new Set();
+    if (IMMUTABLE_ADMIN_WALLET) {
+      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
+    }
+    for (let i = 0; i < rows.length; i += 1) {
+      const normalized = normalizeAddress(rows[i]);
+      if (normalized) {
+        set.add(normalized.toLowerCase());
+      }
+    }
+    const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
+    wallets.sort((a, b) => a.localeCompare(b));
+    res.json({
+      wallets,
+      immutableAdminWallet: IMMUTABLE_ADMIN_WALLET || '',
+      updatedAtMs: Number(state.updatedAtMs || 0),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/wallets/add', (req, res) => {
+  try {
+    const body = req.body || {};
+    const actorWallet = normalizeAddress(String(body.wallet || ''));
+    const targetWallet = normalizeAddress(String(body.targetWallet || ''));
+    if (!actorWallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(actorWallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
+    if (!targetWallet) {
+      return res.status(400).json({ error: 'targetWallet must be a valid address' });
+    }
+    const state = readAdminWalletState();
+    const set = new Set();
+    if (IMMUTABLE_ADMIN_WALLET) {
+      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
+    }
+    const rows = Array.isArray(state.wallets) ? state.wallets : [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const normalized = normalizeAddress(rows[i]);
+      if (normalized) {
+        set.add(normalized.toLowerCase());
+      }
+    }
+    set.add(targetWallet.toLowerCase());
+    const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
+    wallets.sort((a, b) => a.localeCompare(b));
+    const next = {
+      wallets,
+      updatedAtMs: Date.now(),
+    };
+    writeAdminWalletState(next);
+    res.json({
+      wallets,
+      immutableAdminWallet: IMMUTABLE_ADMIN_WALLET || '',
+      updatedAtMs: next.updatedAtMs,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/wallets/remove', (req, res) => {
+  try {
+    const body = req.body || {};
+    const actorWallet = normalizeAddress(String(body.wallet || ''));
+    const targetWallet = normalizeAddress(String(body.targetWallet || ''));
+    if (!actorWallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(actorWallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
+    if (!targetWallet) {
+      return res.status(400).json({ error: 'targetWallet must be a valid address' });
+    }
+    if (IMMUTABLE_ADMIN_WALLET && targetWallet.toLowerCase() === IMMUTABLE_ADMIN_WALLET.toLowerCase()) {
+      return res.status(400).json({ error: 'cannot remove immutable admin wallet' });
+    }
+    const state = readAdminWalletState();
+    const set = new Set();
+    if (IMMUTABLE_ADMIN_WALLET) {
+      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
+    }
+    const rows = Array.isArray(state.wallets) ? state.wallets : [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const normalized = normalizeAddress(rows[i]);
+      if (normalized) {
+        const key = normalized.toLowerCase();
+        if (key !== targetWallet.toLowerCase()) {
+          set.add(key);
+        }
+      }
+    }
+    const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
+    wallets.sort((a, b) => a.localeCompare(b));
+    const next = {
+      wallets,
+      updatedAtMs: Date.now(),
+    };
+    writeAdminWalletState(next);
+    res.json({
+      wallets,
+      immutableAdminWallet: IMMUTABLE_ADMIN_WALLET || '',
+      updatedAtMs: next.updatedAtMs,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/live-updates/status', (_req, res) => {
@@ -9659,31 +9978,30 @@ app.get('/api/gas/latest', async (_req, res) => {
       walletText = String(_req.query.wallet);
     }
     const wallet = normalizeAddress(walletText);
+    if (wallet) {
+      const walletRows = await buildWalletGasRowsFromIndexer(wallet, 20);
+      const walletReport = {
+        suite: 'wallet',
+        startedAtMs: Date.now(),
+        finishedAtMs: Date.now(),
+        durationMs: 0,
+        chainId: 0,
+        latestBlock: 0,
+        thresholdPct: GAS_WARN_THRESHOLD_PCT,
+        warnCount: 0,
+        skipCount: 0,
+        totalRows: walletRows.length,
+        pollMs: GAS_PAGE_POLL_MS,
+        rows: walletRows,
+      };
+      return res.json({
+        ok: true,
+        source: 'wallet_indexed_receipts',
+        lastRunAtMs: gasRuntimeState.lastRunAtMs,
+        report: walletReport,
+      });
+    }
     if (!ENABLE_GAS_PACK) {
-      if (wallet) {
-        const walletRows = await buildWalletGasRowsFromIndexer(wallet, 20);
-        const walletReport = {
-          suite: 'wallet',
-          startedAtMs: Date.now(),
-          finishedAtMs: Date.now(),
-          durationMs: 0,
-          chainId: 0,
-          latestBlock: 0,
-          thresholdPct: GAS_WARN_THRESHOLD_PCT,
-          warnCount: 0,
-          skipCount: 0,
-          totalRows: walletRows.length,
-          pollMs: GAS_PAGE_POLL_MS,
-          rows: walletRows,
-        };
-        return res.json({
-          ok: true,
-          disabled: true,
-          source: 'wallet_indexed_receipts',
-          lastRunAtMs: gasRuntimeState.lastRunAtMs,
-          report: walletReport,
-        });
-      }
       const disabledReport = {
         suite: 'core',
         startedAtMs: Date.now(),
@@ -10659,6 +10977,9 @@ if (!fs.existsSync(AWARD_SESSION_FILE)) {
 if (!fs.existsSync(LIVE_UPDATES_STATE_FILE)) {
   writeLiveUpdatesState(getDefaultLiveUpdatesState());
 }
+if (!fs.existsSync(ADMIN_WALLETS_STATE_FILE)) {
+  writeAdminWalletState(getDefaultAdminWalletState());
+}
 if (fs.existsSync(AUTOTRADE_STATE_FILE)) {
   const autoState = readAutoTradeState();
   autoState.listenerRunning = ENABLE_AUTOTRADE;
@@ -10679,20 +11000,24 @@ if (ENABLE_AUTOTRADE) {
   }, AUTOTRADE_POLL_INTERVAL_MS);
 }
 if (ENABLE_GAS_PACK) {
-  const gasIntervalId = setInterval(() => {
-    runGasPackGuarded('core').catch((err) => {
-      let msg = 'gas pack interval failed';
-      if (err && err.message) {
-        msg = err.message;
-      }
-      if (msg.includes('need at least 2 local accounts')) {
-        console.error('[gas] disabled background gas loop: Sepolia RPC does not expose local unlocked accounts');
-        clearInterval(gasIntervalId);
-        return;
-      }
-      console.error('[gas]', msg);
-    });
-  }, GAS_AUTO_RUN_INTERVAL_MS);
+  if (NETWORK_NAME === 'sepolia') {
+    console.log('[gas] benchmark gas pack is skipped on Sepolia; wallet gas rows remain available');
+  } else {
+    const gasIntervalId = setInterval(() => {
+      runGasPackGuarded('core').catch((err) => {
+        let msg = 'gas pack interval failed';
+        if (err && err.message) {
+          msg = err.message;
+        }
+        if (msg.includes('need at least 2 local accounts')) {
+          console.error('[gas] disabled background gas loop: Sepolia RPC does not expose local unlocked accounts');
+          clearInterval(gasIntervalId);
+          return;
+        }
+        console.error('[gas]', msg);
+      });
+    }, GAS_AUTO_RUN_INTERVAL_MS);
+  }
 }
 
 app.use((_req, res) => {
