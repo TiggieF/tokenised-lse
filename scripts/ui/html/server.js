@@ -312,6 +312,7 @@ const AUTOTRADE_STATE_FILE = path.join(AUTOTRADE_DIR, 'state.json');
 const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
 const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
 const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
+const LIVE_UPDATES_STATE_FILE = path.join(ADMIN_DIR, 'liveUpdates.json');
 const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
 const MERKLE_HOLDER_SCAN_STATE_FILE = path.join(DIVIDENDS_MERKLE_DIR, 'holder-scan-state.json');
 const MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS = (() => {
@@ -2991,6 +2992,13 @@ function getDefaultAwardSessionState() {
   };
 }
 
+function getDefaultLiveUpdatesState() {
+  return {
+    enabled: true,
+    updatedAtMs: 0,
+  };
+}
+
 function readAwardSessionState() {
   ensureAdminDir();
   return readJsonFile(AWARD_SESSION_FILE, getDefaultAwardSessionState());
@@ -2999,6 +3007,16 @@ function readAwardSessionState() {
 function writeAwardSessionState(state) {
   ensureAdminDir();
   writeJsonFile(AWARD_SESSION_FILE, state);
+}
+
+function readLiveUpdatesState() {
+  ensureAdminDir();
+  return readJsonFile(LIVE_UPDATES_STATE_FILE, getDefaultLiveUpdatesState());
+}
+
+function writeLiveUpdatesState(state) {
+  ensureAdminDir();
+  writeJsonFile(LIVE_UPDATES_STATE_FILE, state);
 }
 
 function merkleEpochClaimsFile(epochId) {
@@ -5141,6 +5159,15 @@ app.get('/api/ui/permissions', (req, res) => {
     isAdmin,
     canAccessAdminPage: isAdmin,
     canUseLiveUpdates: isAdmin,
+  });
+});
+
+app.get('/api/live-updates/status', (_req, res) => {
+  const state = readLiveUpdatesState();
+  const enabled = state && state.enabled !== false;
+  res.json({
+    enabled,
+    updatedAtMs: Number(state.updatedAtMs || 0),
   });
 });
 
@@ -9441,6 +9468,48 @@ app.post('/api/admin/price-set', async (req, res) => {
   }
 });
 
+app.get('/api/admin/live-updates', async (_req, res) => {
+  try {
+    const state = readLiveUpdatesState();
+    const enabled = state && state.enabled !== false;
+    res.json({
+      enabled,
+      updatedAtMs: Number(state.updatedAtMs || 0),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/live-updates', async (req, res) => {
+  try {
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let walletText = '';
+    if (body.wallet) {
+      walletText = String(body.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
+    const enabled = body.enabled !== false;
+    const next = {
+      enabled,
+      updatedAtMs: Date.now(),
+    };
+    writeLiveUpdatesState(next);
+    res.json(next);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/admin/award/session', async (_req, res) => {
   try {
     const snapshot = await getAwardStatusSnapshot();
@@ -10586,6 +10655,9 @@ if (!fs.existsSync(SYMBOL_STATUS_FILE)) {
 }
 if (!fs.existsSync(AWARD_SESSION_FILE)) {
   writeAwardSessionState(getDefaultAwardSessionState());
+}
+if (!fs.existsSync(LIVE_UPDATES_STATE_FILE)) {
+  writeLiveUpdatesState(getDefaultLiveUpdatesState());
 }
 if (fs.existsSync(AUTOTRADE_STATE_FILE)) {
   const autoState = readAutoTradeState();
