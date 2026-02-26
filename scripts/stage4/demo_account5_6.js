@@ -14,7 +14,7 @@ async function loadDeployment() {
   const exists = fs.existsSync(filePath);
 
   if (!exists) {
-    throw new Error("Missing deployments/localhost.json. Run stage2 + stage4 deploys first.");
+    throw new Error("Missing deployments/localhost.json. Run listings and orderbook deploys first.");
   }
 
   const raw = fs.readFileSync(filePath, "utf8");

@@ -245,26 +245,70 @@ Add realistic exchange behaviors to increase technical depth and grading impact.
 
 ---
 
-### Stage 13.6 — Basket ETF Product
+### Stage 13.6 — Merkle Dividends (Dual Mode)
 
 **Objective:**
-Add a tokenized basket product (NASDAQ-style index basket) with T+0 mint/redeem settlement against TToken.
+Add Merkle-proof dividends while keeping existing snapshot dividends operational in parallel.
 
 **Key Files:**
 
-* `docs/stages/stage13.6-BasketETF.md` (new)
-* `contracts/BasketToken.sol` (new)
-* `contracts/BasketFactory.sol` (new)
-* `contracts/BasketRouter.sol` (new)
-* `scripts/ui/html/public/trade.html`
+* `docs/stages/stage13.6-MerkleDividends.md` (new)
+* `contracts/DividendsMerkle.sol` (new)
+* `scripts/ui/html/server.js`
+* `scripts/ui/html/public/admin.html`
 * `scripts/ui/html/public/portfolio.html`
+* `test/dividends-merkle.test.js` (new)
 
 **Approval Criteria:**
 
-* Basket product can be created from locally defined NASDAQ symbols/weights
-* Mint and redeem settle atomically (T+0) in a single transaction path
-* Basket transactions are visible in wallet-scoped transaction history
-* Basket positions are visible in portfolio
+* Snapshot dividends and Merkle dividends both work in same deployment
+* Admin can declare Merkle dividend epochs with root and total amount
+* User can claim Merkle dividend with valid proof and cannot double-claim
+* Existing snapshot dividend tests remain passing
+
+---
+
+### Stage 13.7 — Deterministic Replay and Reconciliation Checker
+
+**Objective:**
+Add an in-system reconciliation service that deterministically replays chain events and reconciles against on-chain state.
+
+**Key Files:**
+
+* `docs/stages/stage13.7-Reconciliation-Checker.md` (new)
+* `scripts/ui/html/server.js`
+* `scripts/ui/html/public/admin.html`
+
+**Approval Criteria:**
+
+* Admin can trigger reconciliation from system UI/API
+* Backend can run reconciliation from API and update latest status in runtime state
+* Reconciliation output includes pass/mismatch status with field-level diffs
+* Warn-only behavior is active for mismatches
+
+---
+
+### Stage 13.8 — Gas and Cost Evaluation Pack
+
+**Objective:**
+Provide repeatable gas and cost measurements for core flows and stress flows, with a UI page for live visibility.
+
+**Key Files:**
+
+* `docs/stages/stage13.8-Gas-Cost-Evaluation.md` (new)
+* `scripts/gas/run-gas-pack.js` (new)
+* `scripts/gas/scenarios/core.js` (new)
+* `scripts/gas/scenarios/stress.js` (new)
+* `scripts/ui/html/server.js`
+* `scripts/ui/html/public/gas.html` (new)
+* `test/gas-pack.smoke.test.js` (new)
+
+**Approval Criteria:**
+
+* Core and stress scenarios execute repeatably on local Hardhat
+* Gas outputs are visible via API and gas page
+* No persistent local-storage dependency for gas reports
+* Regression threshold warnings (>15%) are shown as warn-only
 
 ---
 

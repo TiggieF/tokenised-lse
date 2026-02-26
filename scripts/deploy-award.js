@@ -8,12 +8,10 @@ async function ensureDir(dirPath) {
 
 async function readDeployments(networkName) {
   const filePath = path.join(__dirname, "..", "deployments", `${networkName}.json`);
-
   try {
     const raw = await fs.promises.readFile(filePath, "utf8");
-    const data = JSON.parse(raw);
-    return { filePath, data };
-  } catch (readError) {
+    return { filePath, data: JSON.parse(raw) };
+  } catch {
     return { filePath, data: {} };
   }
 }
@@ -21,23 +19,21 @@ async function readDeployments(networkName) {
 async function writeDeployments(filePath, payload) {
   const dirPath = path.dirname(filePath);
   await ensureDir(dirPath);
-
   const body = JSON.stringify(payload, null, 2) + "\n";
   await fs.promises.writeFile(filePath, body);
 }
 
 function readTtokenValue(data) {
-  let value = data.ttoken;
-
-  if (!value) {
-    value = data.ttokenAddress;
+  if (data.ttoken) {
+    return data.ttoken;
   }
-
-  if (!value) {
-    value = data.TTOKEN_ADDRESS;
+  if (data.ttokenAddress) {
+    return data.ttokenAddress;
   }
-
-  return value;
+  if (data.TTOKEN_ADDRESS) {
+    return data.TTOKEN_ADDRESS;
+  }
+  return "";
 }
 
 async function main() {
@@ -49,25 +45,30 @@ async function main() {
   const data = deploymentState.data;
 
   const ttoken = readTtokenValue(data);
-  const registry = data.listingsRegistry;
-
-  if (!ttoken || !registry) {
-    throw new Error("Missing ttoken or listingsRegistry in deployments.");
+  const dex = data.orderBookDex;
+  if (!ttoken || !dex) {
+    throw new Error("Missing ttoken or orderBookDex in deployments.");
   }
 
-  const dividendsFactory = await ethers.getContractFactory("Dividends");
-  const dividends = await dividendsFactory.deploy(ttoken, registry, admin.address);
-  await dividends.waitForDeployment();
+  const awardFactory = await ethers.getContractFactory("Award");
+  const award = await awardFactory.deploy(ttoken, admin.address, dex);
+  await award.waitForDeployment();
 
-  const dividendsAddress = await dividends.getAddress();
+  const awardAddress = await award.getAddress();
+  const ttokenContract = await ethers.getContractAt("TToken", ttoken);
+  const minterRole = await ttokenContract.MINTER_ROLE();
+  await (await ttokenContract.connect(admin).grantRole(minterRole, awardAddress)).wait();
+
+  const dexContract = await ethers.getContractAt("OrderBookDEX", dex);
+  await (await dexContract.connect(admin).setAward(awardAddress)).wait();
+
   const updated = {
     ...data,
-    dividends: dividendsAddress,
+    award: awardAddress,
   };
-
   await writeDeployments(filePath, updated);
 
-  console.log("Dividends deployed to:", dividendsAddress);
+  console.log("Award deployed to:", awardAddress);
   console.log("Updated deployments:", filePath);
 }
 

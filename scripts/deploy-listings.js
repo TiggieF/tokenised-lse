@@ -40,7 +40,10 @@ async function writeDeployment(networkName, payload) {
 async function main() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
-  const defaultMinter = signers[1];
+  let defaultMinter = signers[1];
+  if (!defaultMinter) {
+    defaultMinter = admin;
+  }
 
   let shouldCreateListings = true;
   if (process.env.CREATE_LISTINGS === "false") {

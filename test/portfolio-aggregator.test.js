@@ -1,10 +1,10 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
 
 const ONE_SHARE = 10n ** 18n;
 
-async function deployStage7Fixture() {
+async function deployAggregatorFixture() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
   const user = signers[1];
@@ -42,9 +42,11 @@ async function deployStage7Fixture() {
   return { admin, user, ttoken, priceFeed, aapl, tsla, aggregator };
 }
 
-describe("Stage 7 — PortfolioAggregator", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("PortfolioAggregator", function () {
   it("returns balances and valuations", async function () {
-    const fixture = await loadFixture(deployStage7Fixture);
+    const fixture = await loadFixture(deployAggregatorFixture);
     const admin = fixture.admin;
     const user = fixture.user;
     const ttoken = fixture.ttoken;
@@ -68,7 +70,7 @@ describe("Stage 7 — PortfolioAggregator", function () {
   });
 
   it("returns valuation using oracle price", async function () {
-    const fixture = await loadFixture(deployStage7Fixture);
+    const fixture = await loadFixture(deployAggregatorFixture);
     const admin = fixture.admin;
     const user = fixture.user;
     const priceFeed = fixture.priceFeed;
@@ -86,7 +88,7 @@ describe("Stage 7 — PortfolioAggregator", function () {
   });
 
   it("supports pagination", async function () {
-    const fixture = await loadFixture(deployStage7Fixture);
+    const fixture = await loadFixture(deployAggregatorFixture);
     const user = fixture.user;
     const aggregator = fixture.aggregator;
 
@@ -95,7 +97,7 @@ describe("Stage 7 — PortfolioAggregator", function () {
   });
 
   it("returns cash/stock/total summary", async function () {
-    const fixture = await loadFixture(deployStage7Fixture);
+    const fixture = await loadFixture(deployAggregatorFixture);
     const admin = fixture.admin;
     const user = fixture.user;
     const ttoken = fixture.ttoken;

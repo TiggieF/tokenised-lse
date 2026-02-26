@@ -7,7 +7,7 @@ async function ensureDir(dirPath) {
 }
 
 async function writeDeployment(networkName, payload) {
-  const dir = path.join(__dirname, "..", "..", "deployments");
+  const dir = path.join(__dirname, "..", "deployments");
   await ensureDir(dir);
 
   const filePath = path.join(dir, `${networkName}.json`);
@@ -31,7 +31,7 @@ async function main() {
   const signers = await ethers.getSigners();
   const deployer = signers[0];
 
-  const deploymentsPath = path.join(__dirname, "..", "..", "deployments", `${network.name}.json`);
+  const deploymentsPath = path.join(__dirname, "..", "deployments", `${network.name}.json`);
   const raw = await fs.promises.readFile(deploymentsPath, "utf8");
   const deployments = JSON.parse(raw);
 

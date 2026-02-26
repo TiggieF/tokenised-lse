@@ -401,7 +401,11 @@
           }
         } else {
           for (const item of listings) {
-            const symbol = String(item.symbol || "").toUpperCase();
+            let symbolValue = "";
+            if (item.symbol) {
+              symbolValue = item.symbol;
+            }
+            const symbol = String(symbolValue).toUpperCase();
             if (!symbol) continue;
             const opt = document.createElement("option");
             opt.value = symbol;
@@ -418,7 +422,11 @@
           symbolInput.appendChild(opt);
         }
       }
-      const selected = symbolInput.value.trim().toUpperCase() || fallbackSymbols[0];
+      let selected = fallbackSymbols[0];
+      const selectedRaw = symbolInput.value.trim().toUpperCase();
+      if (selectedRaw) {
+        selected = selectedRaw;
+      }
       liveSymbol = selected;
       resetLivePriceState(selected);
       liveSymbolLabel.textContent = `${selected} live price`;
@@ -429,7 +437,11 @@
     }
 
     async function loadStockInfo() {
-      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      let symbol = "TSLA";
+      const symbolRaw = symbolInput.value.trim().toUpperCase();
+      if (symbolRaw) {
+        symbol = symbolRaw;
+      }
       try {
         const res = await fetch(
           `/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`
@@ -566,7 +578,11 @@
     }
 
     async function loadLivePrice() {
-      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      let symbol = "TSLA";
+      const symbolRaw = symbolInput.value.trim().toUpperCase();
+      if (symbolRaw) {
+        symbol = symbolRaw;
+      }
       if (symbol !== liveSymbol) {
         resetLivePriceState(symbol);
       }
@@ -579,21 +595,52 @@
         );
         const data = await res.json(
         );
-        const currentPrice = data.price;
-        const previousClose = latestStockInfo.previousClose;
-        const changeValue = Number((currentPrice - previousClose).toFixed(2));
-        const changePct = (currentPrice - previousClose) / previousClose;
+        const currentPrice = Number(data.price);
+        let previousClose = Number(data.previousClose);
+        if (!(Number.isFinite(previousClose) && previousClose > 0)) {
+          previousClose = Number(latestStockInfo.previousClose);
+        }
+        if (!(Number.isFinite(previousClose) && previousClose > 0)) {
+          const infoRes = await fetch(`/api/fmp/stock-info?symbol=${encodeURIComponent(symbol)}`);
+          const infoData = await infoRes.json();
+          if (infoRes.ok && !infoData.error) {
+            latestStockInfo = infoData;
+            previousClose = Number(infoData.previousClose);
+          }
+        }
+        let changeValue = 0;
+        let changePct = 0;
+        let hasChange = false;
+        if (Number.isFinite(currentPrice) && currentPrice > 0 && Number.isFinite(previousClose) && previousClose > 0) {
+          changeValue = Number((currentPrice - previousClose).toFixed(2));
+          changePct = (currentPrice - previousClose) / previousClose;
+          hasChange = true;
+        } else {
+          const quoteChangePercent = Number(data.changePercent);
+          if (Number.isFinite(quoteChangePercent)) {
+            changePct = quoteChangePercent;
+            changeValue = currentPrice * quoteChangePercent;
+            hasChange = true;
+          }
+        }
 
         livePriceEl.textContent = formatPrice(currentPrice);
-        const pctValue = changePct * 100;
-        if (pctValue > 0) {
-          liveChangeEl.textContent = `+${pctValue.toFixed(2)}%`;
+        if (hasChange) {
+          const pctValue = changePct * 100;
+          if (pctValue > 0) {
+            liveChangeEl.textContent = `+${pctValue.toFixed(2)}%`;
+          } else {
+            liveChangeEl.textContent = `${pctValue.toFixed(2)}%`;
+          }
         } else {
-          liveChangeEl.textContent = `${pctValue.toFixed(2)}%`;
+          liveChangeEl.textContent = "-";
         }
         liveOpenEl.textContent = formatPrice(liveOpenPrice);
 
-        const direction = changeValue;
+        let direction = 0;
+        if (hasChange) {
+          direction = changeValue;
+        }
         applyChangeClass(liveChangeEl, direction);
         applyChangeClass(liveUpdatedEl, direction);
 
@@ -611,12 +658,16 @@
       if (!livePollingEnabled) {
         return;
       }
-      livePoller = setInterval(loadLivePrice, 10000);
+      livePoller = setInterval(loadLivePrice, 2000);
       liveTicker = setInterval(renderLiveUpdated, 1000);
     }
 
     async function loadCandles() {
-      const symbol = symbolInput.value.trim().toUpperCase() || "TSLA";
+      let symbol = "TSLA";
+      const symbolRaw = symbolInput.value.trim().toUpperCase();
+      if (symbolRaw) {
+        symbol = symbolRaw;
+      }
       const date = dateInput.value;
       const range = rangeInput.value;
       let interval = "5";
@@ -730,6 +781,7 @@
 
     (async function init() {
       await loadListedSymbols();
+      await loadStockInfo();
       await loadCandles();
       applyLiveUpdatesState(false);
     })();

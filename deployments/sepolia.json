@@ -1,0 +1,17 @@
+{
+  "network": "sepolia",
+  "ttoken": "0xb0d49F375103e02C9C3db0C680F8C1bc6d3DaE21",
+  "ttokenAddress": "0xb0d49F375103e02C9C3db0C680F8C1bc6d3DaE21",
+  "admin": "0x831B6E09dD00D2Cf2f37fe400Fe721DadD044945",
+  "defaultMinter": "0x831B6E09dD00D2Cf2f37fe400Fe721DadD044945",
+  "listingsRegistry": "0x094b2b6Ee9B2BC5fc328eB1b31B9fCbF9a53229b",
+  "equityTokenFactory": "0x9a67D4c9408c0A54702fB00138f2BF8f1cEcd5A6",
+  "priceFeed": "0xbF0e400EFad6B386BE1f4EbD52F49A0dd89858Bb",
+  "orderBookDex": "0x88e2591f16a15b2b655250431d83B88d16C72842",
+  "dividends": "0xAFeF126e87D170F12495E0f9b5A5D79b4b9dc161",
+  "dividendsMerkle": "0x5292F71AC9d83b25BB3D8E4195791f341f4A821c",
+  "leveragedTokenFactory": "0x6A7Be9aDA520c3399D021cd769296adEa64D5612",
+  "leveragedProductRouter": "0x83f10985627B720D64Cf41aFCA3a6C4f3514f5F9",
+  "award": "0xDFA18BAe8b279f74c120e390e12cb6c314f653F8",
+  "portfolioAggregator": "0x17A4A8c60dd744Ceb601568B98BC3778B3f11056"
+}

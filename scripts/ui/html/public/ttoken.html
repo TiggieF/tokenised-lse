@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TToken Airdrop</title>
+  <title>Token Factory</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
@@ -126,7 +126,7 @@
 </head>
 <body>
   <div class="panel">
-    <div class="title">TToken</div>
+    <div class="title">Token Factory</div>
     <!-- ttoken mint -->
     <div class="center-wrap">
       <div style="display:flex; flex-direction:column; gap: 10px; align-items:center;">
@@ -134,7 +134,7 @@
         <input
           id="amount-input"
           type="text"
-          value="1000"
+          value="1"
           style="width: 180px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(16, 20, 24, 0.1); font-family: inherit; text-align: center;"
         />
       </div>
@@ -153,7 +153,7 @@
         </select>
         <div class="counter" style="margin-top: 6px;">
           <button class="counter-btn" id="equity-minus-btn" type="button">−</button>
-          <div class="counter-value" id="equity-amount-value">1000</div>
+          <div class="counter-value" id="equity-amount-value">100</div>
           <button class="counter-btn" id="equity-plus-btn" type="button">+</button>
         </div>
         <button class="airdrop-btn" id="mint-equity-btn" type="button">Mint Equity</button>
@@ -180,9 +180,9 @@
     const ttokenWallet = document.getElementById("ttoken-wallet");
     const equityWallet = document.getElementById("equity-wallet");
     // dom objects
-    const STEP = 1000;
-    // up and down by 1000
-    let equityAmount = 1000;
+    const STEP = 10;
+    // up and down by 10
+    let equityAmount = 100;
     // default amount
     let currentAccount = "";
 
@@ -192,7 +192,11 @@
       equityAmountValue.textContent = String(equityAmount);
     }
 
-    function setEquityStatus(message, tone = "neutral") {
+    function setEquityStatus(message, toneInput) {
+      let tone = toneInput;
+      if (!tone) {
+        tone = "neutral";
+      }
       equityStatus.textContent = message;
       let nextColor = "#5b6b7a";
       if (tone === "error") {
@@ -202,7 +206,11 @@
       // set style for equity status
     }
 
-    function setStatus(message, tone = "neutral") {
+    function setStatus(message, toneInput) {
+      let tone = toneInput;
+      if (!tone) {
+        tone = "neutral";
+      }
       statusText.textContent = message;
       let nextColor = "#5b6b7a";
       if (tone === "error") {
@@ -217,12 +225,40 @@
       equityWallet.textContent = address;
     }
 
-    equityMinusBtn.addEventListener("click", () => {
-      equityAmount = Math.max(1000, equityAmount - STEP);
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
+          }
+        }
+      }
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
+    equityMinusBtn.addEventListener("click", function () {
+      let nextValue = equityAmount - STEP;
+      if (nextValue < 100) {
+        nextValue = 100;
+      }
+      equityAmount = nextValue;
       renderEquityAmount();
     });
 
-    equityPlusBtn.addEventListener("click", () => {
+    equityPlusBtn.addEventListener("click", function () {
       equityAmount += STEP;
       renderEquityAmount();
     });
@@ -242,8 +278,18 @@
           body: JSON.stringify({ to: currentAccount, amount: parsedAmount }),
         });
         const data = await res.json();
+        if (!res.ok || data.error) {
+          let message = "Airdrop failed";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
 
-        const txHash = data.txHash || "";
+        let txHash = "";
+        if (data.txHash) {
+          txHash = data.txHash;
+        }
         if (txHash.length > 0) {
           setStatus(`Airdrop sent: ${txHash}`);
         } else {
@@ -252,13 +298,17 @@
         importHint.style.display = "block";
         importHint.textContent = `token address: ${ttokenAddress}`;
       } catch (err) {
-        setStatus(err.message || "", "error");
+        let message = "";
+        if (err.message) {
+          message = err.message;
+        }
+        setStatus(message, "error");
       }
     }
 
     airdropBtn.addEventListener("click", airdrop);
 
-    mintEquityBtn.addEventListener("click", async () => {
+    mintEquityBtn.addEventListener("click", async function () {
       try {
         // mint on click
         setEquityStatus("Creating & minting equity");
@@ -274,12 +324,29 @@
           }),
         });
         const data = await res.json();
-        const mintHash = data.mintTx || data.txHash || "";
+        if (!res.ok || data.error) {
+          let message = "Mint failed";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
+        let mintHash = "";
+        if (data.mintTx) {
+          mintHash = data.mintTx;
+        }
+        if (!mintHash && data.txHash) {
+          mintHash = data.txHash;
+        }
         setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value} Tx: ${mintHash}`);
         equityImportHint.style.display = "block";
         equityImportHint.textContent = `${equitySymbol.value} address: ${data.tokenAddress}`;
       } catch (err) {
-        setEquityStatus(err.message || "", "error");
+        let message = "";
+        if (err.message) {
+          message = err.message;
+        }
+        setEquityStatus(message, "error");
       }
     });
 
@@ -295,7 +362,7 @@
         }
         listedStocks = [];
         for (const item of listings) {
-          const symbol = String(item.symbol || "").toUpperCase();
+          const symbol = String(item.symbol).toUpperCase();
           if (!symbol) continue;
           listedStocks.push({ symbol });
         }
@@ -318,10 +385,10 @@
           method: "eth_requestAccounts",
         }
       );
-      setWalletAddress(accounts[0]);
+      setWalletAddress(chooseDisplayAccount(accounts));
     })();
-    window.ethereum.on("accountsChanged", (accounts) => {
-      setWalletAddress(accounts[0]);
+    window.ethereum.on("accountsChanged", function (accounts) {
+      setWalletAddress(chooseDisplayAccount(accounts));
     });
   </script>
 </body>

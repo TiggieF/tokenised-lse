@@ -1,10 +1,10 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 const ONE = 10n ** 18n;
 
-async function deployStage12Fixture() {
+async function deployLeveragedProductsFixture() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
   const alice = signers[1];
@@ -57,9 +57,11 @@ async function deployStage12Fixture() {
   };
 }
 
-describe("Stage 12 — Leveraged Products", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("Leveraged Products", function () {
   it("creates a 5x long product for listed base symbol", async function () {
-    const fixture = await loadFixture(deployStage12Fixture);
+    const fixture = await loadFixture(deployLeveragedProductsFixture);
     const admin = fixture.admin;
     const leveragedFactory = fixture.leveragedFactory;
 
@@ -73,7 +75,7 @@ describe("Stage 12 — Leveraged Products", function () {
   });
 
   it("rejects unsupported leverage", async function () {
-    const fixture = await loadFixture(deployStage12Fixture);
+    const fixture = await loadFixture(deployLeveragedProductsFixture);
     const admin = fixture.admin;
     const leveragedFactory = fixture.leveragedFactory;
 
@@ -83,7 +85,7 @@ describe("Stage 12 — Leveraged Products", function () {
   });
 
   it("mints and fully unwinds with burn to zero user balance", async function () {
-    const fixture = await loadFixture(deployStage12Fixture);
+    const fixture = await loadFixture(deployLeveragedProductsFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const ttoken = fixture.ttoken;

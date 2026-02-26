@@ -9,7 +9,10 @@ async function main() {
   const seller = signers[1];
   const buyer = signers[2];
 
-  const rawEquityMinterIndex = process.env.EQUITY_MINTER_INDEX || "0";
+  let rawEquityMinterIndex = "0";
+  if (process.env.EQUITY_MINTER_INDEX) {
+    rawEquityMinterIndex = process.env.EQUITY_MINTER_INDEX;
+  }
   const equityMinterIndex = Number.parseInt(rawEquityMinterIndex, 10);
 
   let equityMinter = admin;

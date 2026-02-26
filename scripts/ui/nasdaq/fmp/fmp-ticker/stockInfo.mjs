@@ -36,7 +36,7 @@ function firstOrNull(payload) {
     return null;
   }
 
-  if (payload === undefined || payload === null) {
+  if (!payload) {
     return null;
   }
 
@@ -44,7 +44,7 @@ function firstOrNull(payload) {
 }
 
 function fmtNum(x, digits = 2) {
-  if (x === null || x === undefined || x === "") {
+  if (!x && x !== 0) {
     return null;
   }
 
@@ -57,7 +57,7 @@ function fmtNum(x, digits = 2) {
 }
 
 function fmtInt(x) {
-  if (x === null || x === undefined || x === "") {
+  if (!x && x !== 0) {
     return null;
   }
 
@@ -72,8 +72,10 @@ function fmtInt(x) {
 function pick(obj, keys) {
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[i];
-    if (obj && obj[key] !== undefined && obj[key] !== null) {
-      return obj[key];
+    if (obj) {
+      if (obj[key]) {
+        return obj[key];
+      }
     }
   }
 
@@ -130,61 +132,61 @@ function pick(obj, keys) {
   console.log(`Symbol: ${SYMBOL}`);
 
   let previousCloseText = "N/A";
-  if (previousClose !== null) {
+  if (previousClose) {
     previousCloseText = String(previousClose);
   }
   console.log(`Previous close: ${previousCloseText}`);
 
   let openText = "N/A";
-  if (open !== null) {
+  if (open) {
     openText = String(open);
   }
   console.log(`Open: ${openText}`);
 
   let dayRange = "N/A";
-  if (dayLow !== null && dayHigh !== null) {
+  if (dayLow && dayHigh) {
     dayRange = `${fmtNum(dayLow)} - ${fmtNum(dayHigh)}`;
   }
   console.log(`Day's range: ${dayRange}`);
 
   let yearRange = "N/A";
-  if (yearLow !== null && yearHigh !== null) {
+  if (yearLow && yearHigh) {
     yearRange = `${fmtNum(yearLow)} - ${fmtNum(yearHigh)}`;
   }
   console.log(`52-week range: ${yearRange}`);
 
   let volumeText = "N/A";
-  if (volume !== null) {
+  if (volume) {
     volumeText = fmtInt(volume);
   }
   console.log(`Volume: ${volumeText}`);
 
   let avgVolumeText = "N/A";
-  if (avgVolume !== null) {
+  if (avgVolume) {
     avgVolumeText = fmtInt(avgVolume);
   }
   console.log(`Avg. Volume: ${avgVolumeText}`);
 
   let marketCapText = "N/A";
-  if (marketCap !== null) {
+  if (marketCap) {
     marketCapText = fmtInt(marketCap);
   }
   console.log(`Market cap: ${marketCapText}`);
 
   let betaText = "N/A";
-  if (beta !== null) {
+  if (beta) {
     betaText = fmtNum(beta);
   }
   console.log(`Beta (5Y monthly): ${betaText}`);
 
   let peText = "N/A";
-  if (peTTM !== null) {
+  if (peTTM) {
     peText = fmtNum(peTTM);
   }
   console.log(`PE ratio (TTM): ${peText}`);
 
   let epsText = "N/A";
-  if (epsTTM !== null) {
+  if (epsTTM) {
     epsText = fmtNum(epsTTM);
   }
   console.log(`EPS (TTM): ${epsText}`);
@@ -194,17 +196,17 @@ function pick(obj, keys) {
     console.log(`Ask: N/A (aftermarket endpoint error: ${afterPayload.__error})`);
   } else {
     let bidText = "N/A";
-    if (bid !== null) {
+    if (bid) {
       bidText = String(fmtNum(bid));
-      if (bidSize !== null) {
+      if (bidSize) {
         bidText = `${bidText} x ${fmtInt(bidSize)}`;
       }
     }
 
     let askText = "N/A";
-    if (ask !== null) {
+    if (ask) {
       askText = String(fmtNum(ask));
-      if (askSize !== null) {
+      if (askSize) {
         askText = `${askText} x ${fmtInt(askSize)}`;
       }
     }

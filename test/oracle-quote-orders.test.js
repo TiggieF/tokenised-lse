@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
 
 const ONE_SHARE = 10n ** 18n;
@@ -8,7 +8,7 @@ function quoteAmount(qty, priceCents) {
   return (qty * priceCents) / 100n;
 }
 
-async function deployStage56Fixture() {
+async function deployOracleQuoteFixture() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
   const maker1 = signers[1];
@@ -45,9 +45,11 @@ async function deployStage56Fixture() {
   return { admin, maker1, maker2, taker, ttoken, registry, priceFeed, equity, dex };
 }
 
-describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("buyExactQuoteAtOracle", function () {
   it("uses oracle max bound to filter asks", async function () {
-    const fixture = await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployOracleQuoteFixture);
     const admin = fixture.admin;
     const maker1 = fixture.maker1;
     const maker2 = fixture.maker2;
@@ -82,7 +84,7 @@ describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
   });
 
   it("expands eligibility with slippage", async function () {
-    const fixture = await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployOracleQuoteFixture);
     const admin = fixture.admin;
     const maker1 = fixture.maker1;
     const taker = fixture.taker;
@@ -112,7 +114,7 @@ describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
   });
 
   it("reverts when stale", async function () {
-    const fixture = await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployOracleQuoteFixture);
     const admin = fixture.admin;
     const taker = fixture.taker;
     const ttoken = fixture.ttoken;
@@ -136,7 +138,7 @@ describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
   });
 
   it("reverts for unknown token", async function () {
-    const fixture = await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployOracleQuoteFixture);
     const admin = fixture.admin;
     const taker = fixture.taker;
     const ttoken = fixture.ttoken;
@@ -158,7 +160,7 @@ describe("Stage 5.6 — buyExactQuoteAtOracle", function () {
   });
 
   it("emits OracleQuoteBuyExecuted", async function () {
-    const fixture = await loadFixture(deployStage56Fixture);
+    const fixture = await loadFixture(deployOracleQuoteFixture);
     const admin = fixture.admin;
     const maker1 = fixture.maker1;
     const taker = fixture.taker;

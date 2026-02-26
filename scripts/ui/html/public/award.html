@@ -69,7 +69,7 @@
     }
     .toolbar {
       display: grid;
-      grid-template-columns: 1fr 1fr auto auto;
+      grid-template-columns: 1fr 1fr 1fr auto;
       gap: 10px;
       margin-bottom: 12px;
       align-items: end;
@@ -119,6 +119,7 @@
       background: rgba(255, 255, 255, 0.7);
       border-radius: 14px;
       overflow: hidden;
+      margin-bottom: 16px;
     }
     thead th {
       text-align: left;
@@ -142,71 +143,88 @@
 <body>
   <div class="panel">
     <h1 class="title">Award</h1>
+    <div id="award-suspended" class="status error" style="display:none; font-size:18px; margin-bottom:16px;">Award suspended</div>
+    <div id="award-active">
     <div class="cards">
       <div class="card">
-        <div class="card-label">Current Epoch</div>
-        <div class="card-value" id="cur-epoch">-</div>
+        <div class="card-label">Window Seconds Remaining</div>
+        <div class="card-value" id="window-seconds-remaining">-</div>
       </div>
       <div class="card">
-        <div class="card-label">Latest Finalizable Epoch</div>
-        <div class="card-value" id="latest-epoch">-</div>
+        <div class="card-label">Reward (TToken)</div>
+        <div class="card-value" id="reward-amount">-</div>
       </div>
       <div class="card">
-        <div class="card-label">Top Trader</div>
-        <div class="card-value" id="top-trader">-</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Top Volume (TToken)</div>
-        <div class="card-value" id="top-volume">-</div>
+        <div class="card-label">Leading Volume</div>
+        <div class="card-value" id="leading-volume">-</div>
       </div>
     </div>
 
-    <div class="toolbar">
-      <div>
-        <label for="epoch-input">Epoch To Finalize</label>
-        <input id="epoch-input" type="number" min="0" step="1" value="0" />
-      </div>
-      <div>
-        <label for="limit-input">History Limit</label>
-        <input id="limit-input" type="number" min="1" step="1" value="20" />
-      </div>
-      <button id="refresh-btn" type="button">Refresh</button>
-      <button id="finalize-btn" type="button">Finalize</button>
-    </div>
-    <div id="status" class="status">Ready</div>
-
+    <h2 class="title" style="font-size:16px; margin-top:8px;">Leaderboard</h2>
     <table>
       <thead>
         <tr>
-          <th>Epoch</th>
-          <th>Top Trader</th>
-          <th>Top Volume (TToken)</th>
-          <th>Rewarded</th>
+          <th>Rank</th>
+          <th>Trader</th>
+          <th>Qty (shares)</th>
+          <th>Winner</th>
         </tr>
       </thead>
-      <tbody id="history-body"></tbody>
+      <tbody id="leaderboard-body"></tbody>
     </table>
+
+    <h2 class="title" style="font-size:16px; margin-top:18px;">Claimable Rewards</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Your Qty</th>
+          <th>Max Qty</th>
+          <th>Status</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="claimable-body"></tbody>
+    </table>
+    </div>
   </div>
 
   <script>
-    const curEpochEl = document.getElementById("cur-epoch");
-    const latestEpochEl = document.getElementById("latest-epoch");
-    const topTraderEl = document.getElementById("top-trader");
-    const topVolumeEl = document.getElementById("top-volume");
-    const epochInput = document.getElementById("epoch-input");
-    const limitInput = document.getElementById("limit-input");
-    const refreshBtn = document.getElementById("refresh-btn");
-    const finalizeBtn = document.getElementById("finalize-btn");
-    const statusEl = document.getElementById("status");
-    const historyBody = document.getElementById("history-body");
+    const windowSecondsRemainingEl = document.getElementById("window-seconds-remaining");
+    const rewardAmountEl = document.getElementById("reward-amount");
+    const leadingVolumeEl = document.getElementById("leading-volume");
+    const leaderboardBody = document.getElementById("leaderboard-body");
+    const claimableBody = document.getElementById("claimable-body");
+    const awardSuspendedEl = document.getElementById("award-suspended");
+    const awardActiveEl = document.getElementById("award-active");
+    const CLAIMABLE_WINDOW = 50;
+    let currentWallet = "";
+    let currentEpochId = 0;
+    let liveSecondsRemaining = 0;
+    let liveEpochDurationSec = 60;
+    let liveSessionTerminated = false;
+    let lastStatusSyncAtMs = 0;
+    let lastAutoRefreshAtMs = 0;
+    let statusTicker = null;
+    const AWARD_REFRESH_INTERVAL_MS = 60000;
+    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
 
-    function setStatus(text, isError = false) {
-      statusEl.textContent = text;
-      let nextClassName = "status";
-      if (isError) {
-        nextClassName = "status error";
+    async function ensureSepoliaNetwork() {
+      const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (chainId === SEPOLIA_CHAIN_ID_HEX) {
+        return;
       }
-      statusEl.className = nextClassName;
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+        });
+      } catch (err) {
+        throw new Error("Please switch MetaMask network to Sepolia");
+      }
+      const after = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (after !== SEPOLIA_CHAIN_ID_HEX) {
+        throw new Error("MetaMask network is not Sepolia");
+      }
     }
 
     function weiToToken(wei, decimals = 2) {
@@ -214,90 +232,333 @@
       return num.toFixed(decimals);
     }
 
-    async function refreshAward() {
-      try {
-        setStatus("Loading");
-        const limit = Math.max(1, Number(limitInput.value));
-        const [currentRes, historyRes] = await Promise.all([
-          fetch("/api/award/current"),
-          fetch(`/api/award/history?limit=${encodeURIComponent(limit)}`),
-        ]);
-        const currentData = await currentRes.json();
-        const historyData = await historyRes.json();
-        if (!currentRes.ok || currentData.error) {
-          throw new Error(currentData.error);
-        }
-        if (!historyRes.ok || historyData.error) {
-          throw new Error(historyData.error);
-        }
+    function weiToShares(wei, decimals = 2) {
+      const num = Number(wei) / 1e18;
+      return num.toFixed(decimals);
+    }
 
-        const currentEpochText = String(currentData.currentEpoch);
-        curEpochEl.textContent = currentEpochText;
-
-        const previousEpochText = String(currentData.previousEpoch);
-        latestEpochEl.textContent = previousEpochText;
-        topTraderEl.textContent = currentData.topTrader;
-        topVolumeEl.textContent = weiToToken(currentData.topVolumeWei);
-
-        const suggestedEpoch = Number(currentData.previousEpoch);
-        epochInput.value = String(Math.max(0, suggestedEpoch));
-
-        historyBody.innerHTML = "";
-        const rows = historyData.items;
-        if (!rows.length) {
-          const tr = document.createElement("tr");
-          tr.innerHTML = '<td colspan="4">No award history yet</td>';
-          historyBody.appendChild(tr);
-        } else {
-          for (const row of rows) {
-            const tr = document.createElement("tr");
-            let rewardedText = "NO";
-            if (row.rewarded) {
-              rewardedText = "YES";
-            }
-            tr.innerHTML = `
-              <td>${row.epochId}</td>
-              <td>${row.topTrader}</td>
-              <td>${weiToToken(row.topVolumeWei)}</td>
-              <td>${rewardedText}</td>
-            `;
-            historyBody.appendChild(tr);
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            return account;
           }
         }
-        setStatus("Ready");
-      } catch (err) {
-        setStatus(err.message, true);
+      }
+      if (accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
+    async function waitForWalletReceipt(txHash) {
+      for (let i = 0; i < 120; i += 1) {
+        const receipt = await window.ethereum.request({
+          method: "eth_getTransactionReceipt",
+          params: [txHash],
+        });
+        if (receipt) {
+          return receipt;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error(`tx not mined yet: ${txHash}`);
+    }
+
+    async function submitPreparedTxs(txs) {
+      if (!Array.isArray(txs) || txs.length === 0) {
+        throw new Error("No transactions prepared");
+      }
+      await ensureSepoliaNetwork();
+      let lastTxHash = "";
+      for (let i = 0; i < txs.length; i += 1) {
+        const tx = txs[i];
+        const txParams = {
+          from: currentWallet,
+          to: tx.to,
+          data: tx.data,
+          chainId: SEPOLIA_CHAIN_ID_HEX,
+        };
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [txParams],
+        });
+        await waitForWalletReceipt(txHash);
+        lastTxHash = txHash;
+      }
+      return lastTxHash;
+    }
+
+    async function loadWallet() {
+      if (window.ethereum) {
+        await ensureSepoliaNetwork();
+        const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+        if (accounts && accounts.length > 0) {
+          currentWallet = chooseDisplayAccount(accounts);
+        }
       }
     }
 
-    async function finalizeEpoch() {
+    async function claimEpoch(epochId) {
       try {
-        const epochId = Number(epochInput.value);
-        if (!Number.isFinite(epochId) || epochId < 0) {
-          setStatus("Invalid epoch id", true);
+        let wallet = "";
+        if (currentWallet) {
+          wallet = String(currentWallet).trim();
+        }
+        if (!wallet) {
           return;
         }
-        setStatus(`Finalizing epoch ${epochId}`);
-        const res = await fetch("/api/award/finalize", {
+        const res = await fetch("/api/award/claim", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ epochId }),
+          body: JSON.stringify({ wallet, epochId, clientSign: true }),
         });
         const data = await res.json();
         if (!res.ok || data.error) {
-          throw new Error(data.error);
+          let errorMessage = "Claim failed";
+          if (data && data.error) {
+            errorMessage = data.error;
+          }
+          throw new Error(errorMessage);
         }
-        setStatus(`Finalized epoch ${epochId} Tx: ${data.txHash}`);
+        if (data.clientSign && Array.isArray(data.txs)) {
+          await submitPreparedTxs(data.txs);
+        }
         await refreshAward();
       } catch (err) {
-        setStatus(err.message, true);
+        
       }
     }
 
-    refreshBtn.addEventListener("click", refreshAward);
-    finalizeBtn.addEventListener("click", finalizeEpoch);
+    async function refreshAward() {
+      try {
+        if (window.ethereum) {
+          const accounts = await window.ethereum.request({ method: "eth_accounts" });
+          if (accounts && accounts.length > 0) {
+            currentWallet = chooseDisplayAccount(accounts);
+          }
+        }
+        let wallet = "";
+        if (currentWallet) {
+          wallet = String(currentWallet).trim();
+        }
+        const limit = CLAIMABLE_WINDOW;
+        const statusRes = await fetch("/api/award/status");
+        const statusData = await statusRes.json();
+        if (!statusRes.ok || statusData.error) {
+          let statusError = "status failed";
+          if (statusData && statusData.error) {
+            statusError = statusData.error;
+          }
+          throw new Error(statusError);
+        }
+        let nextEpochIdValue = 0;
+        if (statusData.currentEpoch) {
+          nextEpochIdValue = statusData.currentEpoch;
+        }
+        currentEpochId = Number(nextEpochIdValue);
+        let nextSecondsRemaining = 0;
+        if (statusData.secondsRemaining) {
+          nextSecondsRemaining = statusData.secondsRemaining;
+        }
+        liveSecondsRemaining = Number(nextSecondsRemaining);
+        let nextEpochDuration = 60;
+        if (statusData.epochDurationSec) {
+          nextEpochDuration = statusData.epochDurationSec;
+        }
+        liveEpochDurationSec = Number(nextEpochDuration);
+        liveSessionTerminated = Boolean(statusData.sessionTerminated);
+        lastStatusSyncAtMs = Date.now();
+        if (!Number.isFinite(currentEpochId) || currentEpochId < 0) {
+          currentEpochId = 0;
+        }
+        if (!Number.isFinite(liveSecondsRemaining) || liveSecondsRemaining < 0) {
+          liveSecondsRemaining = 0;
+        }
+        if (!Number.isFinite(liveEpochDurationSec) || liveEpochDurationSec <= 0) {
+          liveEpochDurationSec = 60;
+        }
+        if (liveSecondsRemaining > liveEpochDurationSec) {
+          liveSecondsRemaining = liveEpochDurationSec;
+        }
+        if (liveSessionTerminated === true) {
+          awardSuspendedEl.style.display = "block";
+          awardActiveEl.style.display = "none";
+          awardSuspendedEl.textContent = "Award suspended";
+          return;
+        }
+        awardSuspendedEl.style.display = "none";
+        awardActiveEl.style.display = "block";
+        updateWindowCountdown();
+        rewardAmountEl.textContent = weiToToken(statusData.rewardAmountWei, 2);
 
-    refreshAward();
+        let leaderboardEpoch = currentEpochId - 1;
+        if (!Number.isFinite(leaderboardEpoch) || leaderboardEpoch < 0) {
+          leaderboardEpoch = 0;
+        }
+
+        let leaderboardRes = null;
+        let claimableRes = null;
+        if (wallet) {
+          [leaderboardRes, claimableRes] = await Promise.all([
+            fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`),
+            fetch(`/api/award/claimable?wallet=${encodeURIComponent(wallet)}&limit=${encodeURIComponent(limit)}`),
+          ]);
+        } else {
+          leaderboardRes = await fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`);
+        }
+        let leaderboardData = { items: [] };
+        let claimableData = { items: [] };
+        if (leaderboardRes) {
+          leaderboardData = await leaderboardRes.json();
+        }
+        if (claimableRes) {
+          claimableData = await claimableRes.json();
+        }
+
+        if (!leaderboardRes.ok || leaderboardData.error) {
+          throw new Error(leaderboardData.error);
+        }
+        if (claimableRes && (!claimableRes.ok || claimableData.error)) {
+          throw new Error(claimableData.error);
+        }
+        let maxQtyWei = "0";
+        if (leaderboardData.maxQtyWei) {
+          maxQtyWei = leaderboardData.maxQtyWei;
+        }
+        leadingVolumeEl.textContent = weiToShares(maxQtyWei, 2);
+
+        leaderboardBody.innerHTML = "";
+        const boardRows = Array.isArray(leaderboardData.items) ? leaderboardData.items : [];
+        if (!boardRows.length) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = '<td colspan="4">No trades in this epoch</td>';
+          leaderboardBody.appendChild(tr);
+        } else {
+          for (let i = 0; i < boardRows.length; i += 1) {
+            const row = boardRows[i];
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td>${row.rank}</td>
+              <td>${row.trader}</td>
+              <td>${weiToShares(row.qtyWei, 2)}</td>
+              <td>${row.isWinner ? "YES" : "NO"}</td>
+            `;
+            leaderboardBody.appendChild(tr);
+          }
+        }
+
+        claimableBody.innerHTML = "";
+        const claimRows = Array.isArray(claimableData.items) ? claimableData.items : [];
+        if (!claimRows.length) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = '<td colspan="4">No claimable rows</td>';
+          claimableBody.appendChild(tr);
+        } else {
+          for (let i = 0; i < claimRows.length; i += 1) {
+            const row = claimRows[i];
+            const tr = document.createElement("tr");
+            const actionTd = document.createElement("td");
+            if (row.canClaim) {
+              const btn = document.createElement("button");
+              btn.type = "button";
+              btn.textContent = "Claim";
+              btn.addEventListener("click", () => claimEpoch(row.epochId));
+              actionTd.appendChild(btn);
+            } else {
+              actionTd.textContent = "-";
+            }
+
+            let statusText = "Not winner";
+            if (row.claimed) {
+              statusText = "Claimed";
+            } else if (row.canClaim) {
+              statusText = "Claimable";
+            } else if (row.isWinner) {
+              statusText = "Winner";
+            }
+
+            tr.innerHTML = `
+              <td>${weiToShares(row.qtyWei, 2)}</td>
+              <td>${weiToShares(row.maxQtyWei, 2)}</td>
+              <td>${statusText}</td>
+            `;
+            tr.appendChild(actionTd);
+            claimableBody.appendChild(tr);
+          }
+        }
+      } catch (err) {
+        windowSecondsRemainingEl.textContent = "0";
+      }
+    }
+
+    if (window.ethereum) {
+      window.ethereum.on("accountsChanged", (accounts) => {
+        currentWallet = chooseDisplayAccount(accounts);
+        if (!currentWallet) {
+          currentWallet = "";
+        }
+        refreshAward();
+      });
+      window.ethereum.on("chainChanged", () => {
+        refreshAward();
+      });
+    }
+
+    (async function init() {
+      await loadWallet();
+      const statusRes = await fetch("/api/award/status");
+      const statusData = await statusRes.json();
+      if (statusRes.ok && statusData && Number.isFinite(statusData.currentEpoch)) {
+        currentEpochId = Number(statusData.currentEpoch);
+      }
+      await refreshAward();
+      setInterval(refreshAward, AWARD_REFRESH_INTERVAL_MS);
+    })();
+
+    function updateWindowCountdown() {
+      if (!Number.isFinite(liveEpochDurationSec) || liveEpochDurationSec <= 0) {
+        liveEpochDurationSec = 60;
+      }
+      if (!Number.isFinite(liveSecondsRemaining) || liveSecondsRemaining < 0) {
+        liveSecondsRemaining = 0;
+      }
+      if (liveSessionTerminated === true) {
+        windowSecondsRemainingEl.textContent = "0";
+        return;
+      }
+      const secondsSinceSync = Math.floor((Date.now() - lastStatusSyncAtMs) / 1000);
+      let displayRemaining = liveSecondsRemaining - secondsSinceSync;
+      if (displayRemaining < 0) {
+        displayRemaining = 0;
+      }
+      if (displayRemaining > liveEpochDurationSec) {
+        displayRemaining = liveEpochDurationSec;
+      }
+      windowSecondsRemainingEl.textContent = String(Math.floor(displayRemaining));
+      if (displayRemaining === 0) {
+        const now = Date.now();
+        if ((now - lastAutoRefreshAtMs) >= AWARD_REFRESH_INTERVAL_MS) {
+          lastAutoRefreshAtMs = now;
+          refreshAward();
+        }
+      }
+    }
+
+    if (statusTicker) {
+      clearInterval(statusTicker);
+    }
+    statusTicker = setInterval(updateWindowCountdown, 1000);
   </script>
 </body>
 </html>

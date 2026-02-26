@@ -148,6 +148,7 @@
 
     .form-grid select,
     .form-grid input,
+    .form-grid textarea,
     .form-grid button {
       width: 100%;
       padding: 10px 12px;
@@ -157,6 +158,11 @@
       font-size: 14px;
       background: #fff;
       color: var(--ink);
+    }
+
+    .form-grid textarea {
+      min-height: 84px;
+      resize: vertical;
     }
 
     .form-grid button {
@@ -178,9 +184,12 @@
     <div class="header">
       <h1 class="title">Admin</h1>
     </div>
+    <div id="admin-access-denied" class="status" style="display:none; color:#e04c4c; font-size:14px; margin-bottom:12px;">
+      Admin access denied for this wallet.
+    </div>
 
     <div class="section">
-      <h2 class="section-title">List new company symbol</h2>
+      <h2 class="section-title">Add new company</h2>
       <div class="form-grid">
         <div>
           <label for="list-stock">Company</label>
@@ -214,6 +223,30 @@
     </div>
 
     <div class="section">
+      <h2 class="section-title">Merkle dividends</h2>
+      <div class="form-grid">
+        <div>
+          <label for="merkle-div-symbol">Symbol</label>
+          <select id="merkle-div-symbol"></select>
+        </div>
+        <div>
+          <label for="merkle-div-per-share">TToken per share</label>
+          <input id="merkle-div-per-share" type="text" value="0.10" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="merkle-div-auto-declare-btn" type="button">Auto Declare Merkle</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="merkle-tree-view-btn" type="button">View Latest Tree</button>
+        </div>
+      </div>
+      <div id="merkle-div-status" class="status">Ready</div>
+      <pre id="merkle-tree-preview" class="status" style="white-space:pre-wrap;max-height:260px;overflow:auto"></pre>
+    </div>
+
+    <div class="section">
       <h2 class="section-title">Leveraged products</h2>
       <div class="form-grid">
         <div>
@@ -233,6 +266,28 @@
         </div>
       </div>
       <div id="lev-admin-status" class="status">Ready</div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Award next session controls</h2>
+      <div class="form-grid">
+        <div>
+          <label for="award-next-window">Next window seconds</label>
+          <input id="award-next-window" type="number" min="1" max="3600" step="1" value="60" />
+        </div>
+        <div>
+          <label for="award-terminate-next">Terminate next session</label>
+          <select id="award-terminate-next">
+            <option value="false" selected>No</option>
+            <option value="true">Yes</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="award-session-save-btn" type="button">Save next session</button>
+        </div>
+      </div>
+      <div id="award-session-status" class="status">Ready</div>
     </div>
 
     <div class="section">
@@ -318,16 +373,28 @@
     const divPerShare = document.getElementById("div-per-share");
     const divDistributeBtn = document.getElementById("div-distribute-btn");
     const divStatus = document.getElementById("div-status");
+    const merkleDivSymbol = document.getElementById("merkle-div-symbol");
+    const merkleDivPerShare = document.getElementById("merkle-div-per-share");
+    const merkleDivAutoDeclareBtn = document.getElementById("merkle-div-auto-declare-btn");
+    const merkleTreeViewBtn = document.getElementById("merkle-tree-view-btn");
+    const merkleTreePreview = document.getElementById("merkle-tree-preview");
+    const merkleDivStatus = document.getElementById("merkle-div-status");
     const levAdminSymbol = document.getElementById("lev-admin-symbol");
     const levAdminLeverage = document.getElementById("lev-admin-leverage");
     const levAdminCreateBtn = document.getElementById("lev-admin-create-btn");
     const levAdminStatus = document.getElementById("lev-admin-status");
+    const awardNextWindow = document.getElementById("award-next-window");
+    const awardTerminateNext = document.getElementById("award-terminate-next");
+    const awardSessionSaveBtn = document.getElementById("award-session-save-btn");
+    const awardSessionStatus = document.getElementById("award-session-status");
     const lifecycleSymbol = document.getElementById("lifecycle-symbol");
     const symbolFreezeBtn = document.getElementById("symbol-freeze-btn");
     const symbolUnfreezeBtn = document.getElementById("symbol-unfreeze-btn");
     const symbolDelistBtn = document.getElementById("symbol-delist-btn");
     const lifecycleStatus = document.getElementById("lifecycle-status");
     const lifecycleTableBody = document.getElementById("lifecycle-table-body");
+    const adminAccessDenied = document.getElementById("admin-access-denied");
+    const adminSections = Array.from(document.querySelectorAll(".section"));
     let lifecycleBySymbol = {};
     // JSDOM
     const LISTABLE_STOCKS = [
@@ -354,8 +421,56 @@
     ];
 
     function shortAddress(address) {
-      return String(address || "");
+      return String(address);
       // keep full address for transparency
+    }
+
+    async function getCurrentWallet() {
+      if (!window.ethereum) {
+        return "";
+      }
+      const accounts = await window.ethereum.request({ method: "eth_accounts" });
+      if (Array.isArray(accounts) && accounts.length > 0) {
+        return String(accounts[0]);
+      }
+      return "";
+    }
+
+    async function verifyAdminAccess() {
+      try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          adminAccessDenied.style.display = "block";
+          adminAccessDenied.textContent = "Connect wallet first. Admin access denied.";
+          for (let i = 0; i < adminSections.length; i += 1) {
+            adminSections[i].style.display = "none";
+          }
+          return false;
+        }
+        const res = await fetch(`/api/ui/permissions?wallet=${encodeURIComponent(wallet)}`);
+        const data = await res.json();
+        const allowed = Boolean(res.ok && data && data.canAccessAdminPage === true);
+        if (!allowed) {
+          adminAccessDenied.style.display = "block";
+          adminAccessDenied.textContent = `Admin access denied for wallet ${wallet}`;
+          for (let i = 0; i < adminSections.length; i += 1) {
+            adminSections[i].style.display = "none";
+          }
+          return false;
+        }
+        adminAccessDenied.style.display = "none";
+        for (let i = 0; i < adminSections.length; i += 1) {
+          adminSections[i].style.display = "block";
+        }
+        return true;
+      } catch {
+        adminAccessDenied.style.display = "block";
+        adminAccessDenied.textContent = "Unable to verify admin access.";
+        for (let i = 0; i < adminSections.length; i += 1) {
+          adminSections[i].style.display = "none";
+        }
+        return false;
+      }
     }
 
     function formatQty(wei) {
@@ -371,6 +486,15 @@
         nextColor = "#e04c4c";
       }
       divStatus.style.color = nextColor;
+    }
+
+    function setMerkleDivStatus(text, isError = false) {
+      merkleDivStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      merkleDivStatus.style.color = nextColor;
     }
 
     function setListStatus(text, isError = false) {
@@ -400,16 +524,34 @@
       lifecycleStatus.style.color = nextColor;
     }
 
+    function setAwardSessionStatus(text, isError = false) {
+      awardSessionStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      awardSessionStatus.style.color = nextColor;
+    }
+
     async function loadDividendSymbols() {
       const res = await fetch("/api/registry/listings");
       const data = await res.json();
       divSymbol.innerHTML = "";
+      merkleDivSymbol.innerHTML = "";
       levAdminSymbol.innerHTML = "";
-      for (const item of data.listings || []) {
+      let rows = [];
+      if (Array.isArray(data.listings)) {
+        rows = data.listings;
+      }
+      for (const item of rows) {
         const option = document.createElement("option");
         option.value = item.symbol;
         option.textContent = item.symbol;
         divSymbol.appendChild(option);
+        const merkleOption = document.createElement("option");
+        merkleOption.value = item.symbol;
+        merkleOption.textContent = item.symbol;
+        merkleDivSymbol.appendChild(merkleOption);
         const levOption = document.createElement("option");
         levOption.value = item.symbol;
         levOption.textContent = item.symbol;
@@ -423,7 +565,10 @@
       lifecycleTableBody.innerHTML = "";
       lifecycleSymbol.innerHTML = "";
       lifecycleBySymbol = {};
-      const rows = Array.isArray(data.symbols) ? data.symbols : [];
+      let rows = [];
+      if (Array.isArray(data.symbols)) {
+        rows = data.symbols;
+      }
       for (let i = 0; i < rows.length; i += 1) {
         const row = rows[i];
         lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
@@ -444,7 +589,7 @@
 
     async function changeSymbolLifecycle(action) {
       try {
-        const symbol = String(lifecycleSymbol.value || "").toUpperCase();
+        const symbol = String(lifecycleSymbol.value).toUpperCase();
         if (!symbol) {
           setLifecycleStatus("Select symbol first", true);
           return;
@@ -456,13 +601,25 @@
           body: JSON.stringify({ symbol }),
         });
         const data = await res.json();
+        let failed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Lifecycle update failed");
+          failed = true;
+        }
+        if (failed) {
+          let message = "Lifecycle update failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         setLifecycleStatus(`${symbol} set to ${data.status}`);
         await loadLifecycleTable();
       } catch (err) {
-        setLifecycleStatus(err.message || "Lifecycle update failed", true);
+        let message = "Lifecycle update failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setLifecycleStatus(message, true);
       }
     }
 
@@ -481,15 +638,21 @@
         if (status === "ACTIVE") {
           option.textContent = `${stock.name} (${stock.symbol}) — LISTED`;
           option.disabled = true;
-        } else if (status === "FROZEN" || status === "DELISTED") {
+        } else {
+          let statusIsRelistable = false;
+          if (status === "FROZEN" || status === "DELISTED") {
+            statusIsRelistable = true;
+          }
+          if (statusIsRelistable) {
           option.textContent = `${stock.name} (${stock.symbol}) — RELIST`;
           option.disabled = false;
           if (!firstRelistValue) {
             firstRelistValue = stock.symbol;
           }
-        } else {
-          option.textContent = `${stock.name} (${stock.symbol})`;
-          option.disabled = false;
+          } else {
+            option.textContent = `${stock.name} (${stock.symbol})`;
+            option.disabled = false;
+          }
         }
         if (!option.disabled && !firstUnlistedValue) {
           firstUnlistedValue = stock.symbol;
@@ -498,8 +661,7 @@
       }
       if (firstRelistValue) {
         listStock.value = firstRelistValue;
-      } else
-      if (firstUnlistedValue) {
+      } else if (firstUnlistedValue) {
         listStock.value = firstUnlistedValue;
       }
     }
@@ -517,35 +679,181 @@
           body: JSON.stringify(payload),
         });
         const data = await res.json();
+        let distributionFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Distribution failed");
+          distributionFailed = true;
+        }
+        if (distributionFailed) {
+          let message = "Distribution failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         setDivStatus(`Distributed for ${payload.symbol} Tx: ${data.txHash}`);
       } catch (err) {
-        setDivStatus(err.message || "Distribution failed", true);
+        let message = "Distribution failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setDivStatus(message, true);
+      }
+    }
+
+    async function declareMerkleDividendAuto() {
+      try {
+        setMerkleDivStatus("Building snapshot and merkle tree");
+        const symbol = String(merkleDivSymbol.value).toUpperCase();
+        const divPerShare = String(merkleDivPerShare.value).trim();
+        const payload = {
+          symbol,
+          divPerShare,
+          claimsUri: "",
+        };
+        const res = await fetch("/api/dividends/merkle/declare-auto", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        let failed = false;
+        if (!res.ok || data.error) {
+          failed = true;
+        }
+        if (failed) {
+          let message = "Auto merkle declaration failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
+        }
+        setMerkleDivStatus(`Merkle epoch ${data.epochId} auto-declared for ${data.symbol} Tx: ${data.txHash}`);
+        await viewMerkleTree();
+      } catch (err) {
+        let message = "Auto merkle declaration failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setMerkleDivStatus(message, true);
+      }
+    }
+
+    async function viewMerkleTree() {
+      try {
+        const symbol = String(merkleDivSymbol.value).toUpperCase();
+        if (!symbol) {
+          setMerkleDivStatus("Select symbol first", true);
+          return;
+        }
+        const epochsRes = await fetch(`/api/dividends/merkle/epochs?symbol=${encodeURIComponent(symbol)}`);
+        const epochsData = await epochsRes.json();
+        let epochsFailed = false;
+        if (!epochsRes.ok || epochsData.error) {
+          epochsFailed = true;
+        }
+        if (epochsFailed) {
+          let message = "Could not load merkle epochs";
+          if (epochsData.error) {
+            message = epochsData.error;
+          }
+          throw new Error(message);
+        }
+        let rows = [];
+        if (Array.isArray(epochsData.epochs)) {
+          rows = epochsData.epochs;
+        }
+        if (rows.length === 0) {
+          setMerkleDivStatus(`No merkle epochs found for ${symbol}`, true);
+          merkleTreePreview.textContent = "";
+          return;
+        }
+        let epochId = 0;
+        for (let i = 0; i < rows.length; i += 1) {
+          const nextEpoch = Number(rows[i].epochId);
+          if (nextEpoch > epochId) {
+            epochId = nextEpoch;
+          }
+        }
+        setMerkleDivStatus(`Loading tree for epoch ${epochId}`);
+        const res = await fetch(`/api/dividends/merkle/tree?epochId=${encodeURIComponent(epochId)}`);
+        const data = await res.json();
+        let treeViewFailed = false;
+        if (!res.ok || data.error) {
+          treeViewFailed = true;
+        }
+        if (treeViewFailed) {
+          let message = "Tree view failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
+        }
+        const lines = [];
+        lines.push(`${data.claimCount} users eligible for claims on ${data.symbol}`);
+        lines.push(`Snapshot ${data.snapshotId}`);
+        lines.push(``);
+        let levels = [];
+        if (Array.isArray(data.levels)) {
+          levels = data.levels;
+        }
+        for (let i = 0; i < levels.length; i += 1) {
+          const level = levels[i];
+          lines.push(`Level ${level.level} size ${level.size}`);
+          let nodes = [];
+          if (Array.isArray(level.nodes)) {
+            nodes = level.nodes;
+          }
+          for (let j = 0; j < nodes.length; j += 1) {
+            const node = nodes[j];
+            lines.push(`  [${node.index}] ${node.hash}`);
+          }
+        }
+        merkleTreePreview.textContent = lines.join("\n");
+        setMerkleDivStatus(`Tree loaded for epoch ${epochId}`);
+      } catch (err) {
+        let message = "Tree view failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setMerkleDivStatus(message, true);
       }
     }
 
     async function createListing() {
       try {
-        const symbol = String(listStock.value || "").toUpperCase().trim();
+        let listStockValue = "";
+        if (listStock.value) {
+          listStockValue = String(listStock.value);
+        }
+        const symbol = listStockValue.toUpperCase().trim();
         const selected = LISTABLE_STOCKS.find((s) => s.symbol === symbol);
         let name = symbol;
         if (selected) {
           name = selected.name;
         }
+        let missingListingInput = false;
         if (!symbol || !name) {
+          missingListingInput = true;
+        }
+        if (missingListingInput) {
           setListStatus("Please select a company", true);
           return;
         }
         const lifecycleRow = lifecycleBySymbol[symbol];
-        const lifecycleStatus = lifecycleRow ? String(lifecycleRow.status).toUpperCase() : "";
+        let lifecycleStatus = "";
+        if (lifecycleRow) {
+          lifecycleStatus = String(lifecycleRow.status).toUpperCase();
+        }
         if (listStock.selectedOptions[0] && listStock.selectedOptions[0].disabled && lifecycleStatus === "ACTIVE") {
           setListStatus(`${symbol} is already listed`, true);
           return;
         }
         let res;
+        let isRelistStatus = false;
         if (lifecycleStatus === "DELISTED" || lifecycleStatus === "FROZEN") {
+          isRelistStatus = true;
+        }
+        if (isRelistStatus) {
           setListStatus("Reactivating symbol");
           res = await fetch("/api/admin/symbols/list", {
             method: "POST",
@@ -561,10 +869,18 @@
           });
         }
         const data = await res.json();
+        let listingFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Listing failed");
+          listingFailed = true;
         }
-        if (lifecycleStatus === "DELISTED" || lifecycleStatus === "FROZEN") {
+        if (listingFailed) {
+          let message = "Listing failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
+        }
+        if (isRelistStatus) {
           setListStatus(`Relisted ${symbol}`);
         } else {
           setListStatus(`Listed ${symbol} Tx: ${data.txHash}`);
@@ -573,7 +889,11 @@
         await loadListableStocks();
         await loadDividendSymbols();
       } catch (err) {
-        setListStatus(err.message || "Listing failed", true);
+        let message = "Listing failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setListStatus(message, true);
       }
     }
 
@@ -588,25 +908,125 @@
           body: JSON.stringify({ baseSymbol, leverage }),
         });
         const data = await res.json();
+        let leveragedCreateFailed = false;
         if (!res.ok || data.error) {
-          throw new Error(data.error || "Leveraged creation failed");
+          leveragedCreateFailed = true;
+        }
+        if (leveragedCreateFailed) {
+          let message = "Leveraged creation failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
         }
         setLeveragedStatus(`Created ${data.productSymbol} Tx: ${data.txHash}`);
       } catch (err) {
-        setLeveragedStatus(err.message || "Leveraged creation failed", true);
+        let message = "Leveraged creation failed";
+        if (err.message) {
+          message = err.message;
+        }
+        setLeveragedStatus(message, true);
+      }
+    }
+
+    async function loadAwardSessionControl() {
+      try {
+        const res = await fetch("/api/admin/award/session");
+        const data = await res.json();
+        let loadAwardSessionFailed = false;
+        if (!res.ok || data.error) {
+          loadAwardSessionFailed = true;
+        }
+        if (loadAwardSessionFailed) {
+          let message = "Failed to load award session controls";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
+        }
+
+        let nextAwardWindowValue = 60;
+        if (data.nextAwardWindowSec) {
+          nextAwardWindowValue = data.nextAwardWindowSec;
+        }
+        awardNextWindow.value = String(nextAwardWindowValue);
+        if (data.terminateNextSession) {
+          awardTerminateNext.value = "true";
+        } else {
+          awardTerminateNext.value = "false";
+        }
+
+        let text = "Ready";
+        if (Number(data.nextAwardWindowAppliesAtEpoch) >= 0) {
+          text = ``;
+          if (data.terminateNextSession) {
+            text = `${text} and termination enabled`;
+          }
+        }
+        setAwardSessionStatus(text);
+      } catch (err) {
+        let message = "Failed to load award session controls";
+        if (err.message) {
+          message = err.message;
+        }
+        setAwardSessionStatus(message, true);
+      }
+    }
+
+    async function saveAwardSessionControl() {
+      try {
+        const nextAwardWindowSec = Number(awardNextWindow.value);
+        const terminateNextSession = awardTerminateNext.value === "true";
+        setAwardSessionStatus("Saving next session controls");
+        const res = await fetch("/api/admin/award/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ nextAwardWindowSec, terminateNextSession }),
+        });
+        const data = await res.json();
+        let saveAwardSessionFailed = false;
+        if (!res.ok || data.error) {
+          saveAwardSessionFailed = true;
+        }
+        if (saveAwardSessionFailed) {
+          let message = "Failed to save next session controls";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
+        }
+        let text = `${data.nextAwardWindowSec}s`;
+        if (data.terminateNextSession) {
+          text = `${text} and termination enabled`;
+        }
+        setAwardSessionStatus(text);
+      } catch (err) {
+        let message = "Failed to save next session controls";
+        if (err.message) {
+          message = err.message;
+        }
+        setAwardSessionStatus(message, true);
       }
     }
 
     listCreateBtn.addEventListener("click", createListing);
     divDistributeBtn.addEventListener("click", distributeDividend);
+    merkleDivAutoDeclareBtn.addEventListener("click", declareMerkleDividendAuto);
+    merkleTreeViewBtn.addEventListener("click", viewMerkleTree);
     levAdminCreateBtn.addEventListener("click", createLeveragedProduct);
+    awardSessionSaveBtn.addEventListener("click", saveAwardSessionControl);
     symbolFreezeBtn.addEventListener("click", () => changeSymbolLifecycle("freeze"));
     symbolUnfreezeBtn.addEventListener("click", () => changeSymbolLifecycle("unfreeze"));
     symbolDelistBtn.addEventListener("click", () => changeSymbolLifecycle("delist"));
     (async function () {
+      const hasAccess = await verifyAdminAccess();
+      if (!hasAccess) {
+        return;
+      }
       await loadLifecycleTable();
       await loadListableStocks();
       await loadDividendSymbols();
+      await loadAwardSessionControl();
       await loadLifecycleTable();
       const openRes = await fetch("/api/orderbook/open");
       const openData = await openRes.json();
@@ -614,7 +1034,11 @@
 
       openOrdersBody.innerHTML = "";
       const activeOrders = [];
-      for (const order of openData.orders) {
+      let openRows = [];
+      if (openRes.ok && openData && Array.isArray(openData.orders)) {
+        openRows = openData.orders;
+      }
+      for (const order of openRows) {
         if (order.active === true && Number(order.remaining) > 0) {
           activeOrders.push(order);
           // add to existing order if active
@@ -646,7 +1070,11 @@
       const fillsData = await fillsRes.json();
 
       fillsBody.innerHTML = "";
-      for (const fill of fillsData.fills) {
+      let fillRows = [];
+      if (fillsRes.ok && fillsData && Array.isArray(fillsData.fills)) {
+        fillRows = fillsData.fills;
+      }
+      for (const fill of fillRows) {
         const tr = document.createElement("tr");
         const date = new Date(fill.timestampMs);
         const formatter = new Intl.DateTimeFormat("en-US", {
@@ -656,6 +1084,9 @@
           day: "2-digit",
           hour: "2-digit",
           minute: "2-digit",
+          second: "2-digit",
+          hour12: true,
+          timeZoneName: "short",
         });
         const formatted = formatter.format(date);
         tr.innerHTML = `
@@ -666,6 +1097,12 @@
           <td>${formatQty(fill.qty)}</td>
           <td class="muted">${formatted}</td>
         `;
+        fillsBody.appendChild(tr);
+      }
+      if (fillRows.length === 0) {
+        const tr = document.createElement("tr");
+        const message = (fillsData && fillsData.error) ? String(fillsData.error) : "No completed transactions yet";
+        tr.innerHTML = `<td colspan="6" class="muted">${message}</td>`;
         fillsBody.appendChild(tr);
       }
     })();

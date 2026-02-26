@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 const PRICE = 10_000n;
@@ -9,7 +9,7 @@ function quoteAmount(qty, price) {
   return (qty * price) / 100n;
 }
 
-async function deployStage4Fixture() {
+async function deployOrderBookFixture() {
   const signers = await ethers.getSigners();
   const admin = signers[0];
   const alice = signers[1];
@@ -47,9 +47,11 @@ async function deployStage4Fixture() {
   return { admin, alice, bob, carol, dave, ttoken, equity, dex };
 }
 
-describe("Stage 4 — OrderBookDEX", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("OrderBookDEX", function () {
   it("processes partial fills on buys", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -89,7 +91,7 @@ describe("Stage 4 — OrderBookDEX", function () {
   });
 
   it("enforces price-time priority on sells", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -133,7 +135,7 @@ describe("Stage 4 — OrderBookDEX", function () {
   });
 
   it("refunds remaining escrow on cancellation (buy)", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -171,7 +173,7 @@ describe("Stage 4 — OrderBookDEX", function () {
   });
 
   it("conserves balances across a trade", async function () {
-    const fixture = await loadFixture(deployStage4Fixture);
+    const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;
     const alice = fixture.alice;
     const bob = fixture.bob;
@@ -216,5 +218,37 @@ describe("Stage 4 — OrderBookDEX", function () {
 
     expect(totalTTokenAfter).to.equal(totalTTokenBefore);
     expect(totalEquityAfter).to.equal(totalEquityBefore);
+  });
+
+  it("blocks self matching orders", async function () {
+    const fixture = await loadFixture(deployOrderBookFixture);
+    const admin = fixture.admin;
+    const alice = fixture.alice;
+    const ttoken = fixture.ttoken;
+    const equity = fixture.equity;
+    const dex = fixture.dex;
+
+    const qty = ONE_SHARE;
+    const quote = quoteAmount(qty, PRICE);
+
+    await equity.connect(admin).mint(alice.address, qty);
+    await ttoken.connect(admin).mint(alice.address, quote);
+
+    const dexAddress = await dex.getAddress();
+    const equityAddress = await equity.getAddress();
+
+    await equity.connect(alice).approve(dexAddress, ethers.MaxUint256);
+    await ttoken.connect(alice).approve(dexAddress, ethers.MaxUint256);
+
+    await dex.connect(alice).placeLimitOrder(equityAddress, 1, PRICE, qty);
+    await dex.connect(alice).placeLimitOrder(equityAddress, 0, PRICE, qty);
+
+    const sellOrders = await dex.getSellOrders(equityAddress);
+    const buyOrders = await dex.getBuyOrders(equityAddress);
+
+    expect(sellOrders[0].remaining).to.equal(qty);
+    expect(sellOrders[0].active).to.equal(true);
+    expect(buyOrders[0].remaining).to.equal(qty);
+    expect(buyOrders[0].active).to.equal(true);
   });
 });

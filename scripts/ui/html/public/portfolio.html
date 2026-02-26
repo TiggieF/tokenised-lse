@@ -222,7 +222,6 @@
     </div>
 
     <div class="summary-grid" id="summary-grid"></div>
-    <div id="drift-status" class="status status-ok">Rebuild vs aggregator: pending</div>
     <div id="market-alert" class="market-alert" style="display:none"></div>
 
     <div class="section-header">
@@ -259,16 +258,16 @@
     </table>
 
     <div class="section-header">
-      <h2 class="section-title">Leveraged Positions</h2>
+      <h2 class="section-title">Leveraged Tokens</h2>
       <div id="leveraged-status" class="status">Ready</div>
     </div>
     <table>
       <thead>
         <tr>
           <th>Product</th>
-          <th>Base Price</th>
-          <th>Qty</th>
-          <th>Avg Entry NAV (value of one unit)</th>
+          <th>Live Price</th>
+          <th>% Change vs Avg</th>
+          <th>Avg Entry (value of one unit)</th>
           <th>Current Value</th>
           <th>Action</th>
         </tr>
@@ -285,7 +284,6 @@
     const holdingsStatus = document.getElementById("holdings-status");
     const dividendsStatus = document.getElementById("dividends-status");
     const leveragedStatus = document.getElementById("leveraged-status");
-    const driftStatus = document.getElementById("drift-status");
     const marketAlert = document.getElementById("market-alert");
     const refreshBtn = document.getElementById("refresh-btn");
     const leveragedBody = document.getElementById("leveraged-body");
@@ -294,6 +292,102 @@
     let currentWallet = "";
     let pollingEnabled = false;
     let poller;
+    const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+
+    async function ensureSepoliaNetwork() {
+      const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (chainId === SEPOLIA_CHAIN_ID_HEX) {
+        return;
+      }
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+        });
+      } catch (err) {
+        throw new Error("Please switch MetaMask network to Sepolia");
+      }
+      const after = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
+      if (after !== SEPOLIA_CHAIN_ID_HEX) {
+        throw new Error("MetaMask network is not Sepolia");
+      }
+    }
+
+    function isValidWalletAddress(value) {
+      if (!value) {
+        return false;
+      }
+      const text = String(value).trim();
+      const re = /^0x[a-fA-F0-9]{40}$/;
+      return re.test(text);
+    }
+
+    function chooseDisplayAccount(rawAccounts) {
+      let accounts = [];
+      if (Array.isArray(rawAccounts)) {
+        accounts = rawAccounts;
+      }
+      let selectedAddress = "";
+      if (window.ethereum && window.ethereum.selectedAddress) {
+        selectedAddress = String(window.ethereum.selectedAddress);
+      }
+      if (selectedAddress) {
+        const selectedLower = selectedAddress.toLowerCase();
+        for (let i = 0; i < accounts.length; i += 1) {
+          const account = String(accounts[i]);
+          if (account.toLowerCase() === selectedLower) {
+            if (isValidWalletAddress(account)) {
+              return account;
+            }
+          }
+        }
+      }
+      if (accounts.length > 0) {
+        const first = String(accounts[0]);
+        if (isValidWalletAddress(first)) {
+          return first;
+        }
+      }
+      return "";
+    }
+
+    async function waitForWalletReceipt(txHash) {
+      for (let i = 0; i < 120; i += 1) {
+        const receipt = await window.ethereum.request({
+          method: "eth_getTransactionReceipt",
+          params: [txHash],
+        });
+        if (receipt) {
+          return receipt;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error(`tx not mined yet: ${txHash}`);
+    }
+
+    async function submitPreparedTxs(txs) {
+      if (!Array.isArray(txs) || txs.length === 0) {
+        throw new Error("No transactions prepared");
+      }
+      await ensureSepoliaNetwork();
+      let lastTxHash = "";
+      for (let i = 0; i < txs.length; i += 1) {
+        const tx = txs[i];
+        const txParams = {
+          from: currentWallet,
+          to: tx.to,
+          data: tx.data,
+          chainId: SEPOLIA_CHAIN_ID_HEX,
+        };
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [txParams],
+        });
+        await waitForWalletReceipt(txHash);
+        lastTxHash = txHash;
+      }
+      return lastTxHash;
+    }
 
     function formatWeiToToken(valueWei, digits = 4) {
       const num = Number(valueWei) / 1e18;
@@ -323,20 +417,36 @@
     }
 
     function formatCents(cents) {
-      const num = Number(cents) / 100;
+      const raw = Number(cents);
+      if (!Number.isFinite(raw) || raw <= 0) {
+        return "-";
+      }
+      const num = raw / 100;
       return `$${num.toFixed(2)}`;
+    }
+
+    function formatEthFromWei(valueWei) {
+      const num = Number(valueWei) / 1e18;
+      if (!Number.isFinite(num) || num < 0) {
+        return "0.000000 ETH";
+      }
+      return `${num.toFixed(6)} ETH`;
     }
 
     function renderSummary(summary) {
       const totalValueWei = BigInt(String(summary.totalValueWei));
       const totalCostBasisWei = BigInt(String(summary.totalCostBasisWei));
       const profitWei = totalValueWei - totalCostBasisWei;
+      const nativeSymbol = summary.nativeSymbol ? String(summary.nativeSymbol) : "SepoliaETH";
+      const nativeEthWei = summary.nativeEthWei ? summary.nativeEthWei : "0";
       const cards = [
         ["Cash", formatUsdFromWei(summary.cashValueWei)],
         ["Stock Value", formatUsdFromWei(summary.stockValueWei)],
         ["Leveraged Value", formatUsdFromWei(summary.leveragedValueWei)],
         ["Total Value", formatUsdFromWei(summary.totalValueWei)],
         ["Cost Basis", formatUsdFromWei(summary.totalCostBasisWei)],
+        ["Overall Gas Used", formatEthFromWei(summary.overallGasCostWei)],
+        [nativeSymbol, formatEthFromWei(nativeEthWei)],
         // ["Profit", formatUsdFromWeiExact(profitWei.toString())],
       ];
       summaryGrid.innerHTML = "";
@@ -408,19 +518,52 @@
       }
     }
 
-    async function claimDividend(symbol, epochId) {
+    async function claimDividend(row) {
       try {
-        dividendsStatus.textContent = `Claiming ${symbol} dividend`;
-        const res = await fetch("/api/dividends/claim", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wallet: currentWallet, symbol, epochId }),
-        });
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error);
+        const symbol = String(row.symbol).toUpperCase();
+        let claimType = String(row.claimType).toUpperCase();
+        if (!claimType) {
+          claimType = "SNAPSHOT";
         }
-        dividendsStatus.textContent = `Claimed ${symbol}. Tx: ${data.txHash}`;
+        dividendsStatus.textContent = `Claiming ${symbol} dividend`;
+        let res;
+        if (claimType === "MERKLE") {
+          res = await fetch("/api/dividends/merkle/claim", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              clientSign: true,
+              wallet: currentWallet,
+              account: currentWallet,
+              epochId: row.epochId,
+              amountWei: row.amountWei,
+              leafIndex: row.leafIndex,
+              proof: row.proof,
+            }),
+          });
+        } else {
+          res = await fetch("/api/dividends/claim", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ clientSign: true, wallet: currentWallet, symbol, epochId: row.epochId }),
+          });
+        }
+        const data = await res.json();
+        let failed = false;
+        if (!res.ok) {
+          failed = true;
+        }
+        if (data.error) {
+          failed = true;
+        }
+        if (failed) {
+          throw new Error(String(data.error));
+        }
+        let txHash = data.txHash;
+        if (data.clientSign && Array.isArray(data.txs)) {
+          txHash = await submitPreparedTxs(data.txs);
+        }
+        dividendsStatus.textContent = `Claimed ${symbol}. Tx: ${txHash}`;
         await refreshPortfolio();
       } catch (err) {
         dividendsStatus.textContent = err.message;
@@ -450,7 +593,7 @@
           btn.type = "button";
           btn.className = "claim-btn";
           btn.textContent = "Claim";
-          btn.addEventListener("click", () => claimDividend(row.symbol, row.epochId));
+          btn.addEventListener("click", () => claimDividend(row));
           actionTd.appendChild(btn);
         } else if (row.claimed) {
           actionTd.textContent = "Claimed";
@@ -460,8 +603,12 @@
           actionTd.className = "muted";
         }
 
+        let merkleTag = "";
+        if (row.claimType === "MERKLE") {
+          merkleTag = "(M)";
+        }
         tr.innerHTML = `
-          <td>${row.symbol}</td>
+          <td>${row.symbol} ${merkleTag}</td>
           <td>${formatWeiToToken(row.claimableWei, 2)}</td>
         `;
         tr.appendChild(actionTd);
@@ -491,6 +638,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            clientSign: true,
             wallet: currentWallet,
             productSymbol: productSymbol,
             qtyWei: qtyWei,
@@ -498,13 +646,32 @@
           }),
         });
         const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error || "Sell failed");
+        let failed = false;
+        if (!res.ok) {
+          failed = true;
         }
-        leveragedStatus.textContent = `Sold ${productSymbol} Tx: ${data.txHash}`;
+        if (data.error) {
+          failed = true;
+        }
+        if (failed) {
+          let message = "Sell failed";
+          if (data.error) {
+            message = data.error;
+          }
+          throw new Error(message);
+        }
+        let txHash = data.txHash;
+        if (data.clientSign && Array.isArray(data.txs)) {
+          txHash = await submitPreparedTxs(data.txs);
+        }
+        leveragedStatus.textContent = `Sold ${productSymbol} Tx: ${txHash}`;
         await refreshPortfolio();
       } catch (err) {
-        leveragedStatus.textContent = err.message || "Sell failed";
+        let message = "Sell failed";
+        if (err.message) {
+          message = err.message;
+        }
+        leveragedStatus.textContent = message;
       }
     }
 
@@ -512,7 +679,7 @@
       leveragedBody.innerHTML = "";
       if (!items.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="6" class="muted">No leveraged positions</td>';
+        tr.innerHTML = '<td colspan="6" class="muted">Nothing here yet</td>';
         leveragedBody.appendChild(tr);
         return;
       }
@@ -530,16 +697,60 @@
           try {
             await sellLeveragedPosition(item.productSymbol, item.qtyWei);
           } catch (err) {
-            leveragedStatus.textContent = err.message || "Sell failed";
+            let message = "Sell failed";
+            if (err.message) {
+              message = err.message;
+            }
+            leveragedStatus.textContent = message;
           }
         });
 
         actionWrap.appendChild(sellBtn);
         actionTd.appendChild(actionWrap);
+        const leverage = Number(item.leverage);
+        let changePct = null;
+        const livePrice = Number(item.navCents) / 100;
+        const avgEntry = Number(item.avgEntryPriceCents) / 100;
+        if (
+          Number.isFinite(livePrice)
+          && livePrice > 0
+          && Number.isFinite(avgEntry)
+          && avgEntry > 0
+          && Number.isFinite(leverage)
+          && leverage > 0
+        ) {
+          changePct = (((livePrice - avgEntry) / avgEntry) * leverage) * 100;
+        } else {
+          const baseChangeRaw = item.baseChangePct;
+          const baseChangePct = (typeof baseChangeRaw === "number" && Number.isFinite(baseChangeRaw))
+            ? baseChangeRaw
+            : NaN;
+          if (Number.isFinite(baseChangePct)) {
+            if (Number.isFinite(leverage) && leverage > 0) {
+              changePct = baseChangePct * leverage;
+            } else {
+              changePct = baseChangePct;
+            }
+          }
+        }
+        let changeClass = "gain neutral";
+        let changeText = "-";
+        if (Number.isFinite(changePct)) {
+          if (changePct > 0) {
+            changeClass = "gain positive";
+            changeText = `+${changePct.toFixed(2)}%`;
+          } else if (changePct < 0) {
+            changeClass = "gain negative";
+            changeText = `${changePct.toFixed(2)}%`;
+          } else {
+            changeClass = "gain neutral";
+            changeText = "0.00%";
+          }
+        }
         tr.innerHTML = `
           <td>${item.productSymbol}</td>
-          <td>${formatCents(item.basePriceCents)}</td>
-          <td>${formatWeiToToken(item.qtyWei, 6)}</td>
+          <td>${formatCents(item.navCents)}</td>
+          <td class="${changeClass}">${changeText}</td>
           <td>${formatCents(item.avgEntryPriceCents)}</td>
           <td>${formatUsdFromWei(item.currentValueWei)}</td>
         `;
@@ -549,6 +760,16 @@
     }
 
     async function refreshPortfolio() {
+      if (!isValidWalletAddress(currentWallet)) {
+        holdingsStatus.textContent = "Wallet not connected";
+        return;
+      }
+      try {
+        await ensureSepoliaNetwork();
+      } catch (err) {
+        holdingsStatus.textContent = err.message ? String(err.message) : "Please switch to Sepolia";
+        return;
+      }
       holdingsStatus.textContent = "Loading";
 
       const [summaryRes, positionsRes, claimablesRes, leveragedRes, lifecycleRes] = await Promise.all([
@@ -564,19 +785,36 @@
       const claimablesData = await claimablesRes.json();
       const leveragedData = await leveragedRes.json();
       const lifecycleData = await lifecycleRes.json();
-      const lifecycleRows = Array.isArray(lifecycleData.symbols) ? lifecycleData.symbols : [];
+      let lifecycleRows = [];
+      if (Array.isArray(lifecycleData.symbols)) {
+        lifecycleRows = lifecycleData.symbols;
+      }
       lifecycleBySymbol = {};
       for (let i = 0; i < lifecycleRows.length; i += 1) {
         const row = lifecycleRows[i];
         lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
       }
 
-      if (!summaryRes.ok || summaryData.error) {
-        holdingsStatus.textContent = summaryData.error;
+      let summaryFailed = false;
+      if (!summaryRes.ok) {
+        summaryFailed = true;
+      }
+      if (summaryData.error) {
+        summaryFailed = true;
+      }
+      if (summaryFailed) {
+        holdingsStatus.textContent = String(summaryData.error);
         return;
       }
-      if (!positionsRes.ok || positionsData.error) {
-        holdingsStatus.textContent = positionsData.error;
+      let positionsFailed = false;
+      if (!positionsRes.ok) {
+        positionsFailed = true;
+      }
+      if (positionsData.error) {
+        positionsFailed = true;
+      }
+      if (positionsFailed) {
+        holdingsStatus.textContent = String(positionsData.error);
         return;
       }
 
@@ -585,25 +823,10 @@
       renderMarketAlert(positionsData.positions);
       renderClaimables(claimablesData.claimables);
       renderLeveragedPositions(leveragedData.positions);
-      if (summaryData.drift) {
-        if (summaryData.drift.withinTolerance) {
-          driftStatus.className = "status status-ok";
-          driftStatus.textContent = "Rebuild vs aggregator: in sync";
-        } else {
-          driftStatus.className = "status status-warn";
-          const cashDrift = formatUsdFromWei(summaryData.drift.cashDeltaWei);
-          const stockDrift = formatUsdFromWei(summaryData.drift.stockDeltaWei);
-          const totalDrift = formatUsdFromWei(summaryData.drift.totalDeltaWei);
-          driftStatus.textContent =
-            `Drift detected: cash ${cashDrift}, `
-            + `stock ${stockDrift}, `
-            + `total ${totalDrift}`;
-        }
-      } else {
-        driftStatus.className = "status";
-        driftStatus.textContent = "Rebuild vs aggregator: aggregator not available";
-      }
-      holdingsStatus.textContent = `Loaded ${positionsData.positions.length} positions`;
+      holdingsStatus.textContent = ``;
+      holdingsStatus.textContent = ``;
+      // Loaded ${positionsData.positions.length} positions
+
       dividendsStatus.textContent = "Ready";
       leveragedStatus.textContent = "Ready";
     }
@@ -621,20 +844,27 @@
 
     refreshBtn.addEventListener("click", refreshPortfolio);
 
-    window.ethereum.on("accountsChanged", (accounts) => {
-      currentWallet = accounts[0];
+    window.ethereum.on("accountsChanged", function (accounts) {
+      currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
+      refreshPortfolio();
+    });
+    window.ethereum.on("chainChanged", function () {
       refreshPortfolio();
     });
 
     (async function init() {
+      await ensureSepoliaNetwork();
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-      currentWallet = accounts[0];
+      currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
       try {
         const lifecycleRes = await fetch("/api/admin/symbols/status");
         const lifecycleData = await lifecycleRes.json();
-        const rows = Array.isArray(lifecycleData.symbols) ? lifecycleData.symbols : [];
+        let rows = [];
+        if (Array.isArray(lifecycleData.symbols)) {
+          rows = lifecycleData.symbols;
+        }
         lifecycleBySymbol = {};
         for (let i = 0; i < rows.length; i += 1) {
           const row = rows[i];

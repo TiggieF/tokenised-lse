@@ -6,8 +6,16 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
+    "test:sepolia": "bash -lc 'set -a; [ -f ./.env.sepolia ] && . ./.env.sepolia; set +a; npx hardhat test test/sepolia-smoke.test.js --network sepolia'",
+    "test:sepolia:all": "bash -lc 'set -a; [ -f ./.env.sepolia ] && . ./.env.sepolia; set +a; npx hardhat test --network sepolia'",
     "coverage": "hardhat coverage",
-    "dev:chain": "sh -c 'npx hardhat node > logs/hardhat.log 2>&1 & sleep 1 && npx hardhat run scripts/deploy-ttoken.js --network localhost && npx hardhat run scripts/deploy-listings.js --network localhost && npx hardhat run scripts/deploy-orderbook.js --network localhost && npx hardhat run scripts/deploy-dividends.js --network localhost && npx hardhat run scripts/deploy-leveraged.js --network localhost'"
+    "dev:chain": "sh -c 'npx hardhat node > logs/hardhat.log 2>&1 & sleep 1 && npm run deploy:localhost'",
+    "deploy:localhost": "sh -c 'npx hardhat run scripts/deploy-ttoken.js --network localhost && npx hardhat run scripts/deploy-listings.js --network localhost && npx hardhat run scripts/deploy-orderbook.js --network localhost && npx hardhat run scripts/deploy-dividends.js --network localhost && npx hardhat run scripts/deploy-dividends-merkle.js --network localhost && npx hardhat run scripts/deploy-leveraged.js --network localhost && npx hardhat run scripts/deploy-award.js --network localhost && npx hardhat run scripts/deploy-portfolio-aggregator.js --network localhost'",
+    "deploy:sepolia": "sh -c 'set -a; [ -f ./.env.sepolia ] && . ./.env.sepolia; set +a; npx hardhat run scripts/deploy-ttoken.js --network sepolia && npx hardhat run scripts/deploy-listings.js --network sepolia && npx hardhat run scripts/deploy-orderbook.js --network sepolia && npx hardhat run scripts/deploy-dividends.js --network sepolia && npx hardhat run scripts/deploy-dividends-merkle.js --network sepolia && npx hardhat run scripts/deploy-leveraged.js --network sepolia && npx hardhat run scripts/deploy-award.js --network sepolia && npx hardhat run scripts/deploy-portfolio-aggregator.js --network sepolia'",
+    "seed:prices:sepolia": "sh -c 'set -a; [ -f ./.env.sepolia ] && . ./.env.sepolia; set +a; npx hardhat run scripts/seed-prices.js --network sepolia'",
+    "dev:sepolia": "bash -lc 'set -a; [ -f ./.env.sepolia ] && . ./.env.sepolia; set +a; DEFAULT_NETWORK=sepolia node scripts/ui/html/server.js'",
+    "ui:sepolia": "npm run dev:sepolia",
+    "init:sepolia": "sh scripts/bootstrap-sepolia.sh"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

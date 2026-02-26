@@ -65,7 +65,10 @@ async function handleReadPrice(feed, value) {
 
 async function main() {
   const envAddress = process.env.PRICE_FEED_ADDRESS;
-  const priceFeedAddress = envAddress || DEFAULT_PRICE_FEED_ADDRESS;
+  let priceFeedAddress = DEFAULT_PRICE_FEED_ADDRESS;
+  if (envAddress) {
+    priceFeedAddress = envAddress;
+  }
   requireAddress(priceFeedAddress, "PRICE_FEED_ADDRESS");
 
   const signers = await ethers.getSigners();

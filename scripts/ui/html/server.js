@@ -15,15 +15,109 @@ const yahooFinance = new YahooFinance({
 const candleCache = new Map();
 const CANDLE_TTL_MS = 300000;
 const quoteCache = new Map();
-const QUOTE_TTL_MS = 5000;
+const QUOTE_TTL_MS = 2000;
 const fmpQuoteCache = new Map();
-const FMP_QUOTE_TTL_MS = 5000;
+const FMP_QUOTE_TTL_MS = 1000;
 const fmpInfoCache = new Map();
 const FMP_INFO_TTL_MS = 60000;
+const fmpDetailsCache = new Map();
+const FMP_DETAILS_TTL_MS = 30000;
+const fmpIndexTickerCache = new Map();
+const FMP_INDEX_TTL_MS = 2000;
 const INDEXER_SYNC_INTERVAL_MS = 5000;
 // fmp caches
-const FMP_API_KEY = process.env.FMP_API_KEY || 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
-const HARDHAT_RPC_URL = process.env.HARDHAT_RPC_URL || 'http://127.0.0.1:8545';
+let FMP_API_KEY = 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
+if (process.env.FMP_API_KEY) {
+  FMP_API_KEY = process.env.FMP_API_KEY;
+}
+let HARDHAT_RPC_URL = 'http://127.0.0.1:8545';
+if (process.env.RPC_URL) {
+  HARDHAT_RPC_URL = process.env.RPC_URL;
+}
+if (process.env.HARDHAT_RPC_URL) {
+  HARDHAT_RPC_URL = process.env.HARDHAT_RPC_URL;
+}
+let DEPLOYMENTS_NETWORK = 'localhost';
+if (process.env.DEFAULT_NETWORK) {
+  DEPLOYMENTS_NETWORK = process.env.DEFAULT_NETWORK;
+}
+if (process.env.DEPLOYMENTS_NETWORK) {
+  DEPLOYMENTS_NETWORK = process.env.DEPLOYMENTS_NETWORK;
+}
+const NETWORK_NAME = String(DEPLOYMENTS_NETWORK || '').toLowerCase();
+const DEFAULT_ENABLE_BACKGROUND = NETWORK_NAME !== 'sepolia';
+const ENABLE_AUTOTRADE = process.env.ENABLE_AUTOTRADE
+  ? String(process.env.ENABLE_AUTOTRADE).toLowerCase() === 'true'
+  : DEFAULT_ENABLE_BACKGROUND;
+const ENABLE_GAS_PACK = process.env.ENABLE_GAS_PACK
+  ? String(process.env.ENABLE_GAS_PACK).toLowerCase() === 'true'
+  : DEFAULT_ENABLE_BACKGROUND;
+let DEPLOYMENTS_FILE = path.join(__dirname, '../../..', 'deployments', `${DEPLOYMENTS_NETWORK}.json`);
+if (process.env.DEPLOYMENTS_FILE) {
+  DEPLOYMENTS_FILE = process.env.DEPLOYMENTS_FILE;
+}
+const RPC_SIGNERS = new Map();
+let RPC_RELAYER_SIGNER = null;
+const RPC_PROVIDER = new ethers.JsonRpcProvider(HARDHAT_RPC_URL);
+function addRpcSigner(privateKeyRaw) {
+  let privateKey = '';
+  if (privateKeyRaw) {
+    privateKey = String(privateKeyRaw).trim();
+  }
+  if (!privateKey) {
+    return;
+  }
+  try {
+    const wallet = new ethers.Wallet(privateKey, RPC_PROVIDER);
+    RPC_SIGNERS.set(wallet.address.toLowerCase(), wallet);
+  } catch {
+  }
+}
+if (process.env.TX_SIGNER_PRIVATE_KEYS) {
+  const all = String(process.env.TX_SIGNER_PRIVATE_KEYS)
+    .split(',')
+    .map((one) => one.trim())
+    .filter(Boolean);
+  for (let i = 0; i < all.length; i += 1) {
+    addRpcSigner(all[i]);
+  }
+}
+if (process.env.DEPLOYER_PRIVATE_KEY) {
+  addRpcSigner(process.env.DEPLOYER_PRIVATE_KEY);
+}
+if (process.env.MINTER_PRIVATE_KEY) {
+  addRpcSigner(process.env.MINTER_PRIVATE_KEY);
+}
+if (process.env.RPC_RELAYER_PRIVATE_KEY) {
+  try {
+    RPC_RELAYER_SIGNER = new ethers.Wallet(String(process.env.RPC_RELAYER_PRIVATE_KEY).trim(), RPC_PROVIDER);
+    RPC_SIGNERS.set(RPC_RELAYER_SIGNER.address.toLowerCase(), RPC_RELAYER_SIGNER);
+  } catch {
+    RPC_RELAYER_SIGNER = null;
+  }
+}
+const FMP_US_TOP_SYMBOLS = [
+  'AAPL',
+  'MSFT',
+  'NVDA',
+  'AMZN',
+  'GOOGL',
+  'META',
+  'TSLA',
+  'BRK-B',
+  'AVGO',
+  'JPM',
+  'WMT',
+  'LLY',
+  'V',
+  'XOM',
+  'MA',
+  'UNH',
+  'JNJ',
+  'COST',
+  'PG',
+  'HD',
+];
 // link to hardhat
 
 // connect to yahoo
@@ -44,8 +138,16 @@ const TZ = 'America/New_York';
 
 function pick(obj, keys) {
   // pick first existing key from keys in obj
+  if (!obj || typeof obj !== 'object') {
+    return undefined;
+  }
   for (const k of keys) {
-    return obj[k];
+    if (Object.prototype.hasOwnProperty.call(obj, k)) {
+      const value = obj[k];
+      if (value !== undefined && value !== null) {
+        return value;
+      }
+    }
   }
   return undefined;
 }
@@ -68,6 +170,24 @@ async function fetchFmpJson(url) {
   }
 }
 // connec to fmp
+
+async function fetchFmpSpotPrice(symbolRaw) {
+  const symbol = String(symbolRaw).toUpperCase().trim();
+  if (!symbol) {
+    return 0;
+  }
+  const url = getFmpUrl('quote', { symbol });
+  const payload = await fetchFmpJson(url);
+  let quote = payload;
+  if (Array.isArray(payload)) {
+    quote = payload[0];
+  }
+  const price = asNumber(pick(quote || {}, ['price', 'regularMarketPrice']));
+  if (Number.isFinite(price) && price > 0) {
+    return price;
+  }
+  return 0;
+}
 
 function getFmpUrl(pathname, params) {
   const url = new URL(`https://financialmodelingprep.com/stable/${pathname}`);
@@ -99,6 +219,11 @@ const equityTokenInterface = new ethers.Interface([
   'function balanceOf(address account) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
 ]);
+const equityTokenSnapshotInterface = new ethers.Interface([
+  'function snapshot() returns (uint256)',
+  'function balanceOfAt(address account, uint256 snapshotId) view returns (uint256)',
+  'event Snapshot(uint256 id)',
+]);
 const equityTokenRoleInterface = new ethers.Interface([
   'function SNAPSHOT_ROLE() view returns (bytes32)',
   'function hasRole(bytes32 role, address account) view returns (bool)',
@@ -127,12 +252,25 @@ const dividendsInterface = new ethers.Interface([
   'function declareDividendPerShare(address equityToken, uint256 divPerShareWei) returns (uint256 epochId, uint256 snapshotId)',
   'function claimDividend(address equityToken, uint256 epochId) returns (uint256 mintedWei)',
 ]);
+const dividendsMerkleInterface = new ethers.Interface([
+  'function merkleEpochCount() view returns (uint256)',
+  'function getEpoch(uint256 epochId) view returns ((address equityToken,bytes32 merkleRoot,uint256 declaredAt,uint256 totalEntitledWei,uint256 totalClaimedWei,bytes32 contentHash,string claimsUri))',
+  'function isClaimed(uint256 epochId, uint256 leafIndex) view returns (bool)',
+  'function previewLeaf(uint256 epochId, address account, uint256 amountWei, uint256 leafIndex, bytes32[] proof) view returns (bool,bool)',
+  'function declareMerkleDividend(address equityToken, bytes32 merkleRoot, uint256 totalEntitledWei, bytes32 contentHash, string claimsUri) returns (uint256)',
+  'function claim(uint256 epochId, address account, uint256 amountWei, uint256 leafIndex, bytes32[] proof) returns (uint256)',
+]);
 const awardInterface = new ethers.Interface([
   'function currentEpoch() view returns (uint256)',
-  'function topTraderByEpoch(uint256 epochId) view returns (address)',
-  'function topVolumeByEpoch(uint256 epochId) view returns (uint256)',
-  'function rewarded(uint256 epochId) view returns (bool)',
-  'function finalizeEpoch(uint256 epochId)',
+  'function EPOCH_DURATION() view returns (uint256)',
+  'function REWARD_AMOUNT() view returns (uint256)',
+  'function maxQtyByEpoch(uint256 epochId) view returns (uint256)',
+  'function qtyByEpochByTrader(uint256 epochId, address trader) view returns (uint256)',
+  'function getEpochTraderCount(uint256 epochId) view returns (uint256)',
+  'function getEpochTraderAt(uint256 epochId, uint256 index) view returns (address)',
+  'function isWinner(uint256 epochId, address trader) view returns (bool)',
+  'function hasClaimed(uint256 epochId, address trader) view returns (bool)',
+  'function claimAward(uint256 epochId)',
 ]);
 const aggregatorInterface = new ethers.Interface([
   'function getPortfolioSummary(address user) view returns (uint256 cashValueWei,uint256 stockValueWei,uint256 totalValueWei)',
@@ -140,6 +278,7 @@ const aggregatorInterface = new ethers.Interface([
 ]);
 const priceFeedInterface = new ethers.Interface([
   'function getPrice(string symbol) view returns (uint256 priceCents, uint256 timestamp)',
+  'function isFresh(string symbol) view returns (bool)',
 ]);
 const priceFeedAdminInterface = new ethers.Interface([
   'function setPrice(string symbol, uint256 priceCents)',
@@ -171,11 +310,107 @@ const INDEXER_LEVERAGED_FILE = path.join(INDEXER_DIR, 'leveraged.json');
 const AUTOTRADE_DIR = path.join(__dirname, '../../..', 'cache', 'autotrade');
 const AUTOTRADE_STATE_FILE = path.join(AUTOTRADE_DIR, 'state.json');
 const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
-const AUTOTRADE_POLL_INTERVAL_MS = 3000;
+const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
+const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
+const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
+const MERKLE_HOLDER_SCAN_STATE_FILE = path.join(DIVIDENDS_MERKLE_DIR, 'holder-scan-state.json');
+const MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS = (() => {
+  const raw = Number(process.env.MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS || '');
+  if (Number.isFinite(raw) && raw >= 0) {
+    return Math.floor(raw);
+  }
+  return 2;
+})();
+const MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS = (() => {
+  const raw = Number(process.env.MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS || '');
+  if (Number.isFinite(raw) && raw >= 0) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 5000;
+  }
+  return 0;
+})();
+const MIN_STOCK_QTY_UNITS = 10;
+const AUTOTRADE_POLL_INTERVAL_MS = (() => {
+  const raw = Number(process.env.AUTOTRADE_POLL_INTERVAL_MS || '');
+  if (Number.isFinite(raw) && raw >= 1000) {
+    return Math.floor(raw);
+  }
+  return 3000;
+})();
+const GAS_WARN_THRESHOLD_PCT = 15;
+const GAS_AUTO_RUN_INTERVAL_MS = (() => {
+  const raw = Number(process.env.GAS_AUTO_RUN_INTERVAL_MS || '');
+  if (Number.isFinite(raw) && raw >= 1000) {
+    return Math.floor(raw);
+  }
+  return 60000;
+})();
+const GAS_PAGE_POLL_MS = 1500;
+const INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS = (() => {
+  const raw = Number(process.env.INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS || '');
+  if (Number.isFinite(raw) && raw >= 1) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 300;
+  }
+  return 5000;
+})();
+const GET_LOGS_BLOCK_RANGE = (() => {
+  const raw = Number(process.env.GET_LOGS_BLOCK_RANGE || '');
+  if (Number.isFinite(raw) && raw >= 1) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 10;
+  }
+  return 2000;
+})();
+const INDEXER_ENABLE_TRANSFERS = process.env.INDEXER_ENABLE_TRANSFERS
+  ? String(process.env.INDEXER_ENABLE_TRANSFERS).toLowerCase() === 'true'
+  : NETWORK_NAME !== 'sepolia';
+const INDEXER_ENABLE_LEVERAGED = process.env.INDEXER_ENABLE_LEVERAGED
+  ? String(process.env.INDEXER_ENABLE_LEVERAGED).toLowerCase() === 'true'
+  : true;
+const TXS_ENABLE_LEVERAGE_FALLBACK_SCAN = process.env.TXS_ENABLE_LEVERAGE_FALLBACK_SCAN
+  ? String(process.env.TXS_ENABLE_LEVERAGE_FALLBACK_SCAN).toLowerCase() === 'true'
+  : false;
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
 let autoTradeLoopBusy = false;
+let autoTradeLoopStartedAtMs = 0;
+let gasRunInFlight = null;
+const gasRuntimeState = {
+  lastRunAtMs: 0,
+  latest: null,
+  baseline: {},
+};
+const AWARD_CACHE_TTL_MS = 3000;
+const awardCache = {
+  status: null,
+  leaderboard: new Map(),
+  claimable: new Map(),
+};
+const txReceiptGasCache = new Map();
+const signerTxQueues = new Map();
+
+async function enqueueSignerSend(address, job) {
+  const key = String(address || '').toLowerCase();
+  const previous = signerTxQueues.get(key) || Promise.resolve();
+  const next = previous.catch(() => {}).then(job);
+  signerTxQueues.set(key, next);
+  try {
+    const result = await next;
+    return result;
+  } finally {
+    if (signerTxQueues.get(key) === next) {
+      signerTxQueues.delete(key);
+    }
+  }
+}
 
 async function ensureContract(address) {
   const code = await hardhatRpc('eth_getCode', [address, 'latest']);
@@ -184,9 +419,42 @@ async function ensureContract(address) {
 
 // load deployment and get token addresses from local file
 function loadDeployments() {
-  const deploymentsPath = path.join(__dirname, '../../..', 'deployments', 'localhost.json');
-  const raw = fs.readFileSync(deploymentsPath, 'utf8');
+  const raw = fs.readFileSync(DEPLOYMENTS_FILE, 'utf8');
   return JSON.parse(raw);
+}
+
+function getAdminWalletAllowlist() {
+  const wallets = new Set();
+  if (process.env.ADMIN_WALLETS) {
+    const rawValues = String(process.env.ADMIN_WALLETS)
+      .split(',')
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+    for (let i = 0; i < rawValues.length; i += 1) {
+      const normalized = normalizeAddress(rawValues[i]);
+      if (normalized) {
+        wallets.add(normalized.toLowerCase());
+      }
+    }
+  }
+  try {
+    const deployments = loadDeployments();
+    const deployedAdmin = normalizeAddress(deployments.admin);
+    if (deployedAdmin) {
+      wallets.add(deployedAdmin.toLowerCase());
+    }
+  } catch {
+  }
+  return wallets;
+}
+
+function isAdminWallet(walletAddress) {
+  const normalized = normalizeAddress(walletAddress);
+  if (!normalized) {
+    return false;
+  }
+  const allowlist = getAdminWalletAllowlist();
+  return allowlist.has(normalized.toLowerCase());
 }
 
 function getTTokenAddressFromDeployments() {
@@ -208,33 +476,698 @@ function isValidAddress(address) {
   // check valid address
 }
 
-// connect to hardhat and contracts
-async function hardhatRpc(method, params = []) {
-  const res = await fetch(HARDHAT_RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-  });
-  const payload = await res.json();
-  if (!res.ok || payload.error) {
-    let msg = `Hardhat RPC ${res.status}`;
-    if (payload.error && payload.error.message) {
-      msg = payload.error.message;
+function parseRpcInt(value) {
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) {
+      return value;
     }
-    throw new Error(msg);
+    return 0;
   }
-  return payload.result;
+  if (typeof value === 'bigint') {
+    return Number(value);
+  }
+  if (typeof value === 'string') {
+    const startsWithLowerHex = value.startsWith('0x');
+    const startsWithUpperHex = value.startsWith('0X');
+    let isHexPrefix = false;
+    if (startsWithLowerHex) {
+      isHexPrefix = true;
+    }
+    if (startsWithUpperHex) {
+      isHexPrefix = true;
+    }
+    if (isHexPrefix) {
+      const parsed = parseInt(value, 16);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+      return 0;
+    }
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
 }
 
-async function waitForReceipt(txHash, maxTries = 20) {
+function toOptionalBigInt(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  try {
+    return BigInt(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function toOptionalNumber(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const parsed = parseRpcInt(value);
+  if (Number.isFinite(parsed)) {
+    return parsed;
+  }
+  return undefined;
+}
+
+function wantsClientSign(body) {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+  if (body.clientSign === true) {
+    return true;
+  }
+  if (String(body.clientSign || '').toLowerCase() === 'true') {
+    return true;
+  }
+  return false;
+}
+
+async function rpcRequest(method, params = []) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      const res = await fetch(HARDHAT_RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      });
+      const text = await res.text();
+      if (res.status === 429) {
+        let retryAfterSec = 0;
+        try {
+          const retryHeader = res.headers.get('retry-after');
+          if (retryHeader) {
+            const parsedRetry = Number(retryHeader);
+            if (Number.isFinite(parsedRetry) && parsedRetry > 0) {
+              retryAfterSec = parsedRetry;
+            }
+          }
+        } catch {
+        }
+        let msg = 'RPC rate limit (status 429)';
+        if (retryAfterSec > 0) {
+          msg += ` retry-after=${retryAfterSec}s`;
+        }
+        throw new Error(msg);
+      }
+      let payload = null;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new Error(`RPC non-JSON response (status ${res.status}): ${String(text).slice(0, 160)}`);
+      }
+      let hasHttpError = false;
+      let hasRpcError = false;
+      if (!res.ok) {
+        hasHttpError = true;
+      }
+      if (payload.error) {
+        hasRpcError = true;
+      }
+      let hasAnyError = false;
+      if (hasHttpError) {
+        hasAnyError = true;
+      }
+      if (hasRpcError) {
+        hasAnyError = true;
+      }
+      if (hasAnyError) {
+        let msg = `RPC ${res.status}`;
+        if (payload.error && payload.error.message) {
+          msg = payload.error.message;
+        }
+        throw new Error(msg);
+      }
+      return payload.result;
+    } catch (err) {
+      lastError = err;
+      const message = String(err && err.message ? err.message : err);
+      const retryable = isRpcRateLimitError(message)
+        || message.includes('RPC non-JSON response')
+        || message.includes('Unexpected end of JSON input');
+      if (!retryable || attempt >= 9) {
+        throw err;
+      }
+      let waitMs = 250 * (attempt + 1);
+      if (isRpcRateLimitError(message)) {
+        waitMs = Math.min(10000, 1000 * (attempt + 1));
+      }
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error('RPC request failed');
+}
+
+async function sendSignedRpcTransaction(txRequest) {
+  if (!txRequest || typeof txRequest !== 'object') {
+    throw new Error('invalid transaction input');
+  }
+  let from = '';
+  if (txRequest.from) {
+    from = normalizeAddress(String(txRequest.from));
+  }
+  let signer = null;
+  if (from) {
+    signer = RPC_SIGNERS.get(from.toLowerCase()) || null;
+  }
+  if (!signer && !from && RPC_RELAYER_SIGNER) {
+    signer = RPC_RELAYER_SIGNER;
+  }
+  if (!signer && RPC_RELAYER_SIGNER) {
+    const relayerAddress = RPC_RELAYER_SIGNER.address.toLowerCase();
+    if (from.toLowerCase() === relayerAddress) {
+      signer = RPC_RELAYER_SIGNER;
+    }
+  }
+  if (!signer) {
+    throw new Error(`cannot sign tx for ${from || 'unknown sender'}; add key in TX_SIGNER_PRIVATE_KEYS`);
+  }
+
+  const tx = {};
+  if (txRequest.to) {
+    tx.to = txRequest.to;
+  }
+  if (txRequest.data) {
+    tx.data = txRequest.data;
+  }
+  if (txRequest.value !== undefined) {
+    tx.value = toOptionalBigInt(txRequest.value);
+  }
+  if (txRequest.gas !== undefined) {
+    tx.gasLimit = toOptionalBigInt(txRequest.gas);
+  }
+  if (txRequest.gasLimit !== undefined) {
+    tx.gasLimit = toOptionalBigInt(txRequest.gasLimit);
+  }
+  if (txRequest.gasPrice !== undefined) {
+    tx.gasPrice = toOptionalBigInt(txRequest.gasPrice);
+  }
+  if (txRequest.maxFeePerGas !== undefined) {
+    tx.maxFeePerGas = toOptionalBigInt(txRequest.maxFeePerGas);
+  }
+  if (txRequest.maxPriorityFeePerGas !== undefined) {
+    tx.maxPriorityFeePerGas = toOptionalBigInt(txRequest.maxPriorityFeePerGas);
+  }
+  if (txRequest.nonce !== undefined) {
+    tx.nonce = toOptionalNumber(txRequest.nonce);
+  }
+  if (txRequest.chainId !== undefined) {
+    tx.chainId = toOptionalNumber(txRequest.chainId);
+  }
+
+  const txHash = await enqueueSignerSend(signer.address, async () => {
+    const txResponse = await signer.sendTransaction(tx);
+    return txResponse.hash;
+  });
+  return txHash;
+}
+
+// connect to rpc and contracts
+async function hardhatRpc(method, params = []) {
+  if (method === 'eth_sendTransaction') {
+    try {
+      return await rpcRequest(method, params);
+    } catch (error) {
+      const txRequest = Array.isArray(params) ? params[0] : null;
+      if (!txRequest) {
+        throw error;
+      }
+      return sendSignedRpcTransaction(txRequest);
+    }
+  }
+  return rpcRequest(method, params);
+}
+
+async function canServerSendFromAddress(addressRaw) {
+  const address = normalizeAddress(addressRaw);
+  if (!address) {
+    return false;
+  }
+  if (RPC_SIGNERS.has(address.toLowerCase())) {
+    return true;
+  }
+  try {
+    const accounts = await rpcRequest('eth_accounts', []);
+    if (Array.isArray(accounts)) {
+      for (let i = 0; i < accounts.length; i += 1) {
+        const account = normalizeAddress(accounts[i]);
+        if (account && account.toLowerCase() === address.toLowerCase()) {
+          return true;
+        }
+      }
+    }
+  } catch {
+  }
+  return false;
+}
+
+async function waitForReceipt(txHash, maxTries = 120, pollMs = 1000) {
   for (let i = 0; i < maxTries; i += 1) {
     const receipt = await hardhatRpc('eth_getTransactionReceipt', [txHash]);
     if (receipt) {
       return receipt;
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
   throw new Error(`tx not mined yet: ${txHash}`);
+}
+
+function parseMaxGetLogsRangeFromError(messageRaw) {
+  const message = String(messageRaw || '');
+  const direct = message.match(/up to a\s+(\d+)\s+block range/i);
+  if (direct && direct[1]) {
+    const parsed = Number(direct[1]);
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      return Math.floor(parsed);
+    }
+  }
+  const hint = message.match(/\[(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\]/);
+  if (hint && hint[1] && hint[2]) {
+    const start = parseInt(hint[1], 16);
+    const end = parseInt(hint[2], 16);
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+      return (end - start) + 1;
+    }
+  }
+  return null;
+}
+
+function isGetLogsRangeError(messageRaw) {
+  const message = String(messageRaw || '').toLowerCase();
+  if (!message.includes('eth_getlogs')) {
+    return false;
+  }
+  if (message.includes('block range')) {
+    return true;
+  }
+  if (message.includes('up to a')) {
+    return true;
+  }
+  return false;
+}
+
+function isRpcRateLimitError(messageRaw) {
+  const message = String(messageRaw || '').toLowerCase();
+  if (message.includes('status 429')) {
+    return true;
+  }
+  if (message.includes('rpc rate limit')) {
+    return true;
+  }
+  if (message.includes('exceeded its compute units per second')) {
+    return true;
+  }
+  if (message.includes('rate limit')) {
+    return true;
+  }
+  if (message.includes('too many requests')) {
+    return true;
+  }
+  return false;
+}
+
+async function getLogsChunked(baseFilter, startBlock, endBlock) {
+  const allLogs = [];
+  let from = Number(startBlock);
+  const end = Number(endBlock);
+  let chunkSize = Math.max(1, GET_LOGS_BLOCK_RANGE);
+  let rateRetryCount = 0;
+  while (from <= end) {
+    const to = Math.min(end, from + chunkSize - 1);
+    try {
+      const part = await hardhatRpc('eth_getLogs', [{
+        ...baseFilter,
+        fromBlock: ethers.toQuantity(from),
+        toBlock: ethers.toQuantity(to),
+      }]);
+      allLogs.push(...part);
+      from = to + 1;
+      rateRetryCount = 0;
+    } catch (err) {
+      if (isRpcRateLimitError(err.message)) {
+        rateRetryCount += 1;
+        if (rateRetryCount > 20) {
+          throw err;
+        }
+        const delayMs = Math.min(3000, 300 * rateRetryCount);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      if (!isGetLogsRangeError(err.message) || chunkSize <= 1) {
+        throw err;
+      }
+      const hinted = parseMaxGetLogsRangeFromError(err.message);
+      if (hinted && hinted >= 1) {
+        chunkSize = Math.max(1, Math.min(chunkSize, hinted));
+      } else {
+        chunkSize = Math.max(1, Math.floor(chunkSize / 2));
+      }
+    }
+  }
+  return allLogs;
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  const rows = Array.isArray(items) ? items : [];
+  const max = Math.max(1, Number(limit) || 1);
+  const results = new Array(rows.length);
+  let cursor = 0;
+  const workers = [];
+  const run = async function () {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= rows.length) {
+        return;
+      }
+      results[index] = await worker(rows[index], index);
+    }
+  };
+  for (let i = 0; i < Math.min(max, rows.length); i += 1) {
+    workers.push(run());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
+function readAwardCacheEntry(store, key) {
+  if (!store || !key) {
+    return null;
+  }
+  const row = store.get(key);
+  if (!row) {
+    return null;
+  }
+  if ((Date.now() - Number(row.timestampMs)) > AWARD_CACHE_TTL_MS) {
+    store.delete(key);
+    return null;
+  }
+  return row.value;
+}
+
+function writeAwardCacheEntry(store, key, value) {
+  if (!store || !key) {
+    return;
+  }
+  store.set(key, { value, timestampMs: Date.now() });
+}
+
+function formatTokenAmountCompact(weiLike, decimals = 18, maxFraction = 4) {
+  try {
+    const raw = ethers.formatUnits(BigInt(String(weiLike || '0')), decimals);
+    const negative = raw.startsWith('-');
+    let text = negative ? raw.slice(1) : raw;
+    const parts = text.split('.');
+    let whole = parts[0] || '0';
+    let fraction = parts[1] || '';
+    if (fraction.length > maxFraction) {
+      fraction = fraction.slice(0, maxFraction);
+    }
+    fraction = fraction.replace(/0+$/, '');
+    let out = whole;
+    if (fraction) {
+      out = `${whole}.${fraction}`;
+    }
+    if (negative) {
+      return `-${out}`;
+    }
+    return out;
+  } catch {
+    return String(weiLike || '0');
+  }
+}
+
+async function fetchRecentLeveragedEventsForWallet(wallet, lookbackBlocksInput) {
+  const deployments = loadDeployments();
+  const leveragedRouterAddress = normalizeAddress(deployments.leveragedProductRouter);
+  if (!leveragedRouterAddress) {
+    return [];
+  }
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = parseRpcInt(latestBlockHex);
+  const lookbackBlocks = Math.max(1, Number(lookbackBlocksInput) || 5000);
+  const fromBlock = Math.max(0, latestBlock - lookbackBlocks + 1);
+  const leveragedTopics = [
+    ethers.id('LeveragedMinted(address,address,string,uint8,uint256,uint256,uint256)'),
+    ethers.id('LeveragedUnwound(address,address,string,uint8,uint256,uint256,uint256)'),
+  ];
+  const logs = await getLogsChunked({
+    address: leveragedRouterAddress,
+    topics: [leveragedTopics],
+  }, fromBlock, latestBlock);
+  logs.sort((a, b) => {
+    const aBlock = Number(a.blockNumber);
+    const bBlock = Number(b.blockNumber);
+    if (aBlock !== bBlock) {
+      return aBlock - bBlock;
+    }
+    return Number(a.logIndex) - Number(b.logIndex);
+  });
+  const walletNorm = normalizeAddress(wallet);
+  const blockTimestampCache = new Map();
+  const events = [];
+  for (let i = 0; i < logs.length; i += 1) {
+    const log = logs[i];
+    let parsed = null;
+    try {
+      parsed = leveragedRouterInterface.parseLog(log);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) {
+      continue;
+    }
+    const rowWallet = normalizeAddress(parsed.args.user);
+    if (rowWallet !== walletNorm) {
+      continue;
+    }
+    const txHash = String(log.transactionHash);
+    const blockNumber = Number(log.blockNumber);
+    const logIndex = Number(log.logIndex);
+    let timestampMs = Date.now();
+    if (blockTimestampCache.has(blockNumber)) {
+      timestampMs = blockTimestampCache.get(blockNumber);
+    } else {
+      const ts = await getBlockTimestampMs(blockNumber);
+      blockTimestampCache.set(blockNumber, ts);
+      timestampMs = ts;
+    }
+    const id = `${txHash}:${logIndex}`;
+    if (parsed.name === 'LeveragedMinted') {
+      events.push({
+        id,
+        kind: 'LEVERAGE_MINT',
+        wallet: rowWallet,
+        productToken: normalizeAddress(parsed.args.productToken),
+        baseSymbol: String(parsed.args.baseSymbol),
+        leverage: Number(parsed.args.leverage),
+        ttokenInWei: parsed.args.ttokenInWei.toString(),
+        productQtyWei: parsed.args.productOutWei.toString(),
+        navCents: parsed.args.navCents.toString(),
+        txHash,
+        blockNumber,
+        logIndex,
+        timestampMs,
+      });
+      continue;
+    }
+    if (parsed.name === 'LeveragedUnwound') {
+      events.push({
+        id,
+        kind: 'LEVERAGE_UNWIND',
+        wallet: rowWallet,
+        productToken: normalizeAddress(parsed.args.productToken),
+        baseSymbol: String(parsed.args.baseSymbol),
+        leverage: Number(parsed.args.leverage),
+        productQtyWei: parsed.args.productInWei.toString(),
+        ttokenOutWei: parsed.args.ttokenOutWei.toString(),
+        navCents: parsed.args.navCents.toString(),
+        txHash,
+        blockNumber,
+        logIndex,
+        timestampMs,
+      });
+      events.push({
+        id: `${id}:burn`,
+        kind: 'LEVERAGE_BURN',
+        wallet: rowWallet,
+        productToken: normalizeAddress(parsed.args.productToken),
+        baseSymbol: String(parsed.args.baseSymbol),
+        leverage: Number(parsed.args.leverage),
+        productQtyWei: parsed.args.productInWei.toString(),
+        txHash,
+        blockNumber,
+        logIndex: logIndex + 1,
+        timestampMs,
+      });
+    }
+  }
+  return events;
+}
+
+function collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount) {
+  const rowsOut = [];
+  const seen = new Set();
+  const pushRow = (txHash, label, timestampMs, qtyText) => {
+    const hash = String(txHash || '');
+    if (!hash) {
+      return;
+    }
+    if (seen.has(hash)) {
+      return;
+    }
+    seen.add(hash);
+    rowsOut.push({
+      txHash: hash,
+      label: String(label || 'wallet_tx'),
+      timestampMs: Number(timestampMs) || 0,
+      qtyText: String(qtyText || '-'),
+    });
+  };
+  const walletNorm = normalizeAddress(wallet);
+  const limit = Math.max(1, Number(maxCount) || 20);
+  const rows = [];
+
+  const orderValues = Object.values(snapshot.orders || {});
+  for (let i = 0; i < orderValues.length; i += 1) {
+    const row = orderValues[i];
+    if (row && row.trader === walletNorm) {
+      const side = String(row.side || '').toUpperCase();
+      const symbol = String(row.symbol || '').toUpperCase();
+      const label = `ORDER ${side} ${symbol}`.trim();
+      const qtyText = `${formatTokenAmountCompact(row.qtyWei)} ${symbol || 'UNITS'}`;
+      rows.push({ timestampMs: Number(row.placedAtMs) || 0, txHash: row.placedTxHash, label, qtyText });
+    }
+  }
+  const fills = Array.isArray(snapshot.fills) ? snapshot.fills : [];
+  for (let i = 0; i < fills.length; i += 1) {
+    const row = fills[i];
+    if (!row) {
+      continue;
+    }
+    if (row.makerTrader === walletNorm || row.takerTrader === walletNorm) {
+      const isMaker = row.makerTrader === walletNorm;
+      const side = isMaker ? 'SELL' : 'BUY';
+      const symbol = String(row.symbol || '').toUpperCase();
+      const label = `FILL ${side} ${symbol}`.trim();
+      const qtyText = `${formatTokenAmountCompact(row.qtyWei)} ${symbol || 'UNITS'}`;
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label, qtyText });
+    }
+  }
+  const cancellations = Array.isArray(snapshot.cancellations) ? snapshot.cancellations : [];
+  for (let i = 0; i < cancellations.length; i += 1) {
+    const row = cancellations[i];
+    if (row && row.trader === walletNorm) {
+      const qtyText = `${formatTokenAmountCompact(row.refundWei)} TTOKEN`;
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label: 'CANCEL ORDER', qtyText });
+    }
+  }
+  const cashflows = Array.isArray(snapshot.cashflows) ? snapshot.cashflows : [];
+  for (let i = 0; i < cashflows.length; i += 1) {
+    const row = cashflows[i];
+    if (row && row.wallet === walletNorm) {
+      const direction = String(row.direction || '').toUpperCase();
+      const symbol = String(row.assetSymbol || row.assetType || 'TOKEN').toUpperCase();
+      const reason = String(row.reason || '').toUpperCase();
+      const label = `CASHFLOW ${direction} ${reason}`.trim();
+      const qtyText = `${formatTokenAmountCompact(row.amountWei)} ${symbol}`;
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label, qtyText });
+    }
+  }
+  const transfers = Array.isArray(snapshot.transfers) ? snapshot.transfers : [];
+  for (let i = 0; i < transfers.length; i += 1) {
+    const row = transfers[i];
+    if (!row) {
+      continue;
+    }
+    if (row.from === walletNorm || row.to === walletNorm) {
+      const direction = row.to === walletNorm ? 'IN' : 'OUT';
+      const symbol = String(row.symbol || 'TOKEN').toUpperCase();
+      const label = `TRANSFER ${direction} ${symbol}`.trim();
+      const qtyText = `${formatTokenAmountCompact(row.amountWei)} ${symbol}`;
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label, qtyText });
+    }
+  }
+  const leveragedEvents = Array.isArray(snapshot.leveragedEvents) ? snapshot.leveragedEvents : [];
+  for (let i = 0; i < leveragedEvents.length; i += 1) {
+    const row = leveragedEvents[i];
+    if (row && row.wallet === walletNorm) {
+      const baseSymbol = String(row.baseSymbol || '').toUpperCase();
+      const leverage = Number(row.leverage);
+      const productSymbol = (baseSymbol && Number.isFinite(leverage) && leverage > 0)
+        ? `${baseSymbol}${leverage}L`
+        : 'LEVERAGE';
+      let label = String(row.kind || 'LEVERAGE');
+      let qtyText = '-';
+      if (row.kind === 'LEVERAGE_MINT') {
+        label = `LEVERAGE MINT ${productSymbol}`;
+        qtyText = `${formatTokenAmountCompact(row.productQtyWei)} ${productSymbol}`;
+      } else if (row.kind === 'LEVERAGE_UNWIND') {
+        label = `LEVERAGE UNWIND ${productSymbol}`;
+        qtyText = `${formatTokenAmountCompact(row.productQtyWei)} ${productSymbol}`;
+      } else if (row.kind === 'LEVERAGE_BURN') {
+        label = `LEVERAGE BURN ${productSymbol}`;
+        qtyText = `${formatTokenAmountCompact(row.productQtyWei)} ${productSymbol}`;
+      }
+      rows.push({ timestampMs: Number(row.timestampMs) || 0, txHash: row.txHash, label, qtyText });
+    }
+  }
+
+  rows.sort((a, b) => b.timestampMs - a.timestampMs);
+  for (let i = 0; i < rows.length && rowsOut.length < limit; i += 1) {
+    pushRow(rows[i].txHash, rows[i].label, rows[i].timestampMs, rows[i].qtyText);
+  }
+  return rowsOut;
+}
+
+async function buildWalletGasRowsFromIndexer(wallet, maxCount) {
+  await Promise.race([
+    ensureIndexerSynced(),
+    new Promise((resolve) => setTimeout(resolve, 2500)),
+  ]);
+  const snapshot = readIndexerSnapshot();
+  const txRows = collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount);
+  const receipts = await mapWithConcurrency(txRows, 4, async (row) => {
+    const data = await readReceiptGasData(row.txHash);
+    const txName = row.label || 'TX';
+    return {
+      txHash: row.txHash,
+      txName,
+      qtyText: row.qtyText || '-',
+      from: normalizeAddress(data.from),
+      gasUsed: data.gasUsed,
+      costWei: data.costWei,
+    };
+  });
+  const walletNorm = normalizeAddress(wallet);
+  const rows = [];
+  for (let i = 0; i < receipts.length; i += 1) {
+    const row = receipts[i];
+    if (!row || row.from !== walletNorm) {
+      continue;
+    }
+    rows.push({
+      txName: row.txName,
+      txHash: row.txHash,
+      qtyText: row.qtyText || '-',
+      gasUsed: row.gasUsed.toString(),
+      effectiveGasPrice: '0',
+      costWei: row.costWei.toString(),
+      costEth: toEthString(row.costWei),
+      baselineGasUsed: '0',
+      deltaPct: null,
+      status: 'OK',
+      skipReason: '',
+    });
+  }
+  return rows;
 }
 
 function ensureIndexerDir() {
@@ -291,6 +1224,22 @@ async function ensureOnchainPriceForSymbol(symbolRaw) {
     return { ok: false, error: 'pricefeed not deployed' };
   }
 
+  try {
+    const readData = priceFeedInterface.encodeFunctionData('getPrice', [symbol]);
+    const readResult = await hardhatRpc('eth_call', [{ to: priceFeedAddress, data: readData }, 'latest']);
+    const [priceCentsRaw] = priceFeedInterface.decodeFunctionResult('getPrice', readResult);
+    const existingPrice = Number(priceCentsRaw);
+    if (existingPrice > 0) {
+      const freshData = priceFeedInterface.encodeFunctionData('isFresh', [symbol]);
+      const freshResult = await hardhatRpc('eth_call', [{ to: priceFeedAddress, data: freshData }, 'latest']);
+      const [isFresh] = priceFeedInterface.decodeFunctionResult('isFresh', freshResult);
+      if (isFresh) {
+        return { ok: true, priceCents: existingPrice };
+      }
+    }
+  } catch {
+  }
+
   let fetchedPrice = 0;
   try {
     const quote = await fetchQuote(symbol);
@@ -325,6 +1274,15 @@ async function ensureOnchainPriceForSymbol(symbolRaw) {
             fetchedPrice = candlePrice;
           }
         }
+      }
+    } catch {
+    }
+  }
+  if (!(fetchedPrice > 0)) {
+    try {
+      const fmpPrice = await fetchFmpSpotPrice(symbol);
+      if (fmpPrice > 0) {
+        fetchedPrice = fmpPrice;
       }
     } catch {
     }
@@ -388,10 +1346,803 @@ async function setOnchainPriceForSymbol(symbolRaw, priceCentsRaw) {
       to: priceFeedAddress,
       data: writeData,
     }]);
-    await waitForReceipt(txHash);
+    const receipt = await waitForReceipt(txHash);
+    const statusInt = parseRpcInt(receipt.status);
+    if (statusInt === 0) {
+      return { ok: false, error: `price update reverted for ${symbol}` };
+    }
     return { ok: true, priceCents };
   } catch {
     return { ok: false, error: `cannot update onchain price for ${symbol}` };
+  }
+}
+
+function toBigIntSafe(value) {
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
+}
+
+function toEthString(weiValue) {
+  try {
+    return ethers.formatEther(weiValue);
+  } catch {
+    return '0';
+  }
+}
+
+function calcDeltaPct(gasUsed, baselineGasUsed) {
+  const current = Number(gasUsed);
+  const baseline = Number(baselineGasUsed);
+  if (!(baseline > 0)) {
+    return null;
+  }
+  return ((current - baseline) / baseline) * 100;
+}
+
+function getGasStatus(deltaPct) {
+  let missingDelta = false;
+  if (!Number.isFinite(deltaPct)) {
+    missingDelta = true;
+  }
+  if (missingDelta) {
+    return 'OK';
+  }
+  if (deltaPct > GAS_WARN_THRESHOLD_PCT) {
+    return 'WARN';
+  }
+  return 'OK';
+}
+
+function toUserErrorMessage(messageRaw) {
+  let message = '';
+  if (messageRaw) {
+    message = String(messageRaw);
+  }
+  if (message.includes('leveragedrouter: price unavailable')) {
+    return 'Base price is not available yet please wait for oracle update';
+  }
+  let matchesInsufficientBalance = false;
+  if (message.includes('0xe450d38c')) {
+    matchesInsufficientBalance = true;
+  }
+  if (message.includes('ERC20InsufficientBalance')) {
+    matchesInsufficientBalance = true;
+  }
+  if (matchesInsufficientBalance) {
+    return 'Insufficient token balance for this transaction';
+  }
+  let matchesInsufficientAllowance = false;
+  if (message.includes('0xfb8f41b2')) {
+    matchesInsufficientAllowance = true;
+  }
+  if (message.includes('ERC20InsufficientAllowance')) {
+    matchesInsufficientAllowance = true;
+  }
+  if (matchesInsufficientAllowance) {
+    return 'Token allowance is not enough please approve again';
+  }
+  if (message.includes('award: epoch not ended')) {
+    return 'Award claim is not available until the current epoch ends';
+  }
+  if (message.includes('product not found')) {
+    return 'Selected leveraged product does not exist';
+  }
+  return message;
+}
+
+async function sendMeasuredTx(input) {
+  const txHash = await hardhatRpc('eth_sendTransaction', [input.tx]);
+  const receipt = await waitForReceipt(txHash, 60);
+  const gasUsed = toBigIntSafe(receipt.gasUsed);
+  let effectiveGasPrice = 0n;
+  if (receipt.effectiveGasPrice) {
+    effectiveGasPrice = toBigIntSafe(receipt.effectiveGasPrice);
+  } else {
+    const latest = await hardhatRpc('eth_gasPrice', []);
+    effectiveGasPrice = toBigIntSafe(latest);
+  }
+  const costWei = gasUsed * effectiveGasPrice;
+  return {
+    txHash,
+    gasUsed,
+    effectiveGasPrice,
+    costWei,
+    receipt,
+  };
+}
+
+async function runGasPackOnce(suiteRaw) {
+  let suiteText = 'core';
+  if (suiteRaw) {
+    suiteText = String(suiteRaw);
+  }
+  const suite = suiteText.toLowerCase();
+  const startedAtMs = Date.now();
+  const deployments = loadDeployments();
+  const accounts = await hardhatRpc('eth_accounts', []);
+  let invalidAccountsInput = false;
+  if (!Array.isArray(accounts)) {
+    invalidAccountsInput = true;
+  }
+  if (accounts.length < 2) {
+    invalidAccountsInput = true;
+  }
+  if (invalidAccountsInput) {
+    throw new Error('need at least 2 local accounts');
+  }
+  const admin = accounts[0];
+  const traderA = accounts[0];
+  const traderB = accounts[1];
+
+  const registryAddress = normalizeAddress(deployments.listingsRegistry);
+  const orderBookAddress = normalizeAddress(deployments.orderBookDex);
+  const ttokenAddress = normalizeAddress(getTTokenAddressFromDeployments());
+  const dividendsAddress = normalizeAddress(deployments.dividends);
+  const merkleDividendsAddress = normalizeAddress(deployments.dividendsMerkle);
+  const leveragedFactoryAddress = normalizeAddress(deployments.leveragedTokenFactory);
+  const leveragedRouterAddress = normalizeAddress(deployments.leveragedProductRouter);
+  const awardAddress = normalizeAddress(deployments.award);
+
+  let missingGasPackCoreContract = false;
+  if (!registryAddress) {
+    missingGasPackCoreContract = true;
+  }
+  if (!orderBookAddress) {
+    missingGasPackCoreContract = true;
+  }
+  if (!ttokenAddress) {
+    missingGasPackCoreContract = true;
+  }
+  if (missingGasPackCoreContract) {
+    throw new Error('missing deployed contracts for gas pack');
+  }
+
+  const allSymbolsData = registryListInterface.encodeFunctionData('getAllSymbols', []);
+  const allSymbolsResult = await hardhatRpc('eth_call', [{ to: registryAddress, data: allSymbolsData }, 'latest']);
+  const [allSymbols] = registryListInterface.decodeFunctionResult('getAllSymbols', allSymbolsResult);
+  let hasNoSymbols = false;
+  if (!Array.isArray(allSymbols)) {
+    hasNoSymbols = true;
+  }
+  if (allSymbols.length === 0) {
+    hasNoSymbols = true;
+  }
+  if (hasNoSymbols) {
+    throw new Error('no listed symbols for gas pack');
+  }
+  const symbol = allSymbols[0];
+  const listingData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
+  const listingResult = await hardhatRpc('eth_call', [{ to: registryAddress, data: listingData }, 'latest']);
+  const [equityTokenAddressRaw] = listingsRegistryInterface.decodeFunctionResult('getListing', listingResult);
+  const equityTokenAddress = normalizeAddress(equityTokenAddressRaw);
+  let missingEquityToken = false;
+  if (!equityTokenAddress) {
+    missingEquityToken = true;
+  }
+  if (equityTokenAddress === ethers.ZeroAddress) {
+    missingEquityToken = true;
+  }
+  if (missingEquityToken) {
+    throw new Error(`listing missing token address for ${symbol}`);
+  }
+
+  const now = Date.now();
+  const tempSymbol = `G${String(now).slice(-5)}`;
+  const oneShareWei = ethers.parseUnits('1', 18);
+  const hundredSharesWei = ethers.parseUnits('100', 18);
+  const oneTTokenWei = ethers.parseUnits('1', 18);
+  const hundredTTokenWei = ethers.parseUnits('100', 18);
+
+  const rows = [];
+  function pushRow(name, measured, extra = {}) {
+    let baselineGasUsed = 0;
+    if (gasRuntimeState.baseline[name]) {
+      baselineGasUsed = gasRuntimeState.baseline[name];
+    }
+    const deltaPct = calcDeltaPct(measured.gasUsed, baselineGasUsed);
+    rows.push({
+      txName: name,
+      gasUsed: measured.gasUsed.toString(),
+      effectiveGasPrice: measured.effectiveGasPrice.toString(),
+      costWei: measured.costWei.toString(),
+      costEth: toEthString(measured.costWei),
+      baselineGasUsed: String(baselineGasUsed),
+      deltaPct,
+      status: getGasStatus(deltaPct),
+      txHash: measured.txHash,
+      ...extra,
+    });
+  }
+
+  function pushSkipped(name, reason) {
+    let baselineGasUsed = 0;
+    if (gasRuntimeState.baseline[name]) {
+      baselineGasUsed = gasRuntimeState.baseline[name];
+    }
+    rows.push({
+      txName: name,
+      gasUsed: '0',
+      effectiveGasPrice: '0',
+      costWei: '0',
+      costEth: '0',
+      baselineGasUsed: String(baselineGasUsed),
+      deltaPct: null,
+      status: 'SKIP',
+      skipReason: reason,
+    });
+  }
+
+  const snapshotId = await hardhatRpc('evm_snapshot', []);
+  try {
+    let canRunBuySide = true;
+    let canRunSellSide = true;
+
+    try {
+      const buyerBalData = equityTokenInterface.encodeFunctionData('balanceOf', [traderA]);
+      const buyerBalResult = await hardhatRpc('eth_call', [{ to: ttokenAddress, data: buyerBalData }, 'latest']);
+      const [buyerBalanceRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', buyerBalResult);
+      const buyerBalance = toBigIntSafe(buyerBalanceRaw);
+      const neededBuyerTToken = ethers.parseUnits('500', 18);
+      if (buyerBalance < neededBuyerTToken) {
+        await sendMeasuredTx({
+          tx: {
+            from: admin,
+            to: ttokenAddress,
+            data: equityTokenInterface.encodeFunctionData('mint', [traderA, neededBuyerTToken - buyerBalance]),
+          },
+        });
+      }
+    } catch (err) {
+      canRunBuySide = false;
+    }
+
+    try {
+      const sellerBalData = equityTokenInterface.encodeFunctionData('balanceOf', [traderB]);
+      const sellerBalResult = await hardhatRpc('eth_call', [{ to: equityTokenAddress, data: sellerBalData }, 'latest']);
+      const [sellerBalanceRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', sellerBalResult);
+      const sellerBalance = toBigIntSafe(sellerBalanceRaw);
+      const neededSellerQty = hundredSharesWei;
+      if (sellerBalance < neededSellerQty) {
+        const mintShares = await sendMeasuredTx({
+          tx: {
+            from: admin,
+            to: equityTokenAddress,
+            data: equityTokenInterface.encodeFunctionData('mint', [traderB, neededSellerQty - sellerBalance]),
+          },
+        });
+        pushRow('mint_equity_for_seller_setup', mintShares);
+      } else {
+        pushSkipped('mint_equity_for_seller_setup', 'already funded');
+      }
+    } catch (err) {
+      canRunSellSide = false;
+      let reason = 'cannot fund seller equity';
+      if (err.message) {
+        reason = err.message;
+      }
+      pushSkipped('mint_equity_for_seller_setup', reason);
+    }
+
+    if (canRunBuySide) {
+      try {
+        const approveBuyer = await sendMeasuredTx({
+          tx: {
+            from: traderA,
+            to: ttokenAddress,
+            data: equityTokenInterface.encodeFunctionData('approve', [orderBookAddress, ethers.MaxUint256]),
+          },
+        });
+        pushRow('approve_ttoken_for_dex', approveBuyer);
+      } catch (err) {
+        canRunBuySide = false;
+        let reason = 'cannot approve ttoken';
+        if (err.message) {
+          reason = err.message;
+        }
+        pushSkipped('approve_ttoken_for_dex', reason);
+      }
+    } else {
+      pushSkipped('approve_ttoken_for_dex', 'buyer setup failed');
+    }
+
+    if (canRunSellSide) {
+      try {
+        const approveSeller = await sendMeasuredTx({
+          tx: {
+            from: traderB,
+            to: equityTokenAddress,
+            data: equityTokenInterface.encodeFunctionData('approve', [orderBookAddress, ethers.MaxUint256]),
+          },
+        });
+        pushRow('approve_equity_for_dex', approveSeller);
+      } catch (err) {
+        canRunSellSide = false;
+        let reason = 'cannot approve equity';
+        if (err.message) {
+          reason = err.message;
+        }
+        pushSkipped('approve_equity_for_dex', reason);
+      }
+    } else {
+      pushSkipped('approve_equity_for_dex', 'seller setup failed');
+    }
+
+    let runCore = false;
+    if (suite === 'core') {
+      runCore = true;
+    }
+    if (suite === 'all') {
+      runCore = true;
+    }
+    if (runCore) {
+      const listSymbol = await sendMeasuredTx({
+        tx: {
+          from: admin,
+          to: normalizeAddress(deployments.equityTokenFactory),
+          data: equityFactoryInterface.encodeFunctionData('createEquityToken', [tempSymbol, `Gas ${tempSymbol}`]),
+        },
+      });
+      pushRow('list_symbol', listSymbol, { symbol: tempSymbol });
+
+      let placeSell = null;
+      if (canRunBuySide) {
+        try {
+          const placeBuy = await sendMeasuredTx({
+            tx: {
+              from: traderA,
+              to: orderBookAddress,
+              data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 0, 100n, hundredSharesWei]),
+            },
+          });
+          pushRow('place_buy_limit', placeBuy, { symbol });
+        } catch (err) {
+          canRunBuySide = false;
+          let reason = 'place buy failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('place_buy_limit', reason);
+        }
+      } else {
+        pushSkipped('place_buy_limit', 'buyer setup failed');
+      }
+
+      if (canRunSellSide) {
+        try {
+          placeSell = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: orderBookAddress,
+              data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 1, 120n, hundredSharesWei]),
+            },
+          });
+          pushRow('place_sell_limit', placeSell, { symbol });
+        } catch (err) {
+          canRunSellSide = false;
+          let reason = 'place sell failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('place_sell_limit', reason);
+        }
+      } else {
+        pushSkipped('place_sell_limit', 'seller setup failed');
+      }
+
+      if (placeSell) {
+        const placedIds = [];
+        for (let i = 0; i < placeSell.receipt.logs.length; i += 1) {
+          const log = placeSell.receipt.logs[i];
+          try {
+            const parsed = orderBookInterface.parseLog(log);
+            if (parsed && parsed.name === 'OrderPlaced') {
+              placedIds.push(toBigIntSafe(parsed.args.id));
+            }
+          } catch {
+          }
+        }
+        if (placedIds.length > 0) {
+          const cancel = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: orderBookAddress,
+              data: orderBookInterface.encodeFunctionData('cancelOrder', [placedIds[0]]),
+            },
+          });
+          pushRow('cancel_order', cancel, { symbol });
+        } else {
+          pushSkipped('cancel_order', 'could not parse order id');
+        }
+      } else {
+        pushSkipped('cancel_order', 'sell order not available for cancel');
+      }
+
+      if (dividendsAddress) {
+        try {
+          const declareSnapshot = await sendMeasuredTx({
+            tx: {
+              from: admin,
+              to: dividendsAddress,
+              data: dividendsInterface.encodeFunctionData('declareDividendPerShare', [equityTokenAddress, oneTTokenWei]),
+            },
+          });
+          pushRow('snapshot_dividend_declare', declareSnapshot, { symbol });
+
+          const epochCountCall = dividendsInterface.encodeFunctionData('epochCount', [equityTokenAddress]);
+          const epochCountResult = await hardhatRpc('eth_call', [{ to: dividendsAddress, data: epochCountCall }, 'latest']);
+          const [epochCount] = dividendsInterface.decodeFunctionResult('epochCount', epochCountResult);
+          const epochId = toBigIntSafe(epochCount);
+          const claimSnapshot = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: dividendsAddress,
+              data: dividendsInterface.encodeFunctionData('claimDividend', [equityTokenAddress, epochId]),
+            },
+          });
+          pushRow('snapshot_dividend_claim', claimSnapshot, { symbol, epochId: epochId.toString() });
+        } catch (err) {
+          let reason = 'failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('snapshot_dividend_declare', reason);
+          pushSkipped('snapshot_dividend_claim', 'declare/claim unavailable');
+        }
+      } else {
+        pushSkipped('snapshot_dividend_declare', 'dividends not deployed');
+        pushSkipped('snapshot_dividend_claim', 'dividends not deployed');
+      }
+
+      if (merkleDividendsAddress) {
+        try {
+          const merkleCountCall = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+          const merkleCountResult = await hardhatRpc('eth_call', [{ to: merkleDividendsAddress, data: merkleCountCall }, 'latest']);
+          const [beforeCount] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', merkleCountResult);
+          const newEpochId = toBigIntSafe(beforeCount) + 1n;
+          const leafAmount = ethers.parseUnits('3', 18);
+          const leafIndex = 0n;
+          const leaf = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+            ['uint256', 'address', 'address', 'uint256', 'uint256'],
+            [newEpochId, equityTokenAddress, traderB, leafAmount, leafIndex],
+          ));
+          const contentHash = ethers.keccak256(ethers.toUtf8Bytes(`gas-pack-${Date.now()}`));
+          const declareMerkle = await sendMeasuredTx({
+            tx: {
+              from: admin,
+              to: merkleDividendsAddress,
+              data: dividendsMerkleInterface.encodeFunctionData('declareMerkleDividend', [equityTokenAddress, leaf, leafAmount, contentHash, '']),
+            },
+          });
+          pushRow('merkle_dividend_declare', declareMerkle, { symbol, epochId: newEpochId.toString() });
+
+          const claimMerkle = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: merkleDividendsAddress,
+              data: dividendsMerkleInterface.encodeFunctionData('claim', [newEpochId, traderB, leafAmount, leafIndex, []]),
+            },
+          });
+          pushRow('merkle_dividend_claim', claimMerkle, { symbol, epochId: newEpochId.toString() });
+        } catch (err) {
+          let reason = 'failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('merkle_dividend_declare', reason);
+          pushSkipped('merkle_dividend_claim', 'declare/claim unavailable');
+        }
+      } else {
+        pushSkipped('merkle_dividend_declare', 'merkle dividends not deployed');
+        pushSkipped('merkle_dividend_claim', 'merkle dividends not deployed');
+      }
+
+      if (leveragedFactoryAddress && leveragedRouterAddress) {
+        try {
+          const productCountCall = leveragedFactoryInterface.encodeFunctionData('productCount', []);
+          const productCountResult = await hardhatRpc('eth_call', [{ to: leveragedFactoryAddress, data: productCountCall }, 'latest']);
+          const [productCount] = leveragedFactoryInterface.decodeFunctionResult('productCount', productCountResult);
+          const productCountNumber = Number(productCount);
+          if (productCountNumber > 0) {
+            const productAtCall = leveragedFactoryInterface.encodeFunctionData('getProductAt', [0]);
+            const productAtResult = await hardhatRpc('eth_call', [{ to: leveragedFactoryAddress, data: productAtCall }, 'latest']);
+            const [productTuple] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', productAtResult);
+            const productToken = normalizeAddress(productTuple.token);
+            let leveragedBaseSymbolRaw = '';
+            if (productTuple.baseSymbol) {
+              leveragedBaseSymbolRaw = String(productTuple.baseSymbol);
+            }
+            const leveragedBaseSymbol = leveragedBaseSymbolRaw.toUpperCase();
+            if (leveragedBaseSymbol) {
+              const ensurePriceResult = await ensureOnchainPriceForSymbol(leveragedBaseSymbol);
+              if (!ensurePriceResult.ok) {
+                let reason = `price unavailable for ${leveragedBaseSymbol}`;
+                if (ensurePriceResult.error) {
+                  reason = ensurePriceResult.error;
+                }
+                throw new Error(reason);
+              }
+            }
+
+            const approveRouter = await sendMeasuredTx({
+              tx: {
+                from: traderA,
+                to: ttokenAddress,
+                data: equityTokenInterface.encodeFunctionData('approve', [leveragedRouterAddress, ethers.MaxUint256]),
+              },
+            });
+            pushRow('approve_ttoken_for_leveraged', approveRouter);
+
+            const mintLeveraged = await sendMeasuredTx({
+              tx: {
+                from: traderA,
+                to: leveragedRouterAddress,
+                data: leveragedRouterInterface.encodeFunctionData('mintLong', [productToken, hundredTTokenWei, 0n]),
+              },
+            });
+            pushRow('leveraged_mint', mintLeveraged);
+
+            let mintedOut = 0n;
+            for (let i = 0; i < mintLeveraged.receipt.logs.length; i += 1) {
+              const log = mintLeveraged.receipt.logs[i];
+              try {
+                const parsed = leveragedRouterInterface.parseLog(log);
+                if (parsed && parsed.name === 'LeveragedMinted') {
+                  mintedOut = toBigIntSafe(parsed.args.productOutWei);
+                }
+              } catch {
+              }
+            }
+            if (mintedOut > 0n) {
+              const unwindLeveraged = await sendMeasuredTx({
+                tx: {
+                  from: traderA,
+                  to: leveragedRouterAddress,
+                  data: leveragedRouterInterface.encodeFunctionData('unwindLong', [productToken, mintedOut, 0n]),
+                },
+              });
+              pushRow('leveraged_unwind', unwindLeveraged);
+            } else {
+              pushSkipped('leveraged_unwind', 'minted amount missing from logs');
+            }
+          } else {
+            pushSkipped('leveraged_mint', 'no leveraged products');
+            pushSkipped('leveraged_unwind', 'no leveraged products');
+          }
+        } catch (err) {
+          let reason = 'failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('leveraged_mint', reason);
+          pushSkipped('leveraged_unwind', 'mint/unwind unavailable');
+        }
+      } else {
+        pushSkipped('leveraged_mint', 'leveraged contracts not deployed');
+        pushSkipped('leveraged_unwind', 'leveraged contracts not deployed');
+      }
+
+    }
+
+    let runStress = false;
+    if (suite === 'stress') {
+      runStress = true;
+    }
+    if (suite === 'all') {
+      runStress = true;
+    }
+    if (runStress) {
+      let deepGasUsed = 0n;
+      let deepCostWei = 0n;
+      let deepTxCount = 0;
+      if (canRunBuySide && canRunSellSide) {
+        try {
+          for (let i = 0; i < 6; i += 1) {
+            const price = BigInt(300 + i);
+            const buyTx = await sendMeasuredTx({
+              tx: {
+                from: traderA,
+                to: orderBookAddress,
+                data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 0, price, oneShareWei]),
+              },
+            });
+            deepGasUsed += buyTx.gasUsed;
+            deepCostWei += buyTx.costWei;
+            deepTxCount += 1;
+          }
+          const stressSell = await sendMeasuredTx({
+            tx: {
+              from: traderB,
+              to: orderBookAddress,
+              data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 1, 100n, ethers.parseUnits('6', 18)]),
+            },
+          });
+          deepGasUsed += stressSell.gasUsed;
+          deepCostWei += stressSell.costWei;
+          deepTxCount += 1;
+          const stressMeasured = {
+            txHash: stressSell.txHash,
+            gasUsed: deepGasUsed,
+            effectiveGasPrice: (() => {
+              let effectiveGasPrice = 0n;
+              if (deepGasUsed > 0n) {
+                effectiveGasPrice = deepCostWei / deepGasUsed;
+              }
+              return effectiveGasPrice;
+            })(),
+            costWei: deepCostWei,
+          };
+          pushRow('stress_deep_orderbook_match_loop', stressMeasured, { txCount: deepTxCount });
+        } catch (err) {
+          let reason = 'stress orderbook run failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('stress_deep_orderbook_match_loop', reason);
+        }
+      } else {
+        pushSkipped('stress_deep_orderbook_match_loop', 'buyer or seller setup failed');
+      }
+
+      if (merkleDividendsAddress) {
+        try {
+          const claimants = [accounts[0], accounts[1], accounts[2], accounts[3]];
+          const leafAmount = ethers.parseUnits('2', 18);
+          let claimGas = 0n;
+          let claimCost = 0n;
+          let declareGas = 0n;
+          let declareCost = 0n;
+          let lastTxHash = '';
+          for (let i = 0; i < claimants.length; i += 1) {
+            const merkleCountCall = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+            const merkleCountResult = await hardhatRpc('eth_call', [{ to: merkleDividendsAddress, data: merkleCountCall }, 'latest']);
+            const [beforeCount] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', merkleCountResult);
+            const epochId = toBigIntSafe(beforeCount) + 1n;
+            const leafIndex = 0n;
+            const leaf = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+              ['uint256', 'address', 'address', 'uint256', 'uint256'],
+              [epochId, equityTokenAddress, claimants[i], leafAmount, leafIndex],
+            ));
+            const declare = await sendMeasuredTx({
+              tx: {
+                from: admin,
+                to: merkleDividendsAddress,
+                data: dividendsMerkleInterface.encodeFunctionData('declareMerkleDividend', [equityTokenAddress, leaf, leafAmount, ethers.keccak256(ethers.toUtf8Bytes(`gas-stress-merkle-${i}`)), '']),
+              },
+            });
+            declareGas += declare.gasUsed;
+            declareCost += declare.costWei;
+            lastTxHash = declare.txHash;
+            const proof = [];
+            const claimTx = await sendMeasuredTx({
+              tx: {
+                from: claimants[i],
+                to: merkleDividendsAddress,
+                data: dividendsMerkleInterface.encodeFunctionData('claim', [epochId, claimants[i], leafAmount, leafIndex, proof]),
+              },
+            });
+            claimGas += claimTx.gasUsed;
+            claimCost += claimTx.costWei;
+            lastTxHash = claimTx.txHash;
+          }
+          const summary = {
+            txHash: lastTxHash,
+            gasUsed: claimGas + declareGas,
+            effectiveGasPrice: (() => {
+              const totalGas = claimGas + declareGas;
+              const totalCost = claimCost + declareCost;
+              let effectiveGasPrice = 0n;
+              if (totalGas > 0n) {
+                effectiveGasPrice = totalCost / totalGas;
+              }
+              return effectiveGasPrice;
+            })(),
+            costWei: claimCost + declareCost,
+          };
+          pushRow('stress_merkle_claim_sequence', summary, { claimants: claimants.length });
+        } catch (err) {
+          let reason = 'failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('stress_merkle_claim_sequence', reason);
+        }
+      } else {
+        pushSkipped('stress_merkle_claim_sequence', 'merkle contract not deployed');
+      }
+
+      let awardStressGas = 0n;
+      let awardStressCost = 0n;
+      let awardStressTxCount = 0;
+      if (canRunBuySide && canRunSellSide) {
+        try {
+          for (let i = 0; i < 5; i += 1) {
+            const buyTx = await sendMeasuredTx({
+              tx: {
+                from: traderA,
+                to: orderBookAddress,
+                data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 0, 100n, oneShareWei]),
+              },
+            });
+            awardStressGas += buyTx.gasUsed;
+            awardStressCost += buyTx.costWei;
+            awardStressTxCount += 1;
+            const sellTx = await sendMeasuredTx({
+              tx: {
+                from: traderB,
+                to: orderBookAddress,
+                data: orderBookInterface.encodeFunctionData('placeLimitOrder', [equityTokenAddress, 1, 100n, oneShareWei]),
+              },
+            });
+            awardStressGas += sellTx.gasUsed;
+            awardStressCost += sellTx.costWei;
+            awardStressTxCount += 1;
+          }
+          pushRow('stress_award_high_fill_density', {
+            txHash: '',
+            gasUsed: awardStressGas,
+            effectiveGasPrice: (() => {
+              let effectiveGasPrice = 0n;
+              if (awardStressGas > 0n) {
+                effectiveGasPrice = awardStressCost / awardStressGas;
+              }
+              return effectiveGasPrice;
+            })(),
+            costWei: awardStressCost,
+          }, { txCount: awardStressTxCount });
+        } catch (err) {
+          let reason = 'stress award run failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          pushSkipped('stress_award_high_fill_density', reason);
+        }
+      } else {
+        pushSkipped('stress_award_high_fill_density', 'buyer or seller setup failed');
+      }
+    }
+  } finally {
+    await hardhatRpc('evm_revert', [snapshotId]);
+  }
+
+  const finishedAtMs = Date.now();
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const chainIdHex = await hardhatRpc('eth_chainId', []);
+  const warnCount = rows.filter((one) => one.status === 'WARN').length;
+  const skipCount = rows.filter((one) => one.status === 'SKIP').length;
+  const report = {
+    suite,
+    startedAtMs,
+    finishedAtMs,
+    durationMs: finishedAtMs - startedAtMs,
+    chainId: parseRpcInt(chainIdHex),
+    latestBlock: parseRpcInt(latestBlockHex),
+    thresholdPct: GAS_WARN_THRESHOLD_PCT,
+    warnCount,
+    skipCount,
+    totalRows: rows.length,
+    pollMs: GAS_PAGE_POLL_MS,
+    rows,
+  };
+  return report;
+}
+
+async function runGasPackGuarded(suite) {
+  if (gasRunInFlight) {
+    return gasRunInFlight;
+  }
+  gasRunInFlight = (async function () {
+    const report = await runGasPackOnce(suite);
+    gasRuntimeState.lastRunAtMs = Date.now();
+    gasRuntimeState.latest = report;
+    return report;
+  })();
+  try {
+    return await gasRunInFlight;
+  } finally {
+    gasRunInFlight = null;
   }
 }
 function addCashflow(cashflows, input) {
@@ -407,6 +2158,73 @@ function addCashflow(cashflows, input) {
     blockNumber: input.blockNumber,
     timestampMs: input.timestampMs,
   });
+}
+
+async function getBlockTimestampMs(blockNumberRaw) {
+  let blockTag = blockNumberRaw;
+  if (typeof blockTag === 'number') {
+    blockTag = ethers.toQuantity(blockTag);
+  }
+  const block = await hardhatRpc('eth_getBlockByNumber', [blockTag, false]);
+  if (!block || !block.timestamp) {
+    return Date.now();
+  }
+  return Number(block.timestamp) * 1000;
+}
+
+function appendManualMintActivity(input) {
+  ensureIndexerDir();
+  const cashflows = readJsonFile(INDEXER_CASHFLOWS_FILE, []);
+  const transfers = readJsonFile(INDEXER_TRANSFERS_FILE, []);
+  const transferId = `${input.txHash}:manual-mint-transfer:${input.tokenAddress}:${input.wallet}`;
+  let hasTransfer = false;
+  for (let i = 0; i < transfers.length; i += 1) {
+    if (transfers[i].id === transferId) {
+      hasTransfer = true;
+      break;
+    }
+  }
+  if (!hasTransfer) {
+    transfers.push({
+      id: transferId,
+      tokenAddress: normalizeAddress(input.tokenAddress),
+      symbol: input.symbol,
+      from: ethers.ZeroAddress,
+      to: normalizeAddress(input.wallet),
+      amountWei: String(input.amountWei),
+      txHash: input.txHash,
+      blockNumber: Number(input.blockNumber),
+      logIndex: 0,
+      timestampMs: Number(input.timestampMs),
+    });
+  }
+
+  const reason = input.reason || 'MINT';
+  const cashflowId = `${input.txHash}:manual-cashflow:${normalizeAddress(input.wallet)}:${reason}`;
+  let hasCashflow = false;
+  for (let i = 0; i < cashflows.length; i += 1) {
+    if (cashflows[i].id === cashflowId) {
+      hasCashflow = true;
+      break;
+    }
+  }
+  if (!hasCashflow) {
+    cashflows.push({
+      id: cashflowId,
+      wallet: normalizeAddress(input.wallet),
+      assetType: input.assetType || 'TTOKEN',
+      assetSymbol: input.symbol,
+      direction: 'IN',
+      amountWei: String(input.amountWei),
+      reason,
+      txHash: input.txHash,
+      blockNumber: Number(input.blockNumber),
+      timestampMs: Number(input.timestampMs),
+    });
+  }
+
+  writeJsonFile(INDEXER_CASHFLOWS_FILE, cashflows);
+  writeJsonFile(INDEXER_TRANSFERS_FILE, transfers);
 }
 
 async function lookupSymbolByToken(registryAddr, tokenAddr) {
@@ -435,10 +2253,17 @@ async function ensureIndexerSynced() {
     const deployments = loadDeployments();
     const orderBookAddr = deployments.orderBookDex;
     const registryAddr = deployments.listingsRegistry;
-    if (!orderBookAddr || !registryAddr) {
+    let missingAddresses = false;
+    if (!orderBookAddr) {
+      missingAddresses = true;
+    }
+    if (!registryAddr) {
+      missingAddresses = true;
+    }
+    if (missingAddresses) {
       return {
         synced: false,
-        reason: 'missing deployments',
+        reason: '',
       };
     }
 
@@ -475,7 +2300,11 @@ async function ensureIndexerSynced() {
       writeJsonFile(INDEXER_LEVERAGED_FILE, leveragedEvents);
     }
 
-    const startBlock = Math.max(0, Number(state.lastIndexedBlock) + 1);
+    let startBlock = Math.max(0, Number(state.lastIndexedBlock) + 1);
+    if (Number(state.lastIndexedBlock) < 0) {
+      const lookbackStart = Math.max(0, latestBlock - INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS + 1);
+      startBlock = lookbackStart;
+    }
     if (startBlock > latestBlock) {
       state.latestKnownBlock = latestBlock;
       state.lastSyncAtMs = Date.now();
@@ -488,19 +2317,15 @@ async function ensureIndexerSynced() {
       };
     }
 
-    const fromHex = ethers.toQuantity(startBlock);
-    const toHex = ethers.toQuantity(latestBlock);
     const topics = [
       ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)'),
       ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)'),
       ethers.id('OrderCancelled(uint256,address,uint256)'),
     ];
-    const logs = await hardhatRpc('eth_getLogs', [{
-      fromBlock: fromHex,
-      toBlock: toHex,
+    const logs = await getLogsChunked({
       address: orderBookAddr,
       topics: [topics],
-    }]);
+    }, startBlock, latestBlock);
     logs.sort((a, b) => {
       const blockA = Number(a.blockNumber);
       const blockB = Number(b.blockNumber);
@@ -534,7 +2359,14 @@ async function ensureIndexerSynced() {
       const normalized = normalizeAddress(tokenAddr);
       const isMissing = !normalized;
       const isZero = normalized === ethers.ZeroAddress;
-      if (!(isMissing || isZero)) {
+      let includeToken = true;
+      if (isMissing) {
+        includeToken = false;
+      }
+      if (isZero) {
+        includeToken = false;
+      }
+      if (includeToken) {
         addresses.add(normalized);
         symbolByTokenCache.set(normalized, symbol);
       }
@@ -543,17 +2375,15 @@ async function ensureIndexerSynced() {
 
     let leveragedLogs = [];
     const leveragedRouterAddress = normalizeAddress(deployments.leveragedProductRouter);
-    if (leveragedRouterAddress) {
+    if (INDEXER_ENABLE_LEVERAGED && leveragedRouterAddress) {
       const leveragedTopics = [
         ethers.id('LeveragedMinted(address,address,string,uint8,uint256,uint256,uint256)'),
         ethers.id('LeveragedUnwound(address,address,string,uint8,uint256,uint256,uint256)'),
       ];
-      leveragedLogs = await hardhatRpc('eth_getLogs', [{
-        fromBlock: fromHex,
-        toBlock: toHex,
+      leveragedLogs = await getLogsChunked({
         address: leveragedRouterAddress,
         topics: [leveragedTopics],
-      }]);
+      }, startBlock, latestBlock);
       leveragedLogs.sort((a, b) => {
         const blockA = Number(a.blockNumber);
         const blockB = Number(b.blockNumber);
@@ -565,16 +2395,14 @@ async function ensureIndexerSynced() {
     }
 
     let transferLogs = [];
-    if (tokenAddresses.length > 0) {
+    if (INDEXER_ENABLE_TRANSFERS && tokenAddresses.length > 0) {
       const transferTopic = ethers.id('Transfer(address,address,uint256)');
       transferLogs = [];
       for (const token of tokenAddresses) {
-        const part = await hardhatRpc('eth_getLogs', [{
-          fromBlock: fromHex,
-          toBlock: toHex,
+        const part = await getLogsChunked({
           address: token,
           topics: [transferTopic],
-        }]);
+        }, startBlock, latestBlock);
         transferLogs.push(...part);
       }
       transferLogs.sort((a, b) => {
@@ -622,7 +2450,14 @@ async function ensureIndexerSynced() {
         if (cachedSymbol) {
           symbol = cachedSymbol;
         }
-        if (!symbol || symbol === '') {
+        let missingSymbol = false;
+        if (!symbol) {
+          missingSymbol = true;
+        }
+        if (symbol === '') {
+          missingSymbol = true;
+        }
+        if (missingSymbol) {
           symbol = await lookupSymbolByToken(registryAddr, tokenAddress);
           if (!symbol && deployments.ttoken && normalizeAddress(deployments.ttoken) === tokenAddress) {
             symbol = 'TTOKEN';
@@ -710,7 +2545,7 @@ async function ensureIndexerSynced() {
           makerOrder.active = false;
         }
         if (!makerOrder.active && makerOrder.remainingWei === '0') {
-          if (makerOrder.cancelledAtBlock !== null) {
+          if (makerOrder.cancelledAtBlock) {
             makerOrder.status = 'CANCELLED';
           } else {
             makerOrder.status = 'FILLED';
@@ -732,7 +2567,7 @@ async function ensureIndexerSynced() {
             takerOrder.active = false;
           }
           if (!takerOrder.active && takerOrder.remainingWei === '0') {
-            if (takerOrder.cancelledAtBlock !== null) {
+            if (takerOrder.cancelledAtBlock) {
               takerOrder.status = 'CANCELLED';
             } else {
               takerOrder.status = 'FILLED';
@@ -960,6 +2795,152 @@ function readIndexerSnapshot() {
   };
 }
 
+async function readReceiptGasData(txHashRaw) {
+  const txHash = String(txHashRaw);
+  if (!txHash) {
+    return {
+      from: '',
+      gasUsed: 0n,
+      costWei: 0n,
+    };
+  }
+  if (txReceiptGasCache.has(txHash)) {
+    const cached = txReceiptGasCache.get(txHash);
+    return {
+      from: String(cached.from),
+      gasUsed: BigInt(String(cached.gasUsed)),
+      costWei: BigInt(String(cached.costWei)),
+    };
+  }
+  const receipt = await hardhatRpc('eth_getTransactionReceipt', [txHash]);
+  if (!receipt) {
+    return {
+      from: '',
+      gasUsed: 0n,
+      costWei: 0n,
+    };
+  }
+  const from = normalizeAddress(receipt.from);
+  const gasUsed = toBigIntSafe(receipt.gasUsed);
+  let gasPrice = 0n;
+  if (receipt.effectiveGasPrice) {
+    gasPrice = toBigIntSafe(receipt.effectiveGasPrice);
+  }
+  if (gasPrice === 0n && receipt.gasPrice) {
+    gasPrice = toBigIntSafe(receipt.gasPrice);
+  }
+  if (gasPrice === 0n) {
+    try {
+      const tx = await hardhatRpc('eth_getTransactionByHash', [txHash]);
+      if (tx && tx.gasPrice) {
+        gasPrice = toBigIntSafe(tx.gasPrice);
+      }
+    } catch {
+      gasPrice = 0n;
+    }
+  }
+  const costWei = gasUsed * gasPrice;
+  txReceiptGasCache.set(txHash, {
+    from,
+    gasUsed: gasUsed.toString(),
+    costWei: costWei.toString(),
+  });
+  return {
+    from,
+    gasUsed,
+    costWei,
+  };
+}
+
+function collectWalletRelatedTxHashes(snapshot, wallet) {
+  const walletNorm = normalizeAddress(wallet);
+  const txHashes = new Set();
+  const orderIds = Object.keys(snapshot.orders);
+  for (let i = 0; i < orderIds.length; i += 1) {
+    const order = snapshot.orders[orderIds[i]];
+    const trader = normalizeAddress(order.trader);
+    if (trader === walletNorm) {
+      const txHash = String(order.placedTxHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  for (let i = 0; i < snapshot.cancellations.length; i += 1) {
+    const row = snapshot.cancellations[i];
+    const trader = normalizeAddress(row.trader);
+    if (trader === walletNorm) {
+      const txHash = String(row.txHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  for (let i = 0; i < snapshot.fills.length; i += 1) {
+    const row = snapshot.fills[i];
+    let include = false;
+    if (normalizeAddress(row.makerTrader) === walletNorm) {
+      include = true;
+    }
+    if (normalizeAddress(row.takerTrader) === walletNorm) {
+      include = true;
+    }
+    if (include) {
+      const txHash = String(row.txHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  for (let i = 0; i < snapshot.leveragedEvents.length; i += 1) {
+    const row = snapshot.leveragedEvents[i];
+    const eventWallet = normalizeAddress(row.wallet);
+    if (eventWallet === walletNorm) {
+      const txHash = String(row.txHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  for (let i = 0; i < snapshot.transfers.length; i += 1) {
+    const row = snapshot.transfers[i];
+    const to = normalizeAddress(row.to);
+    const from = normalizeAddress(row.from);
+    if (to === walletNorm || from === walletNorm) {
+      const txHash = String(row.txHash || '');
+      if (txHash) {
+        txHashes.add(txHash);
+      }
+    }
+  }
+  return Array.from(txHashes);
+}
+
+async function computeOverallGasForWallet(snapshot, wallet) {
+  const walletNorm = normalizeAddress(wallet);
+  const txHashes = collectWalletRelatedTxHashes(snapshot, walletNorm);
+  let totalGasUsed = 0n;
+  let totalCostWei = 0n;
+  for (let i = 0; i < txHashes.length; i += 1) {
+    const txHash = txHashes[i];
+    let receiptData = null;
+    try {
+      receiptData = await readReceiptGasData(txHash);
+    } catch {
+      receiptData = null;
+    }
+    if (receiptData && receiptData.from === walletNorm) {
+      totalGasUsed += receiptData.gasUsed;
+      totalCostWei += receiptData.costWei;
+    }
+  }
+  return {
+    gasUsedUnits: totalGasUsed,
+    gasCostWei: totalCostWei,
+    txCount: txHashes.length,
+  };
+}
+
 function quoteAmountWei(qtyWei, priceCents) {
   return (BigInt(qtyWei) * BigInt(priceCents)) / 100n;
 }
@@ -971,10 +2952,305 @@ async function getListingBySymbol(registryAddr, symbol) {
   return normalizeAddress(tokenAddr);
 }
 
+async function getSymbolByToken(registryAddr, tokenAddress) {
+  const symbolData = listingsRegistryInterface.encodeFunctionData('getSymbolByToken', [tokenAddress]);
+  const symbolResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: symbolData }, 'latest']);
+  const [symbol] = listingsRegistryInterface.decodeFunctionResult('getSymbolByToken', symbolResult);
+  let symbolText = '';
+  if (symbol) {
+    symbolText = String(symbol);
+  }
+  return symbolText.toUpperCase();
+}
+
 function ensureAutoTradeDir() {
   if (!fs.existsSync(AUTOTRADE_DIR)) {
     fs.mkdirSync(AUTOTRADE_DIR, { recursive: true });
   }
+}
+
+function ensureAdminDir() {
+  if (!fs.existsSync(ADMIN_DIR)) {
+    fs.mkdirSync(ADMIN_DIR, { recursive: true });
+  }
+}
+
+function ensureDividendsMerkleDir() {
+  if (!fs.existsSync(DIVIDENDS_MERKLE_DIR)) {
+    fs.mkdirSync(DIVIDENDS_MERKLE_DIR, { recursive: true });
+  }
+}
+
+function getDefaultAwardSessionState() {
+  return {
+    nextAwardWindowSec: 60,
+    nextAwardWindowAppliesAtEpoch: -1,
+    terminateNextSession: false,
+    terminateAtEpoch: -1,
+    updatedAtMs: 0,
+  };
+}
+
+function readAwardSessionState() {
+  ensureAdminDir();
+  return readJsonFile(AWARD_SESSION_FILE, getDefaultAwardSessionState());
+}
+
+function writeAwardSessionState(state) {
+  ensureAdminDir();
+  writeJsonFile(AWARD_SESSION_FILE, state);
+}
+
+function merkleEpochClaimsFile(epochId) {
+  return path.join(DIVIDENDS_MERKLE_DIR, `epoch-${epochId}-claims.json`);
+}
+
+function merkleEpochTreeFile(epochId) {
+  return path.join(DIVIDENDS_MERKLE_DIR, `epoch-${epochId}-tree.json`);
+}
+
+function readMerkleClaims(epochId) {
+  ensureDividendsMerkleDir();
+  const file = merkleEpochClaimsFile(epochId);
+  return readJsonFile(file, { epochId, claims: [] });
+}
+
+function readMerkleTree(epochId) {
+  ensureDividendsMerkleDir();
+  const file = merkleEpochTreeFile(epochId);
+  return readJsonFile(file, {});
+}
+
+function writeMerkleClaims(epochId, claimsPayload) {
+  ensureDividendsMerkleDir();
+  const file = merkleEpochClaimsFile(epochId);
+  writeJsonFile(file, claimsPayload);
+}
+
+function writeMerkleTree(epochId, treePayload) {
+  ensureDividendsMerkleDir();
+  const file = merkleEpochTreeFile(epochId);
+  writeJsonFile(file, treePayload);
+}
+
+function readMerkleHolderScanState() {
+  ensureDividendsMerkleDir();
+  return readJsonFile(MERKLE_HOLDER_SCAN_STATE_FILE, { tokens: {} });
+}
+
+function writeMerkleHolderScanState(state) {
+  ensureDividendsMerkleDir();
+  writeJsonFile(MERKLE_HOLDER_SCAN_STATE_FILE, state);
+}
+
+function normalizeHolderArray(rawRows) {
+  const seen = new Set();
+  const holders = [];
+  const rows = Array.isArray(rawRows) ? rawRows : [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const normalized = normalizeAddress(rows[i]);
+    if (!normalized || normalized === ethers.ZeroAddress) {
+      continue;
+    }
+    const lower = normalized.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      holders.push(normalized);
+    }
+  }
+  holders.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  return holders;
+}
+
+function codeExistsAtBlock(codeRaw) {
+  const text = String(codeRaw || '').toLowerCase();
+  return text && text !== '0x';
+}
+
+async function resolveContractDeploymentBlock(address, latestBlock) {
+  const normalized = normalizeAddress(address);
+  if (!normalized) {
+    return 0;
+  }
+  let left = 0;
+  let right = Math.max(0, Number(latestBlock));
+  const latestCode = await hardhatRpc('eth_getCode', [normalized, ethers.toQuantity(right)]);
+  if (!codeExistsAtBlock(latestCode)) {
+    return 0;
+  }
+  while (left < right) {
+    const mid = Math.floor((left + right) / 2);
+    const code = await hardhatRpc('eth_getCode', [normalized, ethers.toQuantity(mid)]);
+    if (codeExistsAtBlock(code)) {
+      right = mid;
+    } else {
+      left = mid + 1;
+    }
+  }
+  return left;
+}
+
+function buildMerkleLevelsLeftRight(leafHashes) {
+  const levels = [];
+  const firstLevel = [];
+  for (let i = 0; i < leafHashes.length; i += 1) {
+    firstLevel.push(leafHashes[i]);
+  }
+  levels.push(firstLevel);
+  let current = firstLevel;
+  while (current.length > 1) {
+    const next = [];
+    for (let i = 0; i < current.length; i += 2) {
+      const left = current[i];
+      let right = left;
+      if (i + 1 < current.length) {
+        right = current[i + 1];
+      }
+      const parent = ethers.keccak256(
+        ethers.solidityPacked(['bytes32', 'bytes32'], [left, right])
+      );
+      next.push(parent);
+    }
+    levels.push(next);
+    current = next;
+  }
+  return levels;
+}
+
+function buildMerkleProofLeftRight(levels, leafIndex) {
+  const proof = [];
+  let index = leafIndex;
+  for (let level = 0; level < levels.length - 1; level += 1) {
+    const rows = levels[level];
+    let siblingIndex = index + 1;
+    if (index % 2 === 1) {
+      siblingIndex = index - 1;
+    }
+    if (siblingIndex >= rows.length) {
+      siblingIndex = index;
+    }
+    proof.push(rows[siblingIndex]);
+    index = Math.floor(index / 2);
+  }
+  return proof;
+}
+
+function merkleLeafHash(epochId, tokenAddress, account, amountWei, leafIndex) {
+  const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+    ['uint256', 'address', 'address', 'uint256', 'uint256'],
+    [BigInt(epochId), tokenAddress, account, BigInt(amountWei), BigInt(leafIndex)]
+  );
+  return ethers.keccak256(encoded);
+}
+
+function tryParseSnapshotIdFromReceipt(receipt) {
+  let invalidReceiptInput = false;
+  if (!receipt) {
+    invalidReceiptInput = true;
+  }
+  if (!Array.isArray(receipt.logs)) {
+    invalidReceiptInput = true;
+  }
+  if (invalidReceiptInput) {
+    return 0;
+  }
+  for (let i = 0; i < receipt.logs.length; i += 1) {
+    const log = receipt.logs[i];
+    try {
+      const parsed = equityTokenSnapshotInterface.parseLog(log);
+      if (parsed && parsed.name === 'Snapshot') {
+        return Number(parsed.args.id);
+      }
+    } catch {
+    }
+  }
+  return 0;
+}
+
+async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
+  const normalizedToken = normalizeAddress(tokenAddress);
+  if (!normalizedToken) {
+    return [];
+  }
+  const transferTopic = ethers.id('Transfer(address,address,uint256)');
+  const endBlock = parseRpcInt(toBlockHex);
+  if (!Number.isFinite(endBlock) || endBlock < 0) {
+    return [];
+  }
+  const state = readMerkleHolderScanState();
+  if (!state.tokens || typeof state.tokens !== 'object') {
+    state.tokens = {};
+  }
+  const tokenKey = normalizedToken.toLowerCase();
+  const current = state.tokens[tokenKey] || {};
+  let deploymentBlock = Number(current.deploymentBlock);
+  if (!Number.isFinite(deploymentBlock) || deploymentBlock < 0 || deploymentBlock > endBlock) {
+    deploymentBlock = await resolveContractDeploymentBlock(normalizedToken, endBlock);
+  }
+  let lastScannedBlock = Number(current.lastScannedBlock);
+  const hasPriorScan = Number.isFinite(lastScannedBlock);
+  if (!hasPriorScan) {
+    if (MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS > 0) {
+      const initialFrom = Math.max(
+        deploymentBlock,
+        endBlock - MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS + 1,
+      );
+      lastScannedBlock = initialFrom - 1;
+    } else {
+      lastScannedBlock = deploymentBlock - 1;
+    }
+  }
+  if (lastScannedBlock < deploymentBlock - 1) {
+    lastScannedBlock = deploymentBlock - 1;
+  }
+  const fromBlock = Math.max(
+    deploymentBlock,
+    lastScannedBlock + 1 - MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS,
+  );
+  const seen = new Set();
+  const cachedHolders = normalizeHolderArray(current.holders);
+  for (let i = 0; i < cachedHolders.length; i += 1) {
+    seen.add(cachedHolders[i].toLowerCase());
+  }
+  let logs = [];
+  if (fromBlock <= endBlock) {
+    logs = await getLogsChunked({
+      address: normalizedToken,
+      topics: [transferTopic],
+    }, fromBlock, endBlock);
+  }
+  for (let i = 0; i < logs.length; i += 1) {
+    const log = logs[i];
+    try {
+      const parsed = erc20Interface.parseLog(log);
+      const from = normalizeAddress(parsed.args.from);
+      const to = normalizeAddress(parsed.args.to);
+      if (from && from !== ethers.ZeroAddress) {
+        seen.add(from.toLowerCase());
+      }
+      if (to && to !== ethers.ZeroAddress) {
+        seen.add(to.toLowerCase());
+      }
+    } catch {
+    }
+  }
+  const rows = [];
+  const values = Array.from(seen.values());
+  for (let i = 0; i < values.length; i += 1) {
+    const normalized = normalizeAddress(values[i]);
+    if (normalized && normalized !== ethers.ZeroAddress) {
+      rows.push(normalized);
+    }
+  }
+  rows.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  state.tokens[tokenKey] = {
+    deploymentBlock,
+    lastScannedBlock: endBlock,
+    holders: rows,
+    updatedAtMs: Date.now(),
+  };
+  writeMerkleHolderScanState(state);
+  return rows;
 }
 
 function getDefaultAutoTradeState() {
@@ -1040,6 +3316,10 @@ function setSymbolLifecycleStatus(symbolRaw, statusRaw) {
 async function listAllSymbolsFromRegistry() {
   const deployments = loadDeployments();
   const registryAddr = deployments.listingsRegistry;
+  const registryDeployed = await ensureContract(registryAddr);
+  if (!registryDeployed) {
+    return [];
+  }
   const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
   const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
   const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
@@ -1050,7 +3330,14 @@ async function getBestBookPrices(symbolRaw) {
   const symbol = String(symbolRaw).toUpperCase();
   const deployments = loadDeployments();
   const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-  if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+  let invalidTokenAddress = false;
+  if (!tokenAddress) {
+    invalidTokenAddress = true;
+  }
+  if (tokenAddress === ethers.ZeroAddress) {
+    invalidTokenAddress = true;
+  }
+  if (invalidTokenAddress) {
     return {
       symbol,
       tokenAddress: '',
@@ -1080,7 +3367,14 @@ async function getBestBookPrices(symbolRaw) {
     const remainingWei = BigInt(row.remaining.toString());
     if (isActive && remainingWei > 0n) {
       const cents = Number(row.price);
-      if (!hasBid || cents > bestBidCents) {
+      let shouldSetBid = false;
+      if (!hasBid) {
+        shouldSetBid = true;
+      }
+      if (cents > bestBidCents) {
+        shouldSetBid = true;
+      }
+      if (shouldSetBid) {
         hasBid = true;
         bestBidCents = cents;
       }
@@ -1093,7 +3387,14 @@ async function getBestBookPrices(symbolRaw) {
     const remainingWei = BigInt(row.remaining.toString());
     if (isActive && remainingWei > 0n) {
       const cents = Number(row.price);
-      if (!hasAsk || cents < bestAskCents) {
+      let shouldSetAsk = false;
+      if (!hasAsk) {
+        shouldSetAsk = true;
+      }
+      if (cents < bestAskCents) {
+        shouldSetAsk = true;
+      }
+      if (shouldSetAsk) {
         hasAsk = true;
         bestAskCents = cents;
       }
@@ -1113,27 +3414,107 @@ async function getBestBookPrices(symbolRaw) {
 function shouldRuleTrigger(rule, book) {
   const side = String(rule.side).toUpperCase();
   const triggerPriceCents = Number(rule.triggerPriceCents);
+  const marketPriceCents = Number(rule.marketPriceCents);
   if (side === 'BUY') {
-    if (!book.hasAsk) {
-      return false;
+    if (book.hasAsk && book.bestAskCents <= triggerPriceCents) {
+      return true;
     }
-    return book.bestAskCents <= triggerPriceCents;
+    if (Number.isFinite(marketPriceCents) && marketPriceCents > 0) {
+      return marketPriceCents <= triggerPriceCents;
+    }
+    return false;
   }
   if (side === 'SELL') {
-    if (!book.hasBid) {
-      return false;
+    if (book.hasBid && book.bestBidCents >= triggerPriceCents) {
+      return true;
     }
-    return book.bestBidCents >= triggerPriceCents;
+    if (Number.isFinite(marketPriceCents) && marketPriceCents > 0) {
+      return marketPriceCents >= triggerPriceCents;
+    }
+    return false;
   }
   return false;
 }
 
+async function readMarketPriceCentsForAutoTrade(symbolRaw) {
+  const symbol = String(symbolRaw).toUpperCase();
+  if (!symbol) {
+    return 0;
+  }
+  try {
+    const deployments = loadDeployments();
+    const priceFeedAddress = normalizeAddress(deployments.priceFeed);
+    if (priceFeedAddress) {
+      const data = priceFeedInterface.encodeFunctionData('getPrice', [symbol]);
+      const result = await hardhatRpc('eth_call', [{ to: priceFeedAddress, data }, 'latest']);
+      const [priceCentsRaw] = priceFeedInterface.decodeFunctionResult('getPrice', result);
+      const onchainPriceCents = Number(priceCentsRaw);
+      if (Number.isFinite(onchainPriceCents) && onchainPriceCents > 0) {
+        return onchainPriceCents;
+      }
+    }
+  } catch {
+  }
+  try {
+    const quote = await fetchQuote(symbol);
+    const price = Number(quote.regularMarketPrice || quote.price || 0);
+    if (Number.isFinite(price) && price > 0) {
+      return Math.round(price * 100);
+    }
+  } catch {
+  }
+  try {
+    const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol }));
+    let row = null;
+    if (Array.isArray(payload) && payload.length > 0) {
+      row = payload[0];
+    } else if (payload && typeof payload === 'object') {
+      row = payload;
+    }
+    if (row) {
+      const price = Number(row.price || 0);
+      if (Number.isFinite(price) && price > 0) {
+        return Math.round(price * 100);
+      }
+    }
+  } catch {
+  }
+  return 0;
+}
+
 function isRulePausedByLifecycle(rule) {
   const symbolStatus = getSymbolLifecycleStatus(rule.symbol);
-  return symbolStatus === 'FROZEN' || symbolStatus === 'DELISTED';
+  let isPaused = false;
+  if (symbolStatus === 'FROZEN') {
+    isPaused = true;
+  }
+  if (symbolStatus === 'DELISTED') {
+    isPaused = true;
+  }
+  return isPaused;
 }
 
 function normalizeRuleForResponse(rule) {
+  let cooldownSec = 0;
+  if (rule.cooldownSec) {
+    cooldownSec = Number(rule.cooldownSec);
+  }
+  let maxExecutionsPerDay = 0;
+  if (rule.maxExecutionsPerDay) {
+    maxExecutionsPerDay = Number(rule.maxExecutionsPerDay);
+  }
+  let createdAtMs = 0;
+  if (rule.createdAtMs) {
+    createdAtMs = Number(rule.createdAtMs);
+  }
+  let updatedAtMs = 0;
+  if (rule.updatedAtMs) {
+    updatedAtMs = Number(rule.updatedAtMs);
+  }
+  let lastExecutedAtMs = 0;
+  if (rule.lastExecutedAtMs) {
+    lastExecutedAtMs = Number(rule.lastExecutedAtMs);
+  }
   return {
     id: Number(rule.id),
     wallet: rule.wallet,
@@ -1143,16 +3524,32 @@ function normalizeRuleForResponse(rule) {
     qtyWei: String(rule.qtyWei),
     maxSlippageBps: Number(rule.maxSlippageBps),
     enabled: Boolean(rule.enabled),
-    cooldownSec: Number(rule.cooldownSec || 0),
-    maxExecutionsPerDay: Number(rule.maxExecutionsPerDay || 0),
-    createdAtMs: Number(rule.createdAtMs || 0),
-    updatedAtMs: Number(rule.updatedAtMs || 0),
-    lastExecutedAtMs: Number(rule.lastExecutedAtMs || 0),
+    cooldownSec,
+    maxExecutionsPerDay,
+    createdAtMs,
+    updatedAtMs,
+    lastExecutedAtMs,
     pausedByLifecycle: isRulePausedByLifecycle(rule),
   };
 }
 
 function normalizeExecutionForResponse(entry) {
+  let observedBestBidCents = 0;
+  if (entry.observedBestBidCents) {
+    observedBestBidCents = Number(entry.observedBestBidCents);
+  }
+  let observedBestAskCents = 0;
+  if (entry.observedBestAskCents) {
+    observedBestAskCents = Number(entry.observedBestAskCents);
+  }
+  let observedMarketPriceCents = 0;
+  if (entry.observedMarketPriceCents) {
+    observedMarketPriceCents = Number(entry.observedMarketPriceCents);
+  }
+  let error = '';
+  if (entry.error) {
+    error = entry.error;
+  }
   return {
     id: Number(entry.id),
     ruleId: Number(entry.ruleId),
@@ -1160,12 +3557,13 @@ function normalizeExecutionForResponse(entry) {
     symbol: entry.symbol,
     side: entry.side,
     triggerPriceCents: Number(entry.triggerPriceCents),
-    observedBestBidCents: Number(entry.observedBestBidCents || 0),
-    observedBestAskCents: Number(entry.observedBestAskCents || 0),
+    observedBestBidCents,
+    observedBestAskCents,
+    observedMarketPriceCents,
     qtyWei: String(entry.qtyWei),
     txHash: entry.txHash,
     status: entry.status,
-    error: entry.error || '',
+    error,
     executedAtMs: Number(entry.executedAtMs),
   };
 }
@@ -1182,6 +3580,10 @@ async function executeAutoTradeRule(rule, book) {
 
   if (!(qtyUi > 0)) {
     throw new Error('rule qty is zero');
+  }
+  const canSend = await canServerSendFromAddress(wallet);
+  if (!canSend) {
+    throw new Error(`autotrade wallet ${wallet} is not available on server signer set`);
   }
 
   let data = '';
@@ -1242,9 +3644,16 @@ function getDateKeyEt() {
 
 async function runAutoTradeTick() {
   if (autoTradeLoopBusy) {
-    return;
+    const busyForMs = Date.now() - autoTradeLoopStartedAtMs;
+    if (busyForMs > 45000) {
+      autoTradeLoopBusy = false;
+      autoTradeLoopStartedAtMs = 0;
+    } else {
+      return;
+    }
   }
   autoTradeLoopBusy = true;
+  autoTradeLoopStartedAtMs = Date.now();
 
   try {
     const state = readAutoTradeState();
@@ -1255,40 +3664,66 @@ async function runAutoTradeTick() {
 
     for (let i = 0; i < state.rules.length; i += 1) {
       const rule = state.rules[i];
-      if (!rule.enabled) {
-        continue;
-      }
-      if (isRulePausedByLifecycle(rule)) {
-        continue;
+      let shouldRunRule = true;
+      if (!rule.enabled || isRulePausedByLifecycle(rule)) {
+        shouldRunRule = false;
       }
 
       const nowMs = Date.now();
-      const cooldownSec = Number(rule.cooldownSec || 0);
-      if (cooldownSec > 0 && Number(rule.lastExecutedAtMs || 0) > 0) {
-        const elapsedMs = nowMs - Number(rule.lastExecutedAtMs);
-        if (elapsedMs < (cooldownSec * 1000)) {
-          continue;
+      if (shouldRunRule) {
+        let cooldownSec = 0;
+        if (rule.cooldownSec) {
+          cooldownSec = Number(rule.cooldownSec);
+        }
+        let lastExecutedAtMs = 0;
+        if (rule.lastExecutedAtMs) {
+          lastExecutedAtMs = Number(rule.lastExecutedAtMs);
+        }
+        if (cooldownSec > 0 && lastExecutedAtMs > 0) {
+          const elapsedMs = nowMs - Number(rule.lastExecutedAtMs);
+          if (elapsedMs < (cooldownSec * 1000)) {
+            shouldRunRule = false;
+          }
         }
       }
 
-      const maxExecutionsPerDay = Number(rule.maxExecutionsPerDay || 0);
-      const currentDay = getDateKeyEt();
-      if (rule.executionsDay !== currentDay) {
-        rule.executionsDay = currentDay;
-        rule.executionsDayCount = 0;
-      }
-      if (maxExecutionsPerDay > 0 && Number(rule.executionsDayCount || 0) >= maxExecutionsPerDay) {
-        continue;
+      if (shouldRunRule) {
+        let maxExecutionsPerDay = 0;
+        if (rule.maxExecutionsPerDay) {
+          maxExecutionsPerDay = Number(rule.maxExecutionsPerDay);
+        }
+        const currentDay = getDateKeyEt();
+        if (rule.executionsDay !== currentDay) {
+          rule.executionsDay = currentDay;
+          rule.executionsDayCount = 0;
+        }
+        let executionsDayCount = 0;
+        if (rule.executionsDayCount) {
+          executionsDayCount = Number(rule.executionsDayCount);
+        }
+        if (maxExecutionsPerDay > 0 && executionsDayCount >= maxExecutionsPerDay) {
+          shouldRunRule = false;
+        }
       }
 
-      const book = await getBestBookPrices(rule.symbol);
-      if (!book.tokenAddress) {
-        continue;
+      let book = { tokenAddress: '' };
+      if (shouldRunRule) {
+        book = await getBestBookPrices(rule.symbol);
+        if (!book.tokenAddress) {
+          shouldRunRule = false;
+        }
       }
-      const triggerNow = shouldRuleTrigger(rule, book);
-      if (!triggerNow) {
-        continue;
+      if (shouldRunRule) {
+        const marketPriceCents = await readMarketPriceCentsForAutoTrade(rule.symbol);
+        rule.marketPriceCents = marketPriceCents;
+        const triggerNow = shouldRuleTrigger(rule, book);
+        if (!triggerNow) {
+          shouldRunRule = false;
+        }
       }
+      if (!shouldRunRule) {
+        // skip this rule this tick
+      } else {
 
       const executionId = state.nextExecutionId;
       state.nextExecutionId = Number(state.nextExecutionId) + 1;
@@ -1299,8 +3734,27 @@ async function runAutoTradeTick() {
         symbol: rule.symbol,
         side: rule.side,
         triggerPriceCents: Number(rule.triggerPriceCents),
-        observedBestBidCents: Number(book.bestBidCents || 0),
-        observedBestAskCents: Number(book.bestAskCents || 0),
+        observedBestBidCents: (() => {
+          let value = 0;
+          if (book.bestBidCents) {
+            value = Number(book.bestBidCents);
+          }
+          return value;
+        })(),
+        observedBestAskCents: (() => {
+          let value = 0;
+          if (book.bestAskCents) {
+            value = Number(book.bestAskCents);
+          }
+          return value;
+        })(),
+        observedMarketPriceCents: (() => {
+          let value = 0;
+          if (rule.marketPriceCents) {
+            value = Number(rule.marketPriceCents);
+          }
+          return value;
+        })(),
         qtyWei: String(rule.qtyWei),
         txHash: '',
         status: 'FAILED',
@@ -1314,19 +3768,39 @@ async function runAutoTradeTick() {
         entry.status = 'EXECUTED';
         rule.lastExecutedAtMs = Date.now();
         rule.updatedAtMs = Date.now();
-        rule.executionsDayCount = Number(rule.executionsDayCount || 0) + 1;
+        let currentExecutionsDayCount = 0;
+        if (rule.executionsDayCount) {
+          currentExecutionsDayCount = Number(rule.executionsDayCount);
+        }
+        rule.executionsDayCount = currentExecutionsDayCount + 1;
         state.rules.splice(i, 1);
         i -= 1;
       } catch (err) {
-        entry.error = err.message || 'execution failed';
+        let reason = 'execution failed';
+        if (err.message) {
+          reason = err.message;
+        }
+        entry.error = reason;
+        if (reason.includes('not available on server signer set')) {
+          rule.enabled = false;
+          rule.updatedAtMs = Date.now();
+        }
       }
 
       state.executions.push(entry);
+      }
     }
 
     writeAutoTradeState(state);
+  } catch (err) {
+    let msg = 'auto trade tick failed';
+    if (err && err.message) {
+      msg = err.message;
+    }
+    console.error('[autotrade]', msg);
   } finally {
     autoTradeLoopBusy = false;
+    autoTradeLoopStartedAtMs = 0;
   }
 }
 
@@ -1338,7 +3812,14 @@ function isTradingDay(ymd) {
   const [y, m, d] = ymd.split('-').map(Number);
   const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
   let weekend = false;
-  if (weekday === 0 || weekday === 6) {
+  let isWeekend = false;
+  if (weekday === 0) {
+    isWeekend = true;
+  }
+  if (weekday === 6) {
+    isWeekend = true;
+  }
+  if (isWeekend) {
     weekend = true;
   }
   if (weekend) {
@@ -1528,18 +4009,30 @@ app.get('/api/fmp/quote-short', async (req, res) => {
   const cached = fmpQuoteCache.get(symbol);
 
   try {
-    if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
+    let cacheFresh = false;
+    if (cached) {
+      const ageMs = Date.now() - cached.timestamp;
+      if (ageMs < FMP_QUOTE_TTL_MS) {
+        cacheFresh = true;
+      }
+    }
+    if (cacheFresh) {
       return res.json(cached.data);
     }
 
-    const url = getFmpUrl('quote-short', { symbol });
+    const url = getFmpUrl('quote', { symbol });
     const payload = await fetchFmpJson(url);
     let quote = payload;
     if (Array.isArray(payload)) {
       quote = payload[0];
     }
-    const price = quote.price;
+    const price = asNumber(pick(quote, ['price', 'regularMarketPrice']));
     const volume = quote.volume;
+    const previousClose = asNumber(pick(quote, ['previousClose', 'prevClose']));
+    let changePercent = asNumber(pick(quote, ['changesPercentage', 'changePercent']));
+    if (Number.isFinite(changePercent) && Math.abs(changePercent) > 1) {
+      changePercent = changePercent / 100;
+    }
     let responseSymbol = symbol;
     if (quote.symbol) {
       responseSymbol = quote.symbol;
@@ -1548,6 +4041,8 @@ app.get('/api/fmp/quote-short', async (req, res) => {
       symbol: responseSymbol,
       price,
       volume,
+      previousClose,
+      changePercent,
     };
     fmpQuoteCache.set(symbol, { data, timestamp: Date.now() });
     res.json(data);
@@ -1558,6 +4053,8 @@ app.get('/api/fmp/quote-short', async (req, res) => {
         symbol,
         price: fallbackQuote.regularMarketPrice,
         volume: fallbackQuote.regularMarketVolume,
+        previousClose: fallbackQuote.regularMarketPreviousClose,
+        changePercent: fallbackQuote.regularMarketChangePercent,
         stale: true,
         source: 'yahoo',
       };
@@ -1571,6 +4068,8 @@ app.get('/api/fmp/quote-short', async (req, res) => {
             symbol,
             price: candleData.close,
             volume: candleData.volume,
+            previousClose: candleData.open,
+            changePercent: asNumber((candleData.close - candleData.open) / candleData.open),
             stale: true,
             source: 'candles',
           };
@@ -1582,7 +4081,15 @@ app.get('/api/fmp/quote-short', async (req, res) => {
       }
 
       if (cached) {
-        return res.json({ ...cached.data, stale: true });
+        const staleData = {
+          symbol: cached.data.symbol,
+          price: cached.data.price,
+          volume: cached.data.volume,
+          previousClose: cached.data.previousClose,
+          changePercent: cached.data.changePercent,
+          stale: true,
+        };
+        return res.json(staleData);
       }
       let msg = '';
       if (err.message) {
@@ -1591,6 +4098,97 @@ app.get('/api/fmp/quote-short', async (req, res) => {
       res.status(502).json({ error: msg });
     }
   }
+});
+
+app.get('/api/fmp/index-ticker', async (_req, res) => {
+  const now = Date.now();
+  const rows = [];
+
+  for (let i = 0; i < FMP_US_TOP_SYMBOLS.length; i += 1) {
+    const symbol = String(FMP_US_TOP_SYMBOLS[i]).toUpperCase();
+    const cached = fmpIndexTickerCache.get(symbol);
+    let shouldUseCache = false;
+    if (cached) {
+      const ageMs = now - cached.timestamp;
+      if (ageMs < FMP_INDEX_TTL_MS) {
+        shouldUseCache = true;
+      }
+    }
+    if (shouldUseCache) {
+      rows.push(cached.data);
+    } else {
+      try {
+        const payload = await fetchFmpJson(getFmpUrl('quote', { symbol }));
+        let quote = payload;
+        if (Array.isArray(payload)) {
+          quote = payload[0];
+        }
+        const price = Number(pick(quote, ['price', 'regularMarketPrice']));
+        const previousClose = Number(quote.previousClose);
+        const change = Number(quote.change);
+
+        let changePercentRaw = quote.changePercentage;
+        if (!Number.isFinite(Number(changePercentRaw))) {
+          changePercentRaw = quote.changesPercentage;
+        }
+        if (!Number.isFinite(Number(changePercentRaw))) {
+          changePercentRaw = quote.changePercent;
+        }
+
+        let changePercent = NaN;
+        if (typeof changePercentRaw === 'string') {
+          const cleaned = changePercentRaw.replace('%', '').trim();
+          changePercent = Number(cleaned);
+        } else {
+          changePercent = Number(changePercentRaw);
+        }
+
+        // FMP returns percent units (0.53 = 0.53%), UI expects ratio (0.0053)
+        if (Number.isFinite(changePercent)) {
+          changePercent = changePercent / 100;
+        } else if (Number.isFinite(change) && Number.isFinite(previousClose) && previousClose > 0) {
+          changePercent = change / previousClose;
+        }
+        let label = '';
+        if (quote.name) {
+          label = String(quote.name);
+        }
+        if (!label && quote.symbol) {
+          label = String(quote.symbol);
+        }
+        if (!label) {
+          label = symbol;
+        }
+
+        let outputSymbol = symbol;
+        if (quote.symbol) {
+          outputSymbol = String(quote.symbol);
+        }
+        const next = {
+          symbol: outputSymbol,
+          label,
+          price,
+          changePercent,
+        };
+        fmpIndexTickerCache.set(symbol, { data: next, timestamp: now });
+        rows.push(next);
+      } catch (err) {
+        if (cached) {
+          rows.push(cached.data);
+        }
+      }
+    }
+  }
+
+  if (rows.length === 0) {
+    return res.status(502).json({ error: 'failed to load stock ticker' });
+  }
+
+  res.json({
+    ok: true,
+    updatedAtMs: now,
+    rows,
+  });
 });
 
 // get stock info with fmp
@@ -1659,9 +4257,13 @@ app.get('/api/fmp/stock-info', async (req, res) => {
       const price = summary.price;
       const sd = summary.summaryDetail;
       const stats = summary.defaultKeyStatistics;
+      let currency = 'USD';
+      if (price.currency) {
+        currency = price.currency;
+      }
       const fallbackData = {
         symbol,
-        currency: price.currency || 'USD',
+        currency,
         previousClose: asNumber(price.regularMarketPreviousClose),
         open: asNumber(price.regularMarketOpen),
         dayLow: asNumber(price.regularMarketDayLow),
@@ -1722,10 +4324,794 @@ app.get('/api/fmp/stock-info', async (req, res) => {
     }
   }
 });
+
+app.get('/api/fmp/market-details', async (req, res) => {
+  let symbolRaw = 'TSLA';
+  if (req.query.symbol) {
+    symbolRaw = String(req.query.symbol);
+  }
+  const symbol = symbolRaw.toUpperCase();
+  const cached = fmpDetailsCache.get(symbol);
+
+  try {
+    if (cached && (Date.now() - cached.timestamp) < FMP_DETAILS_TTL_MS) {
+      return res.json(cached.data);
+    }
+
+    const endpointJobs = [
+      ['searchExchangeVariants', getFmpUrl('search-exchange-variants', { symbol })],
+      ['companyScreener', getFmpUrl('company-screener', { limit: '200' })],
+      ['stockPeers', getFmpUrl('stock-peers', { symbol })],
+      ['profile', getFmpUrl('profile', { symbol })],
+      ['employeeCount', getFmpUrl('employee-count', { symbol })],
+      ['historicalEmployeeCount', getFmpUrl('historical-employee-count', { symbol })],
+      ['keyExecutives', getFmpUrl('key-executives', { symbol })],
+      ['governanceExecutiveCompensation', getFmpUrl('governance-executive-compensation', { symbol })],
+      ['quote', getFmpUrl('quote', { symbol })],
+      ['stockPriceChange', getFmpUrl('stock-price-change', { symbol })],
+      ['marketCapitalization', getFmpUrl('market-capitalization', { symbol })],
+      ['historicalMarketCapitalization', getFmpUrl('historical-market-capitalization', { symbol })],
+      ['sharesFloat', getFmpUrl('shares-float', { symbol })],
+      ['balanceSheet', getFmpUrl('balance-sheet-statement', { symbol, limit: '4' })],
+      ['keyMetrics', getFmpUrl('key-metrics', { symbol, limit: '4' })],
+      ['ratios', getFmpUrl('ratios', { symbol, limit: '4' })],
+      ['keyMetricsTtm', getFmpUrl('key-metrics-ttm', { symbol })],
+      ['ratiosTtm', getFmpUrl('ratios-ttm', { symbol })],
+      ['enterpriseValues', getFmpUrl('enterprise-values', { symbol, limit: '4' })],
+      ['newsLatest', getFmpUrl('news/stock-latest', { page: '0', limit: '50' })],
+      ['ratingsHistorical', getFmpUrl('ratings-historical', { symbol, limit: '20' })],
+      ['analystEstimates', getFmpUrl('analyst-estimates', { symbol, period: 'annual', page: '0', limit: '20' })],
+      ['priceTargetSummary', getFmpUrl('price-target-summary', { symbol })],
+      ['grades', getFmpUrl('grades', { symbol, limit: '20' })],
+      ['insiderLatest', getFmpUrl('insider-trading/latest', { page: '0', limit: '200' })],
+      ['mergersAcquisitionsLatest', getFmpUrl('mergers-acquisitions-latest', { page: '0', limit: '100' })],
+    ];
+
+    const collected = {};
+    const sourceErrors = {};
+    const settled = await Promise.all(endpointJobs.map(async (job) => {
+      const key = job[0];
+      const url = job[1];
+      try {
+        const payload = await fetchFmpJson(url);
+        return [key, payload];
+      } catch (err) {
+        let reason = 'request failed';
+        if (err.message) {
+          reason = err.message;
+        }
+        sourceErrors[key] = reason;
+        return [key, []];
+      }
+    }));
+    for (let i = 0; i < settled.length; i += 1) {
+      const entry = settled[i];
+      const key = entry[0];
+      const payload = entry[1];
+      collected[key] = payload;
+    }
+
+    function asArray(payload) {
+      if (Array.isArray(payload)) {
+        return payload;
+      }
+      return [payload];
+    }
+
+    function first(payload) {
+      const rows = asArray(payload);
+      if (rows.length > 0) {
+        return rows[0];
+      }
+      return {};
+    }
+
+    function keepNumber(value) {
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        return n;
+      }
+      return null;
+    }
+
+    const quoteRow = first(collected.quote);
+    const profileRow = first(collected.profile);
+    const changeRow = first(collected.stockPriceChange);
+    const employeeRow = first(collected.employeeCount);
+    const keyMetricsTtmRow = first(collected.keyMetricsTtm);
+    const ratiosTtmRow = first(collected.ratiosTtm);
+    const priceTargetRow = first(collected.priceTargetSummary);
+    const screenerRows = asArray(collected.companyScreener);
+    let screenerRow = {};
+    for (let i = 0; i < screenerRows.length; i += 1) {
+      const row = screenerRows[i];
+      let rowSymbolText = '';
+      if (row.symbol) {
+        rowSymbolText = String(row.symbol);
+      } else if (row.ticker) {
+        rowSymbolText = String(row.ticker);
+      }
+      const rowSymbol = rowSymbolText.toUpperCase();
+      if (rowSymbol === symbol) {
+        screenerRow = row;
+      }
+    }
+
+    const executivesRows = [];
+    const keyExecutivesRows = asArray(collected.keyExecutives);
+    const keyExecutivesLimit = Math.min(10, keyExecutivesRows.length);
+    for (let i = 0; i < keyExecutivesLimit; i += 1) {
+      const row = keyExecutivesRows[i];
+      let name = '';
+      if (row.name) {
+        name = String(row.name);
+      }
+      let title = '';
+      if (row.title) {
+        title = String(row.title);
+      } else if (row.position) {
+        title = String(row.position);
+      }
+      let currency = '';
+      if (row.currency) {
+        currency = String(row.currency);
+      }
+      let year = '';
+      if (row.year) {
+        year = String(row.year);
+      }
+      executivesRows.push({
+        name,
+        title,
+        pay: keepNumber(row.pay),
+        currency,
+        year,
+      });
+    }
+
+    const executiveCompRows = [];
+    const executiveCompSourceRows = asArray(collected.governanceExecutiveCompensation);
+    const executiveCompLimit = Math.min(10, executiveCompSourceRows.length);
+    for (let i = 0; i < executiveCompLimit; i += 1) {
+      const row = executiveCompSourceRows[i];
+      let name = '';
+      if (row.name) {
+        name = String(row.name);
+      } else if (row.executive) {
+        name = String(row.executive);
+      }
+      let title = '';
+      if (row.title) {
+        title = String(row.title);
+      } else if (row.position) {
+        title = String(row.position);
+      }
+      let totalSource = row.total;
+      if (!totalSource) {
+        totalSource = row.totalCompensation;
+      }
+      if (!totalSource) {
+        totalSource = row.totalPay;
+      }
+      let stockAwardsSource = row.stockAwards;
+      if (!stockAwardsSource) {
+        stockAwardsSource = row.stockAward;
+      }
+      let year = '';
+      if (row.year) {
+        year = String(row.year);
+      } else if (row.fiscalYear) {
+        year = String(row.fiscalYear);
+      }
+      executiveCompRows.push({
+        name,
+        title,
+        total: keepNumber(totalSource),
+        salary: keepNumber(row.salary),
+        bonus: keepNumber(row.bonus),
+        stockAwards: keepNumber(stockAwardsSource),
+        year,
+      });
+    }
+
+    const employeeHistoryRows = [];
+    const employeeHistorySourceRows = asArray(collected.historicalEmployeeCount);
+    const employeeHistoryLimit = Math.min(12, employeeHistorySourceRows.length);
+    for (let i = 0; i < employeeHistoryLimit; i += 1) {
+      const row = employeeHistorySourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.period) {
+        date = String(row.period);
+      }
+      let employeeCountSource = row.employeeCount;
+      if (!employeeCountSource) {
+        employeeCountSource = row.employees;
+      }
+      employeeHistoryRows.push({
+        date,
+        employeeCount: keepNumber(employeeCountSource),
+      });
+    }
+    const sharesFloatRow = first(collected.sharesFloat);
+    const marketCapRows = [];
+    const marketCapSourceRows = asArray(collected.marketCapitalization);
+    const marketCapLimit = Math.min(1, marketCapSourceRows.length);
+    for (let i = 0; i < marketCapLimit; i += 1) {
+      const row = marketCapSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      let marketCapSource = row.marketCap;
+      if (!marketCapSource) {
+        marketCapSource = row.marketCapitalization;
+      }
+      marketCapRows.push({
+        date,
+        marketCap: keepNumber(marketCapSource),
+      });
+    }
+
+    const marketCapHistoryRows = [];
+    const marketCapHistorySourceRows = asArray(collected.historicalMarketCapitalization);
+    const marketCapHistoryLimit = Math.min(30, marketCapHistorySourceRows.length);
+    for (let i = 0; i < marketCapHistoryLimit; i += 1) {
+      const row = marketCapHistorySourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      let marketCapSource = row.marketCap;
+      if (!marketCapSource) {
+        marketCapSource = row.marketCapitalization;
+      }
+      marketCapHistoryRows.push({
+        date,
+        marketCap: keepNumber(marketCapSource),
+      });
+    }
+
+    const peerRows = [];
+    const stockPeerSourceRows = asArray(collected.stockPeers);
+    const stockPeerLimit = Math.min(20, stockPeerSourceRows.length);
+    for (let i = 0; i < stockPeerLimit; i += 1) {
+      const row = stockPeerSourceRows[i];
+      let peerText = '';
+      if (row.symbol) {
+        peerText = String(row.symbol);
+      } else if (row.ticker) {
+        peerText = String(row.ticker);
+      } else if (row) {
+        peerText = String(row);
+      }
+      const peerSymbol = peerText.toUpperCase();
+      if (peerSymbol) {
+        peerRows.push(peerSymbol);
+      }
+    }
+
+    const balanceRows = [];
+    const balanceSourceRows = asArray(collected.balanceSheet);
+    const balanceLimit = Math.min(4, balanceSourceRows.length);
+    for (let i = 0; i < balanceLimit; i += 1) {
+      const row = balanceSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.fillingDate) {
+        date = String(row.fillingDate);
+      }
+      balanceRows.push({
+        date,
+        totalAssets: keepNumber(row.totalAssets),
+        totalLiabilities: keepNumber(row.totalLiabilities),
+        totalStockholdersEquity: keepNumber(row.totalStockholdersEquity),
+        cashAndCashEquivalents: keepNumber(row.cashAndCashEquivalents),
+        totalDebt: keepNumber(row.totalDebt),
+      });
+    }
+
+    const metricsRows = [];
+    const metricsSourceRows = asArray(collected.keyMetrics);
+    const metricsLimit = Math.min(4, metricsSourceRows.length);
+    for (let i = 0; i < metricsLimit; i += 1) {
+      const row = metricsSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      metricsRows.push({
+        date,
+        peRatio: keepNumber(row.peRatio),
+        pbRatio: keepNumber(row.pbRatio),
+        roe: keepNumber(row.roe),
+        roa: keepNumber(row.roa),
+        debtToEquity: keepNumber(row.debtToEquity),
+      });
+    }
+
+    const ratiosRows = [];
+    const ratiosSourceRows = asArray(collected.ratios);
+    const ratiosLimit = Math.min(4, ratiosSourceRows.length);
+    for (let i = 0; i < ratiosLimit; i += 1) {
+      const row = ratiosSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      ratiosRows.push({
+        date,
+        currentRatio: keepNumber(row.currentRatio),
+        quickRatio: keepNumber(row.quickRatio),
+        netProfitMargin: keepNumber(row.netProfitMargin),
+        grossProfitMargin: keepNumber(row.grossProfitMargin),
+        returnOnEquity: keepNumber(row.returnOnEquity),
+      });
+    }
+
+    const enterpriseRows = [];
+    const enterpriseSourceRows = asArray(collected.enterpriseValues);
+    const enterpriseLimit = Math.min(4, enterpriseSourceRows.length);
+    for (let i = 0; i < enterpriseLimit; i += 1) {
+      const row = enterpriseSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      enterpriseRows.push({
+        date,
+        stockPrice: keepNumber(row.stockPrice),
+        marketCapitalization: keepNumber(row.marketCapitalization),
+        enterpriseValue: keepNumber(row.enterpriseValue),
+        numberOfShares: keepNumber(row.numberOfShares),
+      });
+    }
+
+    const ratingsRows = [];
+    const ratingsSourceRows = asArray(collected.ratingsHistorical);
+    const ratingsLimit = Math.min(10, ratingsSourceRows.length);
+    for (let i = 0; i < ratingsLimit; i += 1) {
+      const row = ratingsSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      let rating = '';
+      if (row.rating) {
+        rating = String(row.rating);
+      } else if (row.ratingRecommendation) {
+        rating = String(row.ratingRecommendation);
+      }
+      ratingsRows.push({
+        date,
+        rating,
+        score: keepNumber(row.ratingScore),
+      });
+    }
+
+    const estimatesRows = [];
+    const estimatesSourceRows = asArray(collected.analystEstimates);
+    const estimatesLimit = Math.min(10, estimatesSourceRows.length);
+    for (let i = 0; i < estimatesLimit; i += 1) {
+      const row = estimatesSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      } else if (row.period) {
+        date = String(row.period);
+      }
+      estimatesRows.push({
+        date,
+        estimatedRevenueAvg: keepNumber(row.estimatedRevenueAvg),
+        estimatedEbitdaAvg: keepNumber(row.estimatedEbitdaAvg),
+        estimatedNetIncomeAvg: keepNumber(row.estimatedNetIncomeAvg),
+        estimatedEpsAvg: keepNumber(row.estimatedEpsAvg),
+      });
+    }
+
+    const gradesRows = [];
+    const gradesSourceRows = asArray(collected.grades);
+    const gradesLimit = Math.min(10, gradesSourceRows.length);
+    for (let i = 0; i < gradesLimit; i += 1) {
+      const row = gradesSourceRows[i];
+      let date = '';
+      if (row.date) {
+        date = String(row.date);
+      }
+      let gradingCompany = '';
+      if (row.gradingCompany) {
+        gradingCompany = String(row.gradingCompany);
+      }
+      let previousGrade = '';
+      if (row.previousGrade) {
+        previousGrade = String(row.previousGrade);
+      }
+      let newGrade = '';
+      if (row.newGrade) {
+        newGrade = String(row.newGrade);
+      }
+      let action = '';
+      if (row.action) {
+        action = String(row.action);
+      }
+      gradesRows.push({
+        date,
+        gradingCompany,
+        previousGrade,
+        newGrade,
+        action,
+      });
+    }
+
+    const newsAllRows = [];
+    const newsSourceRows = asArray(collected.newsLatest);
+    for (let i = 0; i < newsSourceRows.length; i += 1) {
+      const row = newsSourceRows[i];
+      let rowSymbol = '';
+      if (row.symbol) {
+        rowSymbol = String(row.symbol);
+      } else if (row.ticker) {
+        rowSymbol = String(row.ticker);
+      }
+      let title = '';
+      if (row.title) {
+        title = String(row.title);
+      }
+      let publisher = '';
+      if (row.site) {
+        publisher = String(row.site);
+      } else if (row.publisher) {
+        publisher = String(row.publisher);
+      }
+      let publishedDate = '';
+      if (row.publishedDate) {
+        publishedDate = String(row.publishedDate);
+      } else if (row.date) {
+        publishedDate = String(row.date);
+      }
+      let url = '';
+      if (row.url) {
+        url = String(row.url);
+      }
+      newsAllRows.push({
+        symbol: rowSymbol,
+        title,
+        publisher,
+        publishedDate,
+        url,
+      });
+    }
+    const newsFiltered = newsAllRows.filter((row) => {
+      let rowSymbolText = '';
+      if (row.symbol) {
+        rowSymbolText = String(row.symbol);
+      }
+      const rowSymbol = rowSymbolText.toUpperCase();
+      let allowRow = false;
+      if (!rowSymbol) {
+        allowRow = true;
+      }
+      if (rowSymbol === symbol) {
+        allowRow = true;
+      }
+      return allowRow;
+    });
+    let newsBaseRows = newsAllRows;
+    if (newsFiltered.length > 0) {
+      newsBaseRows = newsFiltered;
+    }
+    const newsRows = [];
+    const newsRowsLimit = Math.min(20, newsBaseRows.length);
+    for (let i = 0; i < newsRowsLimit; i += 1) {
+      const row = newsBaseRows[i];
+      newsRows.push({
+        symbol: String(row.symbol),
+        title: String(row.title),
+        publisher: String(row.publisher),
+        publishedDate: String(row.publishedDate),
+        url: String(row.url),
+      });
+    }
+
+    const insiderAllRows = [];
+    const insiderSourceRows = asArray(collected.insiderLatest);
+    for (let i = 0; i < insiderSourceRows.length; i += 1) {
+      const row = insiderSourceRows[i];
+      let rowSymbol = '';
+      if (row.symbol) {
+        rowSymbol = String(row.symbol);
+      } else if (row.ticker) {
+        rowSymbol = String(row.ticker);
+      }
+      let date = '';
+      if (row.transactionDate) {
+        date = String(row.transactionDate);
+      } else if (row.filingDate) {
+        date = String(row.filingDate);
+      } else if (row.date) {
+        date = String(row.date);
+      }
+      let reportingName = '';
+      if (row.reportingName) {
+        reportingName = String(row.reportingName);
+      } else if (row.reporterName) {
+        reportingName = String(row.reporterName);
+      }
+      let securitiesTransactedSource = row.securitiesTransacted;
+      if (!securitiesTransactedSource) {
+        securitiesTransactedSource = row.shares;
+      }
+      insiderAllRows.push({
+        symbol: rowSymbol,
+        date,
+        reportingName,
+        transactionType: String(row.transactionType),
+        securitiesTransacted: keepNumber(securitiesTransactedSource),
+        price: keepNumber(row.price),
+      });
+    }
+    const insiderFiltered = insiderAllRows.filter((row) => {
+      let rowSymbolText = '';
+      if (row.symbol) {
+        rowSymbolText = String(row.symbol);
+      }
+      const rowSymbol = rowSymbolText.toUpperCase();
+      return rowSymbol === symbol;
+    });
+    let insiderBaseRows = insiderAllRows;
+    if (insiderFiltered.length > 0) {
+      insiderBaseRows = insiderFiltered;
+    }
+    const insiderRows = [];
+    const insiderRowsLimit = Math.min(20, insiderBaseRows.length);
+    for (let i = 0; i < insiderRowsLimit; i += 1) {
+      const row = insiderBaseRows[i];
+      insiderRows.push({
+        symbol: String(row.symbol),
+        date: String(row.date),
+        reportingName: String(row.reportingName),
+        transactionType: String(row.transactionType),
+        securitiesTransacted: keepNumber(row.securitiesTransacted),
+        price: keepNumber(row.price),
+      });
+    }
+
+    let overviewName = '';
+    if (profileRow.companyName) {
+      overviewName = String(profileRow.companyName);
+    } else if (profileRow.name) {
+      overviewName = String(profileRow.name);
+    }
+    let overviewDescription = '';
+    if (profileRow.description) {
+      overviewDescription = String(profileRow.description);
+    }
+    let overviewExchange = '';
+    if (profileRow.exchange) {
+      overviewExchange = String(profileRow.exchange);
+    } else if (profileRow.exchangeShortName) {
+      overviewExchange = String(profileRow.exchangeShortName);
+    }
+    let overviewSector = '';
+    if (profileRow.sector) {
+      overviewSector = String(profileRow.sector);
+    } else if (screenerRow.sector) {
+      overviewSector = String(screenerRow.sector);
+    }
+    let overviewIndustry = '';
+    if (profileRow.industry) {
+      overviewIndustry = String(profileRow.industry);
+    } else if (screenerRow.industry) {
+      overviewIndustry = String(screenerRow.industry);
+    }
+    let overviewCeo = '';
+    if (profileRow.ceo) {
+      overviewCeo = String(profileRow.ceo);
+    }
+    let overviewCountry = '';
+    if (profileRow.country) {
+      overviewCountry = String(profileRow.country);
+    }
+    let overviewCity = '';
+    if (profileRow.city) {
+      overviewCity = String(profileRow.city);
+    }
+    let overviewState = '';
+    if (profileRow.state) {
+      overviewState = String(profileRow.state);
+    }
+    let overviewWebsite = '';
+    if (profileRow.website) {
+      overviewWebsite = String(profileRow.website);
+    }
+    let overviewCurrency = '';
+    if (quoteRow.currency) {
+      overviewCurrency = String(quoteRow.currency);
+    }
+    let overviewIpoDate = '';
+    if (profileRow.ipoDate) {
+      overviewIpoDate = String(profileRow.ipoDate);
+    }
+
+    const searchExchangeVariants = [];
+    const searchExchangeVariantsSource = asArray(collected.searchExchangeVariants);
+    const searchExchangeVariantsLimit = Math.min(8, searchExchangeVariantsSource.length);
+    for (let i = 0; i < searchExchangeVariantsLimit; i += 1) {
+      searchExchangeVariants.push(searchExchangeVariantsSource[i]);
+    }
+
+    let companyPhone = '';
+    if (profileRow.phone) {
+      companyPhone = String(profileRow.phone);
+    }
+    let companyIsin = '';
+    if (profileRow.isin) {
+      companyIsin = String(profileRow.isin);
+    }
+    let companyCusip = '';
+    if (profileRow.cusip) {
+      companyCusip = String(profileRow.cusip);
+    }
+    let screenerCompanyName = '';
+    if (screenerRow.companyName) {
+      screenerCompanyName = String(screenerRow.companyName);
+    }
+    let screenerExchangeShortName = '';
+    if (screenerRow.exchangeShortName) {
+      screenerExchangeShortName = String(screenerRow.exchangeShortName);
+    }
+    let screenerCountry = '';
+    if (screenerRow.country) {
+      screenerCountry = String(screenerRow.country);
+    }
+    let screenerIpoDate = '';
+    if (screenerRow.ipoDate) {
+      screenerIpoDate = String(screenerRow.ipoDate);
+    }
+
+    let floatSharesSource = sharesFloatRow.floatShares;
+    if (!floatSharesSource) {
+      floatSharesSource = sharesFloatRow.outstandingSharesFloat;
+    }
+
+    const mergersAcquisitions = [];
+    const mergersAcquisitionsSourceRows = asArray(collected.mergersAcquisitionsLatest);
+    const mergersAcquisitionsLimit = Math.min(20, mergersAcquisitionsSourceRows.length);
+    for (let i = 0; i < mergersAcquisitionsLimit; i += 1) {
+      const row = mergersAcquisitionsSourceRows[i];
+      let companyName = '';
+      if (row.companyName) {
+        companyName = String(row.companyName);
+      } else if (row.targetCompany) {
+        companyName = String(row.targetCompany);
+      }
+      let acquiringCompany = '';
+      if (row.acquiringCompany) {
+        acquiringCompany = String(row.acquiringCompany);
+      }
+      let announcedDate = '';
+      if (row.announcedDate) {
+        announcedDate = String(row.announcedDate);
+      } else if (row.date) {
+        announcedDate = String(row.date);
+      }
+      let status = '';
+      if (row.status) {
+        status = String(row.status);
+      }
+      mergersAcquisitions.push({
+        companyName,
+        acquiringCompany,
+        announcedDate,
+        status,
+      });
+    }
+
+    const payload = {
+      symbol,
+      asOfMs: Date.now(),
+      sections: {
+        overview: {
+          name: overviewName,
+          description: overviewDescription,
+          exchange: overviewExchange,
+          sector: overviewSector,
+          industry: overviewIndustry,
+          ceo: overviewCeo,
+          country: overviewCountry,
+          city: overviewCity,
+          state: overviewState,
+          website: overviewWebsite,
+          currency: overviewCurrency,
+          ipoDate: overviewIpoDate,
+          price: keepNumber(pick(quoteRow, ['price'])),
+          previousClose: keepNumber(pick(quoteRow, ['previousClose', 'prevClose'])),
+          open: keepNumber(pick(quoteRow, ['open'])),
+          dayLow: keepNumber(pick(quoteRow, ['dayLow', 'low'])),
+          dayHigh: keepNumber(pick(quoteRow, ['dayHigh', 'high'])),
+          yearLow: keepNumber(pick(quoteRow, ['yearLow', 'fiftyTwoWeekLow', '52WeekLow'])),
+          yearHigh: keepNumber(pick(quoteRow, ['yearHigh', 'fiftyTwoWeekHigh', '52WeekHigh'])),
+          marketCap: keepNumber(pick(quoteRow, ['marketCap', 'mktCap'])),
+          volume: keepNumber(pick(quoteRow, ['volume'])),
+          avgVolume: keepNumber(pick(quoteRow, ['avgVolume', 'averageVolume'])),
+          beta: keepNumber(pick(quoteRow, ['beta'])),
+          pe: keepNumber(pick(quoteRow, ['pe', 'peTTM'])),
+          eps: keepNumber(pick(quoteRow, ['eps', 'epsTTM'])),
+          stockPriceChange1D: keepNumber(pick(changeRow, ['1D', 'changesPercentage', 'changePercent'])),
+        },
+        company: {
+          searchExchangeVariants,
+          employeeCount: keepNumber(pick(employeeRow, ['employeeCount', 'employees'])),
+          employeeCountHistory: employeeHistoryRows,
+          peers: peerRows,
+          phone: companyPhone,
+          isin: companyIsin,
+          cusip: companyCusip,
+          screener: {
+            companyName: screenerCompanyName,
+            exchangeShortName: screenerExchangeShortName,
+            marketCap: keepNumber(screenerRow.marketCap),
+            country: screenerCountry,
+            ipoDate: screenerIpoDate,
+            isEtf: Boolean(screenerRow.isEtf),
+            isActivelyTrading: Boolean(screenerRow.isActivelyTrading),
+          },
+        },
+        people: {
+          keyExecutives: executivesRows,
+          executiveCompensation: executiveCompRows,
+        },
+        financial: {
+          balanceSheet: balanceRows,
+          keyMetrics: metricsRows,
+          ratios: ratiosRows,
+          keyMetricsTtm: keyMetricsTtmRow,
+          ratiosTtm: ratiosTtmRow,
+          enterpriseValues: enterpriseRows,
+          sharesFloat: {
+            freeFloat: keepNumber(sharesFloatRow.freeFloat),
+            floatShares: keepNumber(floatSharesSource),
+            outstandingShares: keepNumber(sharesFloatRow.outstandingShares),
+          },
+          marketCapitalization: marketCapRows,
+          historicalMarketCapitalization: marketCapHistoryRows,
+        },
+        analysis: {
+          ratingsHistorical: ratingsRows,
+          analystEstimates: estimatesRows,
+          priceTargetSummary: priceTargetRow,
+          grades: gradesRows,
+        },
+        news: newsRows,
+        insider: insiderRows,
+        mergersAcquisitions,
+      },
+      sourceErrors,
+    };
+
+    fmpDetailsCache.set(symbol, { data: payload, timestamp: Date.now() });
+    res.json(payload);
+  } catch (err) {
+    let msg = '';
+    if (err.message) {
+      msg = err.message;
+    }
+    res.status(502).json({ error: msg });
+  }
+});
 // rest api to get hardhat accounts
 app.get('/api/hardhat/accounts', async (_req, res) => {
   try {
-    const accounts = await hardhatRpc('eth_accounts');
+    let accounts = await hardhatRpc('eth_accounts');
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+      accounts = [];
+      const signerValues = Array.from(RPC_SIGNERS.values());
+      for (let i = 0; i < signerValues.length; i += 1) {
+        accounts.push(signerValues[i].address);
+      }
+    }
     res.json({ accounts });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -1743,11 +5129,29 @@ app.get('/api/ttoken-address', (_req, res) => {
   res.json({ address });
 });
 
+app.get('/api/ui/permissions', (req, res) => {
+  let walletRaw = '';
+  if (req.query && req.query.wallet) {
+    walletRaw = String(req.query.wallet);
+  }
+  const wallet = normalizeAddress(walletRaw);
+  const isAdmin = isAdminWallet(wallet);
+  res.json({
+    wallet,
+    isAdmin,
+    canAccessAdminPage: isAdmin,
+    canUseLiveUpdates: isAdmin,
+  });
+});
+
 // rest api to get balances with fallback if none fetched
 app.get('/api/ttoken/balance', async (req, res) => {
   const address = String(req.query.address);
   try {
-    const ttokenAddress = process.env.TTOKEN_ADDRESS || getTTokenAddressFromDeployments();
+    let ttokenAddress = getTTokenAddressFromDeployments();
+    if (process.env.TTOKEN_ADDRESS) {
+      ttokenAddress = process.env.TTOKEN_ADDRESS;
+    }
     const data = equityTokenInterface.encodeFunctionData('balanceOf', [address]);
     const result = await hardhatRpc('eth_call', [{ to: ttokenAddress, data }, 'latest']);
     const [balanceWei] = equityTokenInterface.decodeFunctionResult('balanceOf', result);
@@ -1761,17 +5165,28 @@ app.get('/api/ttoken/balance', async (req, res) => {
 app.post('/api/ttoken/mint', async (req, res) => {
   const body = req.body;
   const to = String(body.to);
-  const amount = Number(body.amount);
+  const amountRaw = String(body.amount);
+  const amount = Number(amountRaw);
   const recipientValid = isValidAddress(to);
   if (!recipientValid) {
-    return res.status(400).json({ error: '' });
+    return res.status(400).json({ error: 'invalid recipient address' });
   }
   const amountIsNumber = Number.isFinite(amount);
-  if (!amountIsNumber || amount < 1000) {
-    return res.status(400).json({ error: '' });
+  let invalidAmount = false;
+  if (!amountIsNumber) {
+    invalidAmount = true;
+  }
+  if (!(amount > 0)) {
+    invalidAmount = true;
+  }
+  if (invalidAmount) {
+    return res.status(400).json({ error: 'amount must be greater than 0' });
   }
 
-  const ttokenAddress = process.env.TTOKEN_ADDRESS || getTTokenAddressFromDeployments();
+  let ttokenAddress = getTTokenAddressFromDeployments();
+  if (process.env.TTOKEN_ADDRESS) {
+    ttokenAddress = process.env.TTOKEN_ADDRESS;
+  }
 
   try {
     const deployments = loadDeployments();
@@ -1781,13 +5196,35 @@ app.post('/api/ttoken/mint', async (req, res) => {
       return res.status(500).json({ error: 'Admin address missing in deployments' });
     }
 
-    const amountWei = BigInt(Math.round(amount)) * 10n ** 18n;
+    let amountWei = 0n;
+    try {
+      amountWei = ethers.parseUnits(amountRaw, 18);
+    } catch {
+      return res.status(400).json({ error: 'amount must be a valid number' });
+    }
+    if (!(amountWei > 0n)) {
+      return res.status(400).json({ error: 'amount must be greater than 0' });
+    }
     const data = equityTokenInterface.encodeFunctionData('mint', [to, amountWei]);
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from,
       to: ttokenAddress,
       data,
     }]);
+    const receipt = await waitForReceipt(txHash);
+    const blockNumber = parseRpcInt(receipt.blockNumber);
+    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    appendManualMintActivity({
+      wallet: to,
+      tokenAddress: ttokenAddress,
+      symbol: 'TTOKEN',
+      assetType: 'TTOKEN',
+      amountWei: amountWei.toString(),
+      reason: 'MINT_TTOKEN',
+      txHash,
+      blockNumber,
+      timestampMs,
+    });
     res.json({ txHash });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -1799,14 +5236,32 @@ app.post('/api/orderbook/limit', async (req, res) => {
   try {
     const body = req.body;
     const symbol = String(body.symbol).toUpperCase();
+    const ensurePriceResult = await ensureOnchainPriceForSymbol(symbol);
+    if (!ensurePriceResult.ok) {
+      return res.status(400).json({ error: ensurePriceResult.error });
+    }
     const symbolLifecycle = getSymbolLifecycleStatus(symbol);
-    if (symbolLifecycle === 'FROZEN' || symbolLifecycle === 'DELISTED') {
+    let blockedByLifecycle = false;
+    if (symbolLifecycle === 'FROZEN') {
+      blockedByLifecycle = true;
+    }
+    if (symbolLifecycle === 'DELISTED') {
+      blockedByLifecycle = true;
+    }
+    if (blockedByLifecycle) {
       return res.status(400).json({ error: `symbol ${symbol} is ${symbolLifecycle}` });
     }
     const sideText = String(body.side).toUpperCase();
     const priceCents = Number(body.priceCents);
     const qty = Number(body.qty);
-    const from = String(body.from);
+    let fromText = '';
+    if (body.from) {
+      fromText = String(body.from);
+    }
+    const from = normalizeAddress(fromText);
+    if (!from) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
     const orderBookAddr = deployments.orderBookDex;
@@ -1820,43 +5275,79 @@ app.post('/api/orderbook/limit', async (req, res) => {
     if (sideText === 'SELL') {
       side = 1;
     }
-
-    const qtyWei = BigInt(Math.round(qty)) * 10n ** 18n;
-    // decimal of 18 for tokens
-
-    if (side === 0) {
-      const quoteWei = (qtyWei * BigInt(priceCents)) / 100n;
-      const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, quoteWei]);
-      await hardhatRpc('eth_sendTransaction', [{
-        from: from,
-        to: ttokenAddr,
-        data: approveData,
-      }]);
-    } else {
-      const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, qtyWei]);
-      await hardhatRpc('eth_sendTransaction', [{
-        from: from,
-        to: tokenAddr,
-        data: approveData,
-      }]);
+    if (sideText !== 'BUY' && sideText !== 'SELL') {
+      return res.status(400).json({ error: 'side must be BUY or SELL' });
+    }
+    if (!Number.isFinite(qty)) {
+      return res.status(400).json({ error: 'qty must be a number' });
+    }
+    if (!Number.isInteger(qty)) {
+      return res.status(400).json({ error: 'qty must be a whole number' });
+    }
+    if (qty < MIN_STOCK_QTY_UNITS) {
+      return res.status(400).json({ error: `qty must be at least ${MIN_STOCK_QTY_UNITS}` });
+    }
+    if (qty % MIN_STOCK_QTY_UNITS !== 0) {
+      return res.status(400).json({ error: `qty must be in steps of ${MIN_STOCK_QTY_UNITS}` });
     }
 
-    const data = orderBookInterface.encodeFunctionData('placeLimitOrder', [
+    const qtyWei = BigInt(qty) * 10n ** 18n;
+    // decimal of 18 for tokens
+    const clientSign = wantsClientSign(body);
+    const orderData = orderBookInterface.encodeFunctionData('placeLimitOrder', [
       tokenAddr,
       side,
       priceCents,
       qtyWei,
     ]);
 
+    if (side === 0) {
+      const quoteWei = (qtyWei * BigInt(priceCents)) / 100n;
+      const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, quoteWei]);
+      if (clientSign) {
+        return res.json({
+          clientSign: true,
+          txs: [
+            { label: 'approve_ttoken', from, to: ttokenAddr, data: approveData },
+            { label: 'place_limit_order', from, to: orderBookAddr, data: orderData },
+          ],
+        });
+      }
+      const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
+        from: from,
+        to: ttokenAddr,
+        data: approveData,
+      }]);
+      await waitForReceipt(approveTxHash);
+    } else {
+      const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, qtyWei]);
+      if (clientSign) {
+        return res.json({
+          clientSign: true,
+          txs: [
+            { label: 'approve_equity', from, to: tokenAddr, data: approveData },
+            { label: 'place_limit_order', from, to: orderBookAddr, data: orderData },
+          ],
+        });
+      }
+      const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
+        from: from,
+        to: tokenAddr,
+        data: approveData,
+      }]);
+      await waitForReceipt(approveTxHash);
+    }
+
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: from,
       to: orderBookAddr,
-      data: data,
+      data: orderData,
     }]);
+    await waitForReceipt(txHash);
 
     res.json({ txHash: txHash });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 // get orders that's no filled
@@ -1916,85 +5407,34 @@ app.get('/api/orderbook/open', async (_req, res) => {
     });
     res.json({ orders: orders });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
 // rest api to get all the filled orders
 app.get('/api/orderbook/fills', async (_req, res) => {
   try {
-    const deployments = loadDeployments();
-    const registryAddr = deployments.listingsRegistry;
-    const orderBookAddr = deployments.orderBookDex;
-    const latestBlock = await hardhatRpc('eth_blockNumber', []);
-    const fromBlock = "0x0";
-
-    const topic = ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)');
-    const logs = await hardhatRpc('eth_getLogs', [{
-      fromBlock: fromBlock,
-      toBlock: latestBlock,
-      address: orderBookAddr,
-      topics: [topic],
-    }]);
-
+    await ensureIndexerSynced();
+    const snapshot = readIndexerSnapshot();
     const fills = [];
-    for (const log of logs) {
-      const parsed = orderBookInterface.parseLog(log);
-      const tokenAddr = parsed.args.equityToken;
-      const symbolData = listingsRegistryInterface.encodeFunctionData('getSymbolByToken', [tokenAddr]);
-      const symbolResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: symbolData }, 'latest']);
-      const [symbol] = listingsRegistryInterface.decodeFunctionResult('getSymbolByToken', symbolResult);
-
-      const block = await hardhatRpc('eth_getBlockByNumber', [log.blockNumber, false]);
-      const blockTimestamp = Number(block.timestamp);
-      const blockTimestampMs = blockTimestamp * 1000;
-
-      const buyData = orderBookInterface.encodeFunctionData('getBuyOrders', [tokenAddr]);
-      const buyResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: buyData }, 'latest']);
-      const [buyOrders] = orderBookInterface.decodeFunctionResult('getBuyOrders', buyResult);
-
-      const sellData = orderBookInterface.encodeFunctionData('getSellOrders', [tokenAddr]);
-      const sellResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: sellData }, 'latest']);
-      const [sellOrders] = orderBookInterface.decodeFunctionResult('getSellOrders', sellResult);
-
-      let makerTrader = "";
-      let takerTrader = "";
-      const makerId = Number(parsed.args.makerId);
-      const takerId = Number(parsed.args.takerId);
-
-      for (const order of buyOrders) {
-        if (Number(order.id) === makerId) {
-          makerTrader = order.trader;
-        }
-        if (Number(order.id) === takerId) {
-          takerTrader = order.trader;
-        }
-      }
-      for (const order of sellOrders) {
-        if (Number(order.id) === makerId) {
-          makerTrader = order.trader;
-        }
-        if (Number(order.id) === takerId) {
-          takerTrader = order.trader;
-        }
-      }
-
+    for (const row of snapshot.fills) {
       fills.push({
-        makerId: makerId,
-        takerId: takerId,
-        makerTrader: makerTrader,
-        takerTrader: takerTrader,
-        symbol: symbol,
-        priceCents: Number(parsed.args.price),
-        qty: parsed.args.qty.toString(),
-        blockNumber: Number(log.blockNumber),
-        txHash: log.transactionHash,
-        timestampMs: blockTimestampMs,
+        makerId: Number(row.makerId),
+        takerId: Number(row.takerId),
+        makerTrader: row.makerTrader,
+        takerTrader: row.takerTrader,
+        symbol: row.symbol,
+        priceCents: Number(row.priceCents),
+        qty: row.qtyWei,
+        blockNumber: Number(row.blockNumber),
+        txHash: row.txHash,
+        timestampMs: Number(row.timestampMs),
       });
     }
+    fills.sort((a, b) => b.timestampMs - a.timestampMs);
     res.json({ fills: fills });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -2047,7 +5487,7 @@ app.get('/api/indexer/status', async (_req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -2131,7 +5571,14 @@ app.get('/api/orders/open', async (req, res) => {
       const order = orderValues[i];
       const isOwner = order.trader === wallet;
       let isOpen = false;
-      if (order.status === 'OPEN' || order.status === 'PARTIAL') {
+      let isOpenStatus = false;
+      if (order.status === 'OPEN') {
+        isOpenStatus = true;
+      }
+      if (order.status === 'PARTIAL') {
+        isOpenStatus = true;
+      }
+      if (isOpenStatus) {
         isOpen = true;
       }
       if (isOwner && isOpen) {
@@ -2159,7 +5606,14 @@ app.get('/api/orders/:orderId', async (req, res) => {
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
-  if (!Number.isFinite(orderId) || orderId <= 0) {
+  let invalidOrderId = false;
+  if (!Number.isFinite(orderId)) {
+    invalidOrderId = true;
+  }
+  if (orderId <= 0) {
+    invalidOrderId = true;
+  }
+  if (invalidOrderId) {
     return res.status(400).json({ error: 'invalid order id' });
   }
 
@@ -2167,7 +5621,14 @@ app.get('/api/orders/:orderId', async (req, res) => {
     await ensureIndexerSynced();
     const { orders } = readIndexerSnapshot();
     const order = orders[String(orderId)];
-    if (!order || order.trader !== wallet) {
+    let missingOrder = false;
+    if (!order) {
+      missingOrder = true;
+    }
+    if (order && order.trader !== wallet) {
+      missingOrder = true;
+    }
+    if (missingOrder) {
       return res.status(404).json({ error: 'order not found' });
     }
     res.json({ order });
@@ -2190,7 +5651,14 @@ app.post('/api/orders/cancel', async (req, res) => {
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
-  if (!Number.isFinite(orderId) || orderId <= 0) {
+  let invalidCancelOrderId = false;
+  if (!Number.isFinite(orderId)) {
+    invalidCancelOrderId = true;
+  }
+  if (orderId <= 0) {
+    invalidCancelOrderId = true;
+  }
+  if (invalidCancelOrderId) {
     return res.status(400).json({ error: 'invalid order id' });
   }
 
@@ -2205,7 +5673,14 @@ app.post('/api/orders/cancel', async (req, res) => {
       return res.status(403).json({ error: 'cannot cancel another wallet order' });
     }
     let isCancellable = false;
-    if (order.status === 'OPEN' || order.status === 'PARTIAL') {
+    let openOrPartial = false;
+    if (order.status === 'OPEN') {
+      openOrPartial = true;
+    }
+    if (order.status === 'PARTIAL') {
+      openOrPartial = true;
+    }
+    if (openOrPartial) {
       isCancellable = true;
     }
     if (!isCancellable) {
@@ -2215,6 +5690,15 @@ app.post('/api/orders/cancel', async (req, res) => {
     const deployments = loadDeployments();
     const orderBookAddr = deployments.orderBookDex;
     const data = orderBookInterface.encodeFunctionData('cancelOrder', [BigInt(orderId)]);
+    const clientSign = wantsClientSign(body);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'cancel_order', from: wallet, to: orderBookAddr, data },
+        ],
+      });
+    }
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: orderBookAddr,
@@ -2245,6 +5729,10 @@ app.get('/api/txs', async (req, res) => {
     typeRaw = String(req.query.type);
   }
   const type = typeRaw.toUpperCase();
+  const allowedTypes = new Set(['ALL', 'ORDERS', 'FILLS', 'CASHFLOW', 'TRANSFERS', 'LEVERAGE']);
+  if (!allowedTypes.has(type)) {
+    return res.status(400).json({ error: 'invalid type' });
+  }
 
   let cursorRaw = 0;
   if (req.query.cursor) {
@@ -2260,19 +5748,32 @@ app.get('/api/txs', async (req, res) => {
     limitRaw = req.query.limit;
   }
   const numericLimit = Number(limitRaw);
-  const limit = Math.min(200, Math.max(1, numericLimit));
+  let limit = 50;
+  if (Number.isFinite(numericLimit)) {
+    limit = Math.min(200, Math.max(1, Math.floor(numericLimit)));
+  }
 
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
 
   try {
-    await ensureIndexerSynced();
+    await Promise.race([
+      ensureIndexerSynced(),
+      new Promise((resolve) => setTimeout(resolve, 4000)),
+    ]);
     const snapshot = readIndexerSnapshot();
     const { orders, fills, cancellations, cashflows, transfers, leveragedEvents } = snapshot;
     const items = [];
 
-    if (type === 'ALL' || type === 'ORDERS') {
+    let includeOrders = false;
+    if (type === 'ALL') {
+      includeOrders = true;
+    }
+    if (type === 'ORDERS') {
+      includeOrders = true;
+    }
+    if (includeOrders) {
       for (const order of Object.values(orders)) {
         if (order.trader === wallet) {
           items.push({
@@ -2317,7 +5818,14 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    if (type === 'ALL' || type === 'FILLS') {
+    let includeFills = false;
+    if (type === 'ALL') {
+      includeFills = true;
+    }
+    if (type === 'FILLS') {
+      includeFills = true;
+    }
+    if (includeFills) {
       for (const fill of fills) {
         let side = '';
         if (fill.makerTrader === wallet) {
@@ -2351,7 +5859,14 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    if (type === 'ALL' || type === 'CASHFLOW') {
+    let includeCashflow = false;
+    if (type === 'ALL') {
+      includeCashflow = true;
+    }
+    if (type === 'CASHFLOW') {
+      includeCashflow = true;
+    }
+    if (includeCashflow) {
       for (const cashflow of cashflows) {
         if (cashflow.wallet === wallet) {
           items.push({
@@ -2370,9 +5885,23 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    if (type === 'ALL' || type === 'TRANSFERS') {
+    let includeTransfers = false;
+    if (type === 'ALL') {
+      includeTransfers = true;
+    }
+    if (type === 'TRANSFERS') {
+      includeTransfers = true;
+    }
+    if (includeTransfers) {
       for (const transfer of transfers) {
-        if (transfer.from === wallet || transfer.to === wallet) {
+        let isWalletTransfer = false;
+        if (transfer.from === wallet) {
+          isWalletTransfer = true;
+        }
+        if (transfer.to === wallet) {
+          isWalletTransfer = true;
+        }
+        if (isWalletTransfer) {
           let direction = 'OUT';
           if (transfer.to === wallet) {
             direction = 'IN';
@@ -2398,9 +5927,19 @@ app.get('/api/txs', async (req, res) => {
       }
     }
 
-    if (type === 'ALL' || type === 'LEVERAGE') {
+    let includeLeverage = false;
+    if (type === 'ALL') {
+      includeLeverage = true;
+    }
+    if (type === 'LEVERAGE') {
+      includeLeverage = true;
+    }
+    if (includeLeverage) {
+      const leveragedRows = [];
+      const seenLeveragedIds = new Set();
       for (const entry of leveragedEvents) {
         if (entry.wallet === wallet) {
+          seenLeveragedIds.add(String(entry.id));
           const row = {
             kind: entry.kind,
             wallet,
@@ -2421,12 +5960,57 @@ app.get('/api/txs', async (req, res) => {
           } else if (entry.kind === 'LEVERAGE_BURN') {
             row.productQtyWei = entry.productQtyWei;
           }
-          items.push(row);
+          leveragedRows.push(row);
         }
+      }
+      if (leveragedRows.length === 0 && type === 'LEVERAGE' && TXS_ENABLE_LEVERAGE_FALLBACK_SCAN) {
+        try {
+          const fallbackRows = await fetchRecentLeveragedEventsForWallet(wallet, INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS);
+          for (let i = 0; i < fallbackRows.length; i += 1) {
+            const entry = fallbackRows[i];
+            const entryId = String(entry.id);
+            if (seenLeveragedIds.has(entryId)) {
+              continue;
+            }
+            seenLeveragedIds.add(entryId);
+            const row = {
+              kind: entry.kind,
+              wallet,
+              symbol: entry.baseSymbol,
+              productToken: entry.productToken,
+              leverage: entry.leverage,
+              navCents: entry.navCents,
+              txHash: entry.txHash,
+              blockNumber: entry.blockNumber,
+              timestampMs: entry.timestampMs,
+            };
+            if (entry.kind === 'LEVERAGE_MINT') {
+              row.ttokenInWei = entry.ttokenInWei;
+              row.productQtyWei = entry.productQtyWei;
+            } else if (entry.kind === 'LEVERAGE_UNWIND') {
+              row.ttokenOutWei = entry.ttokenOutWei;
+              row.productQtyWei = entry.productQtyWei;
+            } else if (entry.kind === 'LEVERAGE_BURN') {
+              row.productQtyWei = entry.productQtyWei;
+            }
+            leveragedRows.push(row);
+          }
+        } catch {
+        }
+      }
+      for (let i = 0; i < leveragedRows.length; i += 1) {
+        items.push(leveragedRows[i]);
       }
     }
 
-    items.sort((a, b) => b.timestampMs - a.timestampMs || b.blockNumber - a.blockNumber);
+    items.sort((a, b) => {
+      const timestampDiff = b.timestampMs - a.timestampMs;
+      if (timestampDiff !== 0) {
+        return timestampDiff;
+      }
+      const blockNumberDiff = b.blockNumber - a.blockNumber;
+      return blockNumberDiff;
+    });
     const offset = Math.max(0, cursor);
     const paged = items.slice(offset, offset + limit);
     let nextCursor = null;
@@ -2478,7 +6062,14 @@ app.get('/api/portfolio/positions', async (req, res) => {
     const fillRows = [];
     const walletNorm = normalizeAddress(wallet);
     for (const fill of snapshot.fills) {
-      if (fill.makerTrader === walletNorm || fill.takerTrader === walletNorm) {
+      let isWalletFill = false;
+      if (fill.makerTrader === walletNorm) {
+        isWalletFill = true;
+      }
+      if (fill.takerTrader === walletNorm) {
+        isWalletFill = true;
+      }
+      if (isWalletFill) {
         let side = '';
         if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
@@ -2790,6 +6381,14 @@ app.get('/api/portfolio/summary', async (req, res) => {
     await ensureIndexerSynced();
     const snapshot = readIndexerSnapshot();
     const deployments = loadDeployments();
+    const chainIdHex = await hardhatRpc('eth_chainId', []);
+    const chainId = parseRpcInt(chainIdHex);
+    const nativeEthWeiHex = await hardhatRpc('eth_getBalance', [wallet, 'latest']);
+    const nativeEthWei = BigInt(nativeEthWeiHex).toString();
+    let nativeSymbol = 'ETH';
+    if (chainId === 11155111) {
+      nativeSymbol = 'SepoliaETH';
+    }
     const ttokenAddr = deployments.ttoken;
     const ttokenData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
     const ttokenResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: ttokenData }, 'latest']);
@@ -2810,7 +6409,14 @@ app.get('/api/portfolio/summary', async (req, res) => {
     const fillRows = [];
     const walletNorm = normalizeAddress(wallet);
     for (const fill of snapshot.fills) {
-      if (fill.makerTrader === walletNorm || fill.takerTrader === walletNorm) {
+      let matchesFillWallet = false;
+      if (fill.makerTrader === walletNorm) {
+        matchesFillWallet = true;
+      }
+      if (fill.takerTrader === walletNorm) {
+        matchesFillWallet = true;
+      }
+      if (matchesFillWallet) {
         let side = '';
         if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
@@ -3134,6 +6740,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
       }
     }
     const totalValueWei = cashWei + stockValueWei + leveragedValueWei;
+    const gasSummary = await computeOverallGasForWallet(snapshot, wallet);
 
     let aggregator = null;
     let drift = null;
@@ -3181,6 +6788,9 @@ app.get('/api/portfolio/summary', async (req, res) => {
 
     res.json({
       wallet,
+      chainId,
+      nativeSymbol,
+      nativeEthWei,
       cashValueWei: cashWei.toString(),
       stockValueWei: stockValueWei.toString(),
       leveragedValueWei: leveragedValueWei.toString(),
@@ -3188,6 +6798,8 @@ app.get('/api/portfolio/summary', async (req, res) => {
       totalCostBasisWei: totalCostBasisWei.toString(),
       realizedPnlWei: realizedPnlWei.toString(),
       unrealizedPnlWei: unrealizedPnlWei.toString(),
+      overallGasUsedUnits: gasSummary.gasUsedUnits.toString(),
+      overallGasCostWei: gasSummary.gasCostWei.toString(),
       aggregator,
       drift,
     });
@@ -3213,7 +6825,14 @@ app.get('/api/portfolio/rebuild-audit', async (req, res) => {
     const fillRows = [];
     const walletNorm = normalizeAddress(wallet);
     for (const fill of snapshot.fills) {
-      if (fill.makerTrader === walletNorm || fill.takerTrader === walletNorm) {
+      let relatedToWallet = false;
+      if (fill.makerTrader === walletNorm) {
+        relatedToWallet = true;
+      }
+      if (fill.takerTrader === walletNorm) {
+        relatedToWallet = true;
+      }
+      if (relatedToWallet) {
         let side = '';
         if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
@@ -3347,7 +6966,14 @@ app.get('/api/dividends/epochs', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let missingEpochTokenAddress = false;
+    if (!tokenAddress) {
+      missingEpochTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingEpochTokenAddress = true;
+    }
+    if (missingEpochTokenAddress) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
 
@@ -3371,6 +6997,774 @@ app.get('/api/dividends/epochs', async (req, res) => {
       });
     }
     res.json({ symbol, tokenAddress, epochs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/dividends/merkle/declare', async (req, res) => {
+  try {
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let symbolText = '';
+    if (body.symbol) {
+      symbolText = String(body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
+    let merkleRoot = '';
+    if (body.merkleRoot) {
+      merkleRoot = String(body.merkleRoot);
+    }
+    let totalEntitledWei = '';
+    if (body.totalEntitledWei) {
+      totalEntitledWei = String(body.totalEntitledWei);
+    }
+    let claimsUri = '';
+    if (body.claimsUri) {
+      claimsUri = String(body.claimsUri);
+    }
+    let contentHash = ethers.ZeroHash;
+    if (body.contentHash) {
+      contentHash = String(body.contentHash);
+    }
+    let claims = [];
+    if (Array.isArray(body.claims)) {
+      claims = body.claims;
+    }
+
+    let hasMissingInput = false;
+    if (!symbol) {
+      hasMissingInput = true;
+    }
+    if (!merkleRoot) {
+      hasMissingInput = true;
+    }
+    if (!totalEntitledWei) {
+      hasMissingInput = true;
+    }
+    if (hasMissingInput) {
+      return res.status(400).json({ error: 'symbol, merkleRoot, totalEntitledWei are required' });
+    }
+    if (!/^0x[a-fA-F0-9]{64}$/.test(merkleRoot)) {
+      return res.status(400).json({ error: 'merkleRoot must be 32-byte hex string' });
+    }
+    if (!/^0x[a-fA-F0-9]{64}$/.test(contentHash)) {
+      return res.status(400).json({ error: 'contentHash must be 32-byte hex string' });
+    }
+    if (!(BigInt(totalEntitledWei) > 0n)) {
+      return res.status(400).json({ error: 'totalEntitledWei must be > 0' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.status(400).json({ error: 'dividends merkle contract not deployed' });
+    }
+
+    const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
+    let tokenAddressMissing = false;
+    if (!tokenAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddressMissing) {
+      return res.status(404).json({ error: 'symbol not listed' });
+    }
+
+    let rawTtokenAddr = '';
+    if (deployments.ttoken) {
+      rawTtokenAddr = deployments.ttoken;
+    } else if (deployments.ttokenAddress) {
+      rawTtokenAddr = deployments.ttokenAddress;
+    } else if (deployments.TTOKEN_ADDRESS) {
+      rawTtokenAddr = deployments.TTOKEN_ADDRESS;
+    }
+    const ttokenAddr = normalizeAddress(rawTtokenAddr);
+    if (!ttokenAddr) {
+      throw new Error('ttoken address missing in deployments');
+    }
+    const minterRoleData = ttokenRoleInterface.encodeFunctionData('MINTER_ROLE', []);
+    const minterRoleResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: minterRoleData }, 'latest']);
+    const [minterRole] = ttokenRoleInterface.decodeFunctionResult('MINTER_ROLE', minterRoleResult);
+    const hasMinterRoleData = ttokenRoleInterface.encodeFunctionData('hasRole', [minterRole, deployments.dividendsMerkle]);
+    const hasMinterRoleResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: hasMinterRoleData }, 'latest']);
+    const [hasMinterRole] = ttokenRoleInterface.decodeFunctionResult('hasRole', hasMinterRoleResult);
+    if (!hasMinterRole) {
+      const grantMinterData = ttokenRoleInterface.encodeFunctionData('grantRole', [minterRole, deployments.dividendsMerkle]);
+      const txHash = await hardhatRpc('eth_sendTransaction', [{
+        from: deployments.admin,
+        to: ttokenAddr,
+        data: grantMinterData,
+      }]);
+      await waitForReceipt(txHash);
+    }
+
+    const declareData = dividendsMerkleInterface.encodeFunctionData('declareMerkleDividend', [
+      tokenAddress,
+      merkleRoot,
+      BigInt(totalEntitledWei),
+      contentHash,
+      claimsUri,
+    ]);
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: deployments.admin,
+      to: deployments.dividendsMerkle,
+      data: declareData,
+    }]);
+    await waitForReceipt(txHash);
+
+    const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+    const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+    const epochId = Number(countRaw);
+
+    writeMerkleTree(epochId, {
+      epochId,
+      symbol,
+      tokenAddress,
+      merkleRoot,
+      totalEntitledWei: String(totalEntitledWei),
+      contentHash,
+      claimsUri,
+      txHash,
+      declaredAtMs: Date.now(),
+    });
+
+    const normalizedClaims = [];
+    for (let i = 0; i < claims.length; i += 1) {
+      const row = claims[i];
+      let accountText = '';
+      if (row.account) {
+        accountText = String(row.account);
+      }
+      const account = normalizeAddress(accountText);
+      let amountWei = '0';
+      if (row.amountWei) {
+        amountWei = String(row.amountWei);
+      }
+      const leafIndex = Number(row.leafIndex);
+      let proof = [];
+      if (Array.isArray(row.proof)) {
+        proof = row.proof;
+      }
+      let canUseClaim = true;
+      if (!account || !(BigInt(amountWei) > 0n)) {
+        canUseClaim = false;
+      }
+      let invalidLeafIndex = false;
+      if (!Number.isFinite(leafIndex)) {
+        invalidLeafIndex = true;
+      }
+      if (leafIndex < 0) {
+        invalidLeafIndex = true;
+      }
+      if (invalidLeafIndex) {
+        canUseClaim = false;
+      }
+      if (canUseClaim) {
+        normalizedClaims.push({
+          account,
+          amountWei,
+          leafIndex,
+          proof,
+        });
+      }
+    }
+    if (normalizedClaims.length > 0) {
+      writeMerkleClaims(epochId, {
+        epochId,
+        symbol,
+        tokenAddress,
+        merkleRoot,
+        claims: normalizedClaims,
+      });
+    }
+
+    res.json({
+      txHash,
+      epochId,
+      symbol,
+      tokenAddress,
+      merkleRoot,
+      totalEntitledWei: String(totalEntitledWei),
+      contentHash,
+      claimsUri,
+      claimCount: normalizedClaims.length,
+    });
+  } catch (err) {
+    const message = String(err && err.message ? err.message : err);
+    if (isRpcRateLimitError(message) || message.includes('RPC non-JSON response')) {
+      return res.status(429).json({ error: 'RPC rate limited while declaring merkle dividend. Please retry in a few seconds.' });
+    }
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
+  try {
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let symbolText = '';
+    if (body.symbol) {
+      symbolText = String(body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
+    let divPerShareText = '';
+    if (body.divPerShare) {
+      divPerShareText = String(body.divPerShare).trim();
+    }
+    let claimsUri = '';
+    if (body.claimsUri) {
+      claimsUri = String(body.claimsUri);
+    }
+    let missingDeclareAutoInput = false;
+    if (!symbol) {
+      missingDeclareAutoInput = true;
+    }
+    if (!divPerShareText) {
+      missingDeclareAutoInput = true;
+    }
+    if (missingDeclareAutoInput) {
+      return res.status(400).json({ error: 'symbol and divPerShare are required' });
+    }
+    const divPerShareWei = ethers.parseUnits(divPerShareText, 18);
+    if (!(divPerShareWei > 0n)) {
+      return res.status(400).json({ error: 'divPerShare must be > 0' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.status(400).json({ error: 'dividends merkle contract not deployed' });
+    }
+    const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
+    let missingTokenAddress = false;
+    if (!tokenAddress) {
+      missingTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingTokenAddress = true;
+    }
+    if (missingTokenAddress) {
+      return res.status(404).json({ error: 'symbol not listed' });
+    }
+
+    const snapshotData = equityTokenSnapshotInterface.encodeFunctionData('snapshot', []);
+    const snapshotTxHash = await hardhatRpc('eth_sendTransaction', [{
+      from: deployments.admin,
+      to: tokenAddress,
+      data: snapshotData,
+    }]);
+    const snapshotReceipt = await waitForReceipt(snapshotTxHash);
+    const snapshotId = tryParseSnapshotIdFromReceipt(snapshotReceipt);
+    if (!(snapshotId > 0)) {
+      throw new Error('could not parse snapshot id');
+    }
+
+    const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+    const holders = await collectHolderCandidatesFromChain(tokenAddress, latestBlockHex);
+
+    const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+    const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+    const nextEpochId = Number(countRaw) + 1;
+
+    const claimRows = await mapWithConcurrency(holders, 4, async (account) => {
+      const balData = equityTokenSnapshotInterface.encodeFunctionData('balanceOfAt', [account, BigInt(snapshotId)]);
+      const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
+      const [balanceRaw] = equityTokenSnapshotInterface.decodeFunctionResult('balanceOfAt', balResult);
+      const balanceWei = BigInt(balanceRaw.toString());
+      if (!(balanceWei > 0n)) {
+        return null;
+      }
+      const amountWei = (balanceWei * divPerShareWei) / (10n ** 18n);
+      if (!(amountWei > 0n)) {
+        return null;
+      }
+      return {
+        account,
+        amountWei: amountWei.toString(),
+      };
+    });
+    const claims = [];
+    for (let i = 0; i < claimRows.length; i += 1) {
+      if (claimRows[i]) {
+        claims.push(claimRows[i]);
+      }
+    }
+    claims.sort((a, b) => a.account.toLowerCase().localeCompare(b.account.toLowerCase()));
+    for (let i = 0; i < claims.length; i += 1) {
+      claims[i].leafIndex = i;
+    }
+    if (claims.length === 0) {
+      return res.status(400).json({ error: 'no eligible holders at snapshot for merkle declare' });
+    }
+
+    const leafHashes = [];
+    let totalEntitledWei = 0n;
+    for (let i = 0; i < claims.length; i += 1) {
+      const row = claims[i];
+      const leaf = merkleLeafHash(nextEpochId, tokenAddress, row.account, row.amountWei, row.leafIndex);
+      leafHashes.push(leaf);
+      totalEntitledWei += BigInt(row.amountWei);
+    }
+    const levels = buildMerkleLevelsLeftRight(leafHashes);
+    const root = levels[levels.length - 1][0];
+    for (let i = 0; i < claims.length; i += 1) {
+      claims[i].proof = buildMerkleProofLeftRight(levels, i);
+    }
+
+    const contentSource = JSON.stringify({
+      epochId: nextEpochId,
+      symbol,
+      tokenAddress,
+      snapshotId,
+      claims,
+    });
+    const contentHash = ethers.keccak256(ethers.toUtf8Bytes(contentSource));
+
+    let rawTtokenAddr = '';
+    if (deployments.ttoken) {
+      rawTtokenAddr = deployments.ttoken;
+    } else if (deployments.ttokenAddress) {
+      rawTtokenAddr = deployments.ttokenAddress;
+    } else if (deployments.TTOKEN_ADDRESS) {
+      rawTtokenAddr = deployments.TTOKEN_ADDRESS;
+    }
+    const ttokenAddr = normalizeAddress(rawTtokenAddr);
+    if (!ttokenAddr) {
+      throw new Error('ttoken address missing in deployments');
+    }
+    const minterRoleData = ttokenRoleInterface.encodeFunctionData('MINTER_ROLE', []);
+    const minterRoleResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: minterRoleData }, 'latest']);
+    const [minterRole] = ttokenRoleInterface.decodeFunctionResult('MINTER_ROLE', minterRoleResult);
+    const hasMinterRoleData = ttokenRoleInterface.encodeFunctionData('hasRole', [minterRole, deployments.dividendsMerkle]);
+    const hasMinterRoleResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: hasMinterRoleData }, 'latest']);
+    const [hasMinterRole] = ttokenRoleInterface.decodeFunctionResult('hasRole', hasMinterRoleResult);
+    if (!hasMinterRole) {
+      const grantMinterData = ttokenRoleInterface.encodeFunctionData('grantRole', [minterRole, deployments.dividendsMerkle]);
+      const txHash = await hardhatRpc('eth_sendTransaction', [{
+        from: deployments.admin,
+        to: ttokenAddr,
+        data: grantMinterData,
+      }]);
+      await waitForReceipt(txHash);
+    }
+
+    const declareData = dividendsMerkleInterface.encodeFunctionData('declareMerkleDividend', [
+      tokenAddress,
+      root,
+      totalEntitledWei,
+      contentHash,
+      claimsUri,
+    ]);
+    const declareTxHash = await hardhatRpc('eth_sendTransaction', [{
+      from: deployments.admin,
+      to: deployments.dividendsMerkle,
+      data: declareData,
+    }]);
+    await waitForReceipt(declareTxHash);
+
+    const epochId = nextEpochId;
+    writeMerkleTree(epochId, {
+      epochId,
+      symbol,
+      tokenAddress,
+      snapshotId,
+      merkleRoot: root,
+      totalEntitledWei: totalEntitledWei.toString(),
+      contentHash,
+      claimsUri,
+      txHash: declareTxHash,
+      declaredAtMs: Date.now(),
+      levelSizes: levels.map((rows) => rows.length),
+      levels,
+    });
+    writeMerkleClaims(epochId, {
+      epochId,
+      symbol,
+      tokenAddress,
+      snapshotId,
+      merkleRoot: root,
+      claims,
+    });
+
+    res.json({
+      txHash: declareTxHash,
+      epochId,
+      symbol,
+      tokenAddress,
+      snapshotId,
+      divPerShareWei: divPerShareWei.toString(),
+      merkleRoot: root,
+      totalEntitledWei: totalEntitledWei.toString(),
+      contentHash,
+      claimCount: claims.length,
+      levelSizes: levels.map((rows) => rows.length),
+    });
+  } catch (err) {
+    const message = String(err && err.message ? err.message : err);
+    if (isRpcRateLimitError(message) || message.includes('RPC non-JSON response')) {
+      return res.status(429).json({ error: 'RPC rate limited while building merkle tree. Please retry in a few seconds.' });
+    }
+    res.status(500).json({ error: message });
+  }
+});
+
+app.get('/api/dividends/merkle/epochs', async (req, res) => {
+  let symbolText = '';
+  if (req.query.symbol) {
+    symbolText = String(req.query.symbol);
+  }
+  const symbol = symbolText.toUpperCase();
+  try {
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.json({ epochs: [] });
+    }
+
+    const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+    const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+    const count = Number(countRaw);
+    const epochs = [];
+    for (let epochId = 1; epochId <= count; epochId += 1) {
+      const epochData = dividendsMerkleInterface.encodeFunctionData('getEpoch', [BigInt(epochId)]);
+      const epochResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: epochData }, 'latest']);
+      const [row] = dividendsMerkleInterface.decodeFunctionResult('getEpoch', epochResult);
+      const epochSymbol = await getSymbolByToken(deployments.listingsRegistry, row.equityToken);
+      let hasSymbolFilter = false;
+      if (symbol) {
+        hasSymbolFilter = true;
+      }
+      let allowEpoch = true;
+      if (hasSymbolFilter && epochSymbol !== symbol) {
+        allowEpoch = false;
+      }
+      if (allowEpoch) {
+        epochs.push({
+          epochId,
+          symbol: epochSymbol,
+          tokenAddress: normalizeAddress(row.equityToken),
+          merkleRoot: row.merkleRoot,
+          declaredAt: Number(row.declaredAt),
+          totalEntitledWei: row.totalEntitledWei.toString(),
+          totalClaimedWei: row.totalClaimedWei.toString(),
+          contentHash: row.contentHash,
+          claimsUri: String(row.claimsUri),
+        });
+      }
+    }
+    res.json({ symbol, epochs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/dividends/merkle/tree', async (req, res) => {
+  const epochId = Number(req.query.epochId);
+  let invalidMerkleEpochId = false;
+  if (!Number.isFinite(epochId)) {
+    invalidMerkleEpochId = true;
+  }
+  if (epochId <= 0) {
+    invalidMerkleEpochId = true;
+  }
+  if (invalidMerkleEpochId) {
+    return res.status(400).json({ error: 'epochId is required' });
+  }
+  try {
+    const tree = readMerkleTree(epochId);
+    const claims = readMerkleClaims(epochId);
+    let levels = [];
+    if (Array.isArray(tree.levels)) {
+      levels = tree.levels;
+    }
+    let levelSizes = [];
+    if (Array.isArray(tree.levelSizes)) {
+      levelSizes = tree.levelSizes;
+    }
+    const previewLevels = [];
+    for (let i = 0; i < levels.length; i += 1) {
+      const hashes = levels[i];
+      const levelRows = [];
+      for (let j = 0; j < hashes.length; j += 1) {
+        const hash = String(hashes[j]);
+        levelRows.push({
+          index: j,
+          hash,
+          shortHash: `${hash.slice(0, 10)}...${hash.slice(-8)}`,
+        });
+      }
+      previewLevels.push({
+        level: i,
+        size: hashes.length,
+        nodes: levelRows,
+      });
+    }
+    res.json({
+      epochId,
+      symbol: (() => {
+        let value = '';
+        if (tree.symbol) {
+          value = String(tree.symbol);
+        }
+        return value;
+      })(),
+      tokenAddress: (() => {
+        let value = '';
+        if (tree.tokenAddress) {
+          value = String(tree.tokenAddress);
+        }
+        return value;
+      })(),
+      snapshotId: (() => {
+        let value = 0;
+        if (tree.snapshotId) {
+          value = Number(tree.snapshotId);
+        }
+        return value;
+      })(),
+      merkleRoot: (() => {
+        let value = '';
+        if (tree.merkleRoot) {
+          value = String(tree.merkleRoot);
+        }
+        return value;
+      })(),
+      totalEntitledWei: (() => {
+        let value = '0';
+        if (tree.totalEntitledWei) {
+          value = String(tree.totalEntitledWei);
+        }
+        return value;
+      })(),
+      contentHash: (() => {
+        let value = ethers.ZeroHash;
+        if (tree.contentHash) {
+          value = String(tree.contentHash);
+        }
+        return value;
+      })(),
+      claimsUri: (() => {
+        let value = '';
+        if (tree.claimsUri) {
+          value = String(tree.claimsUri);
+        }
+        return value;
+      })(),
+      claimCount: (() => {
+        let value = 0;
+        if (Array.isArray(claims.claims)) {
+          value = claims.claims.length;
+        }
+        return value;
+      })(),
+      levelSizes,
+      levels: previewLevels,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/dividends/merkle/claimable', async (req, res) => {
+  let walletText = '';
+  if (req.query.wallet) {
+    walletText = String(req.query.wallet);
+  }
+  const wallet = normalizeAddress(walletText);
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  try {
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.json({ wallet, claimables: [] });
+    }
+    const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+    const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+    const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+    const count = Number(countRaw);
+    const claimables = [];
+
+    for (let epochId = 1; epochId <= count; epochId += 1) {
+      const tree = readMerkleTree(epochId);
+      const claimsPayload = readMerkleClaims(epochId);
+      let rows = [];
+      if (Array.isArray(claimsPayload.claims)) {
+        rows = claimsPayload.claims;
+      }
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i];
+        let accountText = '';
+        if (row.account) {
+          accountText = String(row.account);
+        }
+        const account = normalizeAddress(accountText);
+        if (account === wallet) {
+          const leafIndex = Number(row.leafIndex);
+          let amountWei = '0';
+          if (row.amountWei) {
+            amountWei = String(row.amountWei);
+          }
+          let proof = [];
+          if (Array.isArray(row.proof)) {
+            proof = row.proof;
+          }
+          const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
+          const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
+          const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
+          claimables.push({
+            claimType: 'MERKLE',
+            epochId,
+            symbol: (() => {
+              let value = '';
+              if (tree.symbol) {
+                value = String(tree.symbol);
+              }
+              return value;
+            })(),
+            tokenAddress: (() => {
+              let value = '';
+              if (tree.tokenAddress) {
+                value = String(tree.tokenAddress);
+              }
+              return value;
+            })(),
+            claimableWei: amountWei,
+            amountWei,
+            leafIndex,
+            proof,
+            claimed,
+            canClaim: !claimed && BigInt(amountWei) > 0n,
+            merkleRoot: (() => {
+              let value = '';
+              if (tree.merkleRoot) {
+                value = String(tree.merkleRoot);
+              }
+              return value;
+            })(),
+            contentHash: (() => {
+              let value = ethers.ZeroHash;
+              if (tree.contentHash) {
+                value = String(tree.contentHash);
+              }
+              return value;
+            })(),
+            claimsUri: (() => {
+              let value = '';
+              if (tree.claimsUri) {
+                value = String(tree.claimsUri);
+              }
+              return value;
+            })(),
+          });
+        }
+      }
+    }
+
+    res.json({ wallet, claimables });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/dividends/merkle/claim', async (req, res) => {
+  try {
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let walletText = '';
+    if (body.wallet) {
+      walletText = String(body.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    let accountText = '';
+    if (body.account) {
+      accountText = String(body.account);
+    }
+    const account = normalizeAddress(accountText);
+    const epochId = Number(body.epochId);
+    let amountWei = '0';
+    if (body.amountWei) {
+      amountWei = String(body.amountWei);
+    }
+    const leafIndex = Number(body.leafIndex);
+    let proof = [];
+    if (Array.isArray(body.proof)) {
+      proof = body.proof;
+    }
+
+    let invalidWalletAccountPair = false;
+    if (!wallet) {
+      invalidWalletAccountPair = true;
+    }
+    if (!account) {
+      invalidWalletAccountPair = true;
+    }
+    if (wallet !== account) {
+      invalidWalletAccountPair = true;
+    }
+    if (invalidWalletAccountPair) {
+      return res.status(400).json({ error: 'wallet and account must match and be valid address' });
+    }
+    let invalidClaimEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidClaimEpochId = true;
+    }
+    if (epochId <= 0) {
+      invalidClaimEpochId = true;
+    }
+    if (invalidClaimEpochId) {
+      return res.status(400).json({ error: 'epochId must be > 0' });
+    }
+    if (!(BigInt(amountWei) > 0n)) {
+      return res.status(400).json({ error: 'amountWei must be > 0' });
+    }
+    let invalidClaimLeafIndex = false;
+    if (!Number.isFinite(leafIndex)) {
+      invalidClaimLeafIndex = true;
+    }
+    if (leafIndex < 0) {
+      invalidClaimLeafIndex = true;
+    }
+    if (invalidClaimLeafIndex) {
+      return res.status(400).json({ error: 'leafIndex must be >= 0' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.dividendsMerkle) {
+      return res.status(400).json({ error: 'dividends merkle contract not deployed' });
+    }
+    const data = dividendsMerkleInterface.encodeFunctionData('claim', [
+      BigInt(epochId),
+      account,
+      BigInt(amountWei),
+      BigInt(leafIndex),
+      proof,
+    ]);
+    const clientSign = wantsClientSign(body);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'claim_merkle_dividend', from: wallet, to: deployments.dividendsMerkle, data },
+        ],
+      });
+    }
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: deployments.dividendsMerkle,
+      data,
+    }]);
+    await waitForReceipt(txHash);
+    res.json({ txHash, wallet, account, epochId, amountWei, leafIndex });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3414,13 +7808,102 @@ app.get('/api/dividends/claimables', async (req, res) => {
         const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: claimedData }, 'latest']);
         const [claimed] = dividendsInterface.decodeFunctionResult('isClaimed', claimedResult);
         claimables.push({
+          claimType: 'SNAPSHOT',
           symbol: listing.symbol,
           tokenAddress: listing.tokenAddress,
           epochId,
           claimableWei,
           claimed,
-          canClaim: BigInt(claimableWei) > 0n && !claimed,
+          canClaim: (() => {
+            let canClaim = false;
+            if (BigInt(claimableWei) > 0n) {
+              if (!claimed) {
+                canClaim = true;
+              }
+            }
+            return canClaim;
+          })(),
         });
+      }
+    }
+
+    if (deployments.dividendsMerkle) {
+      const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+      const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+      const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+      const count = Number(countRaw);
+      for (let epochId = 1; epochId <= count; epochId += 1) {
+        const tree = readMerkleTree(epochId);
+        const claimsPayload = readMerkleClaims(epochId);
+        let rows = [];
+        if (Array.isArray(claimsPayload.claims)) {
+          rows = claimsPayload.claims;
+        }
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i];
+          let accountText = '';
+          if (row.account) {
+            accountText = String(row.account);
+          }
+          const account = normalizeAddress(accountText);
+          if (account === wallet) {
+            let amountWei = '0';
+            if (row.amountWei) {
+              amountWei = String(row.amountWei);
+            }
+            const leafIndex = Number(row.leafIndex);
+            let proof = [];
+            if (Array.isArray(row.proof)) {
+              proof = row.proof;
+            }
+            const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
+            const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
+            const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
+            let treeSymbol = '';
+            if (tree.symbol) {
+              treeSymbol = String(tree.symbol);
+            }
+            let treeTokenAddress = '';
+            if (tree.tokenAddress) {
+              treeTokenAddress = String(tree.tokenAddress);
+            }
+            let treeMerkleRoot = '';
+            if (tree.merkleRoot) {
+              treeMerkleRoot = String(tree.merkleRoot);
+            }
+            let treeContentHash = ethers.ZeroHash;
+            if (tree.contentHash) {
+              treeContentHash = String(tree.contentHash);
+            }
+            let treeClaimsUri = '';
+            if (tree.claimsUri) {
+              treeClaimsUri = String(tree.claimsUri);
+            }
+            claimables.push({
+              claimType: 'MERKLE',
+              symbol: treeSymbol,
+              tokenAddress: treeTokenAddress,
+              epochId,
+              claimableWei: amountWei,
+              amountWei,
+              leafIndex,
+              proof,
+              claimed,
+              canClaim: (() => {
+                let canClaim = false;
+                if (BigInt(amountWei) > 0n) {
+                  if (!claimed) {
+                    canClaim = true;
+                  }
+                }
+                return canClaim;
+              })(),
+              merkleRoot: treeMerkleRoot,
+              contentHash: treeContentHash,
+              claimsUri: treeClaimsUri,
+            });
+          }
+        }
       }
     }
 
@@ -3434,7 +7917,20 @@ app.get('/api/dividends/claimable', async (req, res) => {
   const wallet = normalizeAddress(String(req.query.wallet));
   const symbol = String(req.query.symbol).toUpperCase();
   const epochId = Number(req.query.epochId);
-  if (!wallet || !symbol || !Number.isFinite(epochId) || epochId <= 0) {
+  let claimableInputInvalid = false;
+  if (!wallet) {
+    claimableInputInvalid = true;
+  }
+  if (!symbol) {
+    claimableInputInvalid = true;
+  }
+  if (!Number.isFinite(epochId)) {
+    claimableInputInvalid = true;
+  }
+  if (epochId <= 0) {
+    claimableInputInvalid = true;
+  }
+  if (claimableInputInvalid) {
     return res.status(400).json({ error: 'wallet, symbol, epochId are required' });
   }
   try {
@@ -3443,7 +7939,14 @@ app.get('/api/dividends/claimable', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let tokenAddressMissing = false;
+    if (!tokenAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddressMissing) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
     const previewData = dividendsInterface.encodeFunctionData('previewClaim', [tokenAddress, epochId, wallet]);
@@ -3460,7 +7963,15 @@ app.get('/api/dividends/claimable', async (req, res) => {
       epochId,
       claimableWei,
       claimed,
-      canClaim: BigInt(claimableWei) > 0n && !claimed,
+      canClaim: (() => {
+        let canClaim = false;
+        if (BigInt(claimableWei) > 0n) {
+          if (!claimed) {
+            canClaim = true;
+          }
+        }
+        return canClaim;
+      })(),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -3472,7 +7983,14 @@ app.post('/api/dividends/declare', async (req, res) => {
     const body = req.body;
     const symbol = String(body.symbol).toUpperCase();
     const divPerShare = String(body.divPerShare);
-    if (!symbol || !divPerShare) {
+    let missingDeclareInput = false;
+    if (!symbol) {
+      missingDeclareInput = true;
+    }
+    if (!divPerShare) {
+      missingDeclareInput = true;
+    }
+    if (missingDeclareInput) {
       return res.status(400).json({ error: 'symbol and divPerShare are required' });
     }
     const deployments = loadDeployments();
@@ -3480,7 +7998,14 @@ app.post('/api/dividends/declare', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let tokenAddressMissing = false;
+    if (!tokenAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddressMissing) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
     const dividendsAddr = deployments.dividends;
@@ -3548,10 +8073,24 @@ app.post('/api/dividends/declare', async (req, res) => {
 app.post('/api/dividends/claim', async (req, res) => {
   try {
     const body = req.body;
+    const clientSign = wantsClientSign(body);
     const wallet = normalizeAddress(String(body.wallet));
     const symbol = String(body.symbol).toUpperCase();
     const epochId = Number(body.epochId);
-    if (!wallet || !symbol || !Number.isFinite(epochId) || epochId <= 0) {
+    let invalidClaimInput = false;
+    if (!wallet) {
+      invalidClaimInput = true;
+    }
+    if (!symbol) {
+      invalidClaimInput = true;
+    }
+    if (!Number.isFinite(epochId)) {
+      invalidClaimInput = true;
+    }
+    if (epochId <= 0) {
+      invalidClaimInput = true;
+    }
+    if (invalidClaimInput) {
       return res.status(400).json({ error: 'wallet, symbol, epochId are required' });
     }
     const deployments = loadDeployments();
@@ -3559,7 +8098,14 @@ app.post('/api/dividends/claim', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let missingClaimTokenAddress = false;
+    if (!tokenAddress) {
+      missingClaimTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingClaimTokenAddress = true;
+    }
+    if (missingClaimTokenAddress) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
     const dividendsAddr = deployments.dividends;
@@ -3609,6 +8155,14 @@ app.post('/api/dividends/claim', async (req, res) => {
       await waitForReceipt(txHash);
     }
     const data = dividendsInterface.encodeFunctionData('claimDividend', [tokenAddress, BigInt(epochId)]);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'claim_snapshot_dividend', from: wallet, to: deployments.dividends, data },
+        ],
+      });
+    }
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: deployments.dividends,
@@ -3621,36 +8175,434 @@ app.post('/api/dividends/claim', async (req, res) => {
   }
 });
 
+async function buildAwardLeaderboardForEpoch(awardAddress, epochId) {
+  const maxData = awardInterface.encodeFunctionData('maxQtyByEpoch', [BigInt(epochId)]);
+  const maxResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: maxData }, 'latest']);
+  const [maxQtyRaw] = awardInterface.decodeFunctionResult('maxQtyByEpoch', maxResult);
+  const maxQtyWei = maxQtyRaw.toString();
+
+  const countData = awardInterface.encodeFunctionData('getEpochTraderCount', [BigInt(epochId)]);
+  const countResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: countData }, 'latest']);
+  const [countRaw] = awardInterface.decodeFunctionResult('getEpochTraderCount', countResult);
+  const count = Number(countRaw);
+
+  const indexes = [];
+  for (let i = 0; i < count; i += 1) {
+    indexes.push(i);
+  }
+  const itemRows = await mapWithConcurrency(indexes, 4, async (i) => {
+    const traderData = awardInterface.encodeFunctionData('getEpochTraderAt', [BigInt(epochId), BigInt(i)]);
+    const traderResult = await hardhatRpc('eth_call', [{ to: awardAddress, data: traderData }, 'latest']);
+    const [traderRaw] = awardInterface.decodeFunctionResult('getEpochTraderAt', traderResult);
+    const trader = normalizeAddress(traderRaw);
+
+    const qtyData = awardInterface.encodeFunctionData('qtyByEpochByTrader', [BigInt(epochId), trader]);
+    const winnerData = awardInterface.encodeFunctionData('isWinner', [BigInt(epochId), trader]);
+    const [qtyResult, winnerResult] = await Promise.all([
+      hardhatRpc('eth_call', [{ to: awardAddress, data: qtyData }, 'latest']),
+      hardhatRpc('eth_call', [{ to: awardAddress, data: winnerData }, 'latest']),
+    ]);
+    const [qtyRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
+    const [isWinner] = awardInterface.decodeFunctionResult('isWinner', winnerResult);
+
+    return {
+      epochId,
+      trader,
+      qtyWei: qtyRaw.toString(),
+      isWinner,
+    };
+  });
+  const items = [];
+  for (let i = 0; i < itemRows.length; i += 1) {
+    if (itemRows[i]) {
+      items.push(itemRows[i]);
+    }
+  }
+
+  items.sort((a, b) => {
+    const qtyDiff = BigInt(b.qtyWei) - BigInt(a.qtyWei);
+    if (qtyDiff > 0n) {
+      return 1;
+    }
+    if (qtyDiff < 0n) {
+      return -1;
+    }
+    return a.trader.localeCompare(b.trader);
+  });
+
+  for (let i = 0; i < items.length; i += 1) {
+    items[i].rank = i + 1;
+  }
+
+  return {
+    epochId,
+    maxQtyWei,
+    items,
+  };
+}
+
+async function getAwardStatusSnapshot() {
+  const deployments = loadDeployments();
+  if (!deployments.award) {
+    return { available: false };
+  }
+  const awardDeployed = await ensureContract(deployments.award);
+  if (!awardDeployed) {
+    return { available: false };
+  }
+
+  const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
+  const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
+  const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
+  const chainCurrentEpoch = Number(currentEpochRaw);
+
+  const epochDurationData = awardInterface.encodeFunctionData('EPOCH_DURATION', []);
+  const epochDurationResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochDurationData }, 'latest']);
+  const [epochDurationRaw] = awardInterface.decodeFunctionResult('EPOCH_DURATION', epochDurationResult);
+  const chainEpochDurationSec = Number(epochDurationRaw);
+
+  const rewardData = awardInterface.encodeFunctionData('REWARD_AMOUNT', []);
+  const rewardResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: rewardData }, 'latest']);
+  const [rewardAmountRaw] = awardInterface.decodeFunctionResult('REWARD_AMOUNT', rewardResult);
+
+  const latestBlock = await hardhatRpc('eth_getBlockByNumber', ['latest', false]);
+  const chainNowSec = parseRpcInt(latestBlock.timestamp);
+  const wallNowSec = Math.floor(Date.now() / 1000);
+  let nowSec = wallNowSec;
+  if (chainNowSec > wallNowSec + 120) {
+    nowSec = chainNowSec;
+  }
+
+  const sessionState = readAwardSessionState();
+  let effectiveCurrentEpoch = chainCurrentEpoch;
+  if (chainEpochDurationSec > 0) {
+    const wallEpoch = Math.floor(nowSec / chainEpochDurationSec);
+    if (wallEpoch > effectiveCurrentEpoch) {
+      effectiveCurrentEpoch = wallEpoch;
+    }
+  }
+  let epochDurationSec = chainEpochDurationSec;
+  if (
+    Number.isFinite(sessionState.nextAwardWindowSec)
+    && sessionState.nextAwardWindowSec > 0
+    && Number.isFinite(sessionState.nextAwardWindowAppliesAtEpoch)
+    && sessionState.nextAwardWindowAppliesAtEpoch >= 0
+    && effectiveCurrentEpoch >= sessionState.nextAwardWindowAppliesAtEpoch
+  ) {
+    epochDurationSec = Number(sessionState.nextAwardWindowSec);
+  }
+
+  let secondsRemaining = 0;
+  if (epochDurationSec > 0) {
+    const elapsedSec = nowSec % epochDurationSec;
+    secondsRemaining = epochDurationSec - elapsedSec;
+    if (secondsRemaining === epochDurationSec) {
+      secondsRemaining = 0;
+    }
+  }
+
+  let sessionTerminated = false;
+  if (
+    sessionState.terminateNextSession === true
+    && Number.isFinite(sessionState.terminateAtEpoch)
+    && sessionState.terminateAtEpoch >= 0
+    && effectiveCurrentEpoch >= sessionState.terminateAtEpoch
+  ) {
+    sessionTerminated = true;
+    secondsRemaining = 0;
+  }
+
+  const currentEpochStartSec = effectiveCurrentEpoch * epochDurationSec;
+  const currentEpochEndSec = currentEpochStartSec + epochDurationSec;
+
+  return {
+    available: true,
+    deployments,
+    currentEpoch: effectiveCurrentEpoch,
+    chainCurrentEpoch,
+    nowSec,
+    epochDurationSec,
+    chainEpochDurationSec,
+    rewardAmountWei: rewardAmountRaw.toString(),
+    currentEpochStartSec,
+    currentEpochEndSec,
+    secondsRemaining,
+    sessionTerminated,
+    sessionControl: {
+      nextAwardWindowSec: Number(sessionState.nextAwardWindowSec),
+      nextAwardWindowAppliesAtEpoch: Number(sessionState.nextAwardWindowAppliesAtEpoch),
+      terminateNextSession: Boolean(sessionState.terminateNextSession),
+      terminateAtEpoch: Number(sessionState.terminateAtEpoch),
+      updatedAtMs: (() => {
+        let updatedAtMs = 0;
+        if (sessionState.updatedAtMs) {
+          updatedAtMs = Number(sessionState.updatedAtMs);
+        }
+        return updatedAtMs;
+      })(),
+    },
+  };
+}
+
+app.get('/api/award/status', async (_req, res) => {
+  try {
+    if (
+      awardCache.status
+      && (Date.now() - Number(awardCache.status.timestampMs)) <= AWARD_CACHE_TTL_MS
+    ) {
+      return res.json(awardCache.status.value);
+    }
+    const snapshot = await getAwardStatusSnapshot();
+    if (!snapshot.available) {
+      const unavailable = { available: false };
+      awardCache.status = { value: unavailable, timestampMs: Date.now() };
+      return res.json(unavailable);
+    }
+
+    const payload = {
+      available: true,
+      currentEpoch: snapshot.currentEpoch,
+      nowSec: snapshot.nowSec,
+      epochDurationSec: snapshot.epochDurationSec,
+      chainEpochDurationSec: snapshot.chainEpochDurationSec,
+      rewardAmountWei: snapshot.rewardAmountWei,
+      currentEpochStartSec: snapshot.currentEpochStartSec,
+      currentEpochEndSec: snapshot.currentEpochEndSec,
+      secondsRemaining: snapshot.secondsRemaining,
+      sessionTerminated: snapshot.sessionTerminated,
+      sessionControl: snapshot.sessionControl,
+    };
+    awardCache.status = { value: payload, timestampMs: Date.now() };
+    res.json(payload);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/award/leaderboard', async (req, res) => {
+  try {
+    const deployments = loadDeployments();
+    if (!deployments.award) {
+      return res.json({ available: false, items: [] });
+    }
+
+    let epochId = Number(req.query.epochId);
+    const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
+    const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
+    const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
+    const currentEpoch = Number(currentEpochRaw);
+    let invalidEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidEpochId = true;
+    }
+    if (epochId < 0) {
+      invalidEpochId = true;
+    }
+    if (invalidEpochId) {
+      epochId = Math.max(0, currentEpoch - 1);
+    }
+
+    const cacheKey = `${epochId}:${currentEpoch}`;
+    const cached = readAwardCacheEntry(awardCache.leaderboard, cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+    const leaderboard = await buildAwardLeaderboardForEpoch(deployments.award, epochId);
+    const payload = {
+      available: true,
+      epochId,
+      currentEpoch,
+      maxQtyWei: leaderboard.maxQtyWei,
+      items: leaderboard.items,
+    };
+    writeAwardCacheEntry(awardCache.leaderboard, cacheKey, payload);
+    res.json(payload);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/award/claimable', async (req, res) => {
+  try {
+    let walletText = '';
+    if (req.query.wallet) {
+      walletText = String(req.query.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.award) {
+      return res.json({ available: false, wallet, items: [] });
+    }
+
+    const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
+    const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
+    const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
+    const currentEpoch = Number(currentEpochRaw);
+
+    let limitRaw = 50;
+    if (req.query.limit) {
+      limitRaw = Number(req.query.limit);
+    }
+    const limit = Math.min(200, Math.max(1, Number(limitRaw)));
+    const startEpoch = Math.max(0, currentEpoch - limit);
+    const cacheKey = `${wallet.toLowerCase()}:${currentEpoch}:${limit}`;
+    const cached = readAwardCacheEntry(awardCache.claimable, cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+    const epochs = [];
+    for (let epochId = startEpoch; epochId < currentEpoch; epochId += 1) {
+      epochs.push(epochId);
+    }
+    const claimRows = await mapWithConcurrency(epochs, 4, async (epochId) => {
+      const winnerData = awardInterface.encodeFunctionData('isWinner', [BigInt(epochId), wallet]);
+      const claimedData = awardInterface.encodeFunctionData('hasClaimed', [BigInt(epochId), wallet]);
+      const [winnerResult, claimedResult] = await Promise.all([
+        hardhatRpc('eth_call', [{ to: deployments.award, data: winnerData }, 'latest']),
+        hardhatRpc('eth_call', [{ to: deployments.award, data: claimedData }, 'latest']),
+      ]);
+      const [isWinner] = awardInterface.decodeFunctionResult('isWinner', winnerResult);
+      const [claimed] = awardInterface.decodeFunctionResult('hasClaimed', claimedResult);
+      if (!(isWinner && !claimed)) {
+        return null;
+      }
+
+      const qtyData = awardInterface.encodeFunctionData('qtyByEpochByTrader', [BigInt(epochId), wallet]);
+      const maxData = awardInterface.encodeFunctionData('maxQtyByEpoch', [BigInt(epochId)]);
+      const [qtyResult, maxResult] = await Promise.all([
+        hardhatRpc('eth_call', [{ to: deployments.award, data: qtyData }, 'latest']),
+        hardhatRpc('eth_call', [{ to: deployments.award, data: maxData }, 'latest']),
+      ]);
+      const [qtyWeiRaw] = awardInterface.decodeFunctionResult('qtyByEpochByTrader', qtyResult);
+      const [maxQtyWeiRaw] = awardInterface.decodeFunctionResult('maxQtyByEpoch', maxResult);
+
+      return {
+        epochId,
+        qtyWei: qtyWeiRaw.toString(),
+        maxQtyWei: maxQtyWeiRaw.toString(),
+        isWinner,
+        claimed,
+        canClaim: true,
+      };
+    });
+    const items = [];
+    for (let i = 0; i < claimRows.length; i += 1) {
+      if (claimRows[i]) {
+        items.push(claimRows[i]);
+      }
+    }
+
+    items.sort((a, b) => b.epochId - a.epochId);
+    const payload = { available: true, wallet, currentEpoch, items };
+    writeAwardCacheEntry(awardCache.claimable, cacheKey, payload);
+    res.json(payload);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/award/claim', async (req, res) => {
+  try {
+    let walletText = '';
+    if (req.body.wallet) {
+      walletText = String(req.body.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    const epochId = Number(req.body.epochId);
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    let invalidEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidEpochId = true;
+    }
+    if (epochId < 0) {
+      invalidEpochId = true;
+    }
+    if (invalidEpochId) {
+      return res.status(400).json({ error: 'epochId is required' });
+    }
+
+    const deployments = loadDeployments();
+    if (!deployments.award) {
+      return res.status(400).json({ error: 'award contract not deployed' });
+    }
+
+    const data = awardInterface.encodeFunctionData('claimAward', [BigInt(epochId)]);
+    const clientSign = wantsClientSign(req.body);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'claim_award', from: wallet, to: deployments.award, data },
+        ],
+      });
+    }
+    const txHash = await hardhatRpc('eth_sendTransaction', [{
+      from: wallet,
+      to: deployments.award,
+      data,
+    }]);
+    await waitForReceipt(txHash);
+    awardCache.claimable.clear();
+    awardCache.leaderboard.clear();
+    awardCache.status = null;
+    res.json({ txHash, wallet, epochId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/award/current', async (_req, res) => {
   try {
     const deployments = loadDeployments();
     if (!deployments.award) {
       return res.json({ available: false });
     }
-    const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
-    const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
-    const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
-    const currentEpoch = Number(currentEpochRaw);
-    let targetEpoch = 0;
-    if (currentEpoch > 0) {
-      targetEpoch = currentEpoch - 1;
+    let selfBaseUrl = `http://127.0.0.1:${PORT}`;
+    if (process.env.SERVER_BASE_URL) {
+      selfBaseUrl = String(process.env.SERVER_BASE_URL);
     }
-    const topTraderData = awardInterface.encodeFunctionData('topTraderByEpoch', [targetEpoch]);
-    const topTraderResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: topTraderData }, 'latest']);
-    const [topTrader] = awardInterface.decodeFunctionResult('topTraderByEpoch', topTraderResult);
-    const topVolData = awardInterface.encodeFunctionData('topVolumeByEpoch', [targetEpoch]);
-    const topVolResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: topVolData }, 'latest']);
-    const [topVolume] = awardInterface.decodeFunctionResult('topVolumeByEpoch', topVolResult);
-    const rewardedData = awardInterface.encodeFunctionData('rewarded', [targetEpoch]);
-    const rewardedResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: rewardedData }, 'latest']);
-    const [rewarded] = awardInterface.decodeFunctionResult('rewarded', rewardedResult);
+    const statusRes = await fetch(`${selfBaseUrl}/api/award/status`);
+    const statusData = await statusRes.json();
+    if (!statusRes.ok) {
+      let reason = 'failed to load status';
+      if (statusData.error) {
+        reason = statusData.error;
+      }
+      return res.status(500).json({ error: reason });
+    }
+    const leaderboardRes = await fetch(`${selfBaseUrl}/api/award/leaderboard?epochId=${Math.max(0, statusData.currentEpoch - 1)}`);
+    const leaderboardData = await leaderboardRes.json();
+    let topRow = null;
+    if (leaderboardData.items) {
+      if (leaderboardData.items.length > 0) {
+        topRow = leaderboardData.items[0];
+      }
+    }
     res.json({
       available: true,
-      currentEpoch,
-      previousEpoch: targetEpoch,
-      topTrader: normalizeAddress(topTrader),
-      topVolumeWei: topVolume.toString(),
-      rewarded,
+      currentEpoch: statusData.currentEpoch,
+      previousEpoch: Math.max(0, statusData.currentEpoch - 1),
+      topTrader: (() => {
+        let topTrader = ethers.ZeroAddress;
+        if (topRow) {
+          topTrader = topRow.trader;
+        }
+        return topTrader;
+      })(),
+      topVolumeWei: (() => {
+        let topVolumeWei = '0';
+        if (topRow) {
+          topVolumeWei = topRow.qtyWei;
+        }
+        return topVolumeWei;
+      })(),
+      rewarded: false,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -3663,61 +8615,50 @@ app.get('/api/award/history', async (req, res) => {
     if (!deployments.award) {
       return res.json({ available: false, items: [] });
     }
-    const limit = Math.min(100, Math.max(1, Number(req.query.limit)));
+    let limitRaw = 20;
+    if (req.query.limit) {
+      limitRaw = Number(req.query.limit);
+    }
+    const limit = Math.min(100, Math.max(1, Number(limitRaw)));
     const epochData = awardInterface.encodeFunctionData('currentEpoch', []);
     const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
     const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
     const currentEpoch = Number(currentEpochRaw);
-    const items = [];
-    for (let epochId = Math.max(0, currentEpoch - limit); epochId < currentEpoch; epochId++) {
-      const topTraderData = awardInterface.encodeFunctionData('topTraderByEpoch', [epochId]);
-      const topTraderResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: topTraderData }, 'latest']);
-      const [topTrader] = awardInterface.decodeFunctionResult('topTraderByEpoch', topTraderResult);
-      const topVolData = awardInterface.encodeFunctionData('topVolumeByEpoch', [epochId]);
-      const topVolResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: topVolData }, 'latest']);
-      const [topVolume] = awardInterface.decodeFunctionResult('topVolumeByEpoch', topVolResult);
-      const rewardedData = awardInterface.encodeFunctionData('rewarded', [epochId]);
-      const rewardedResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: rewardedData }, 'latest']);
-      const [rewarded] = awardInterface.decodeFunctionResult('rewarded', rewardedResult);
-      items.push({
+    const rows = [];
+    for (let epochId = Math.max(0, currentEpoch - limit); epochId < currentEpoch; epochId += 1) {
+      const leaderboard = await buildAwardLeaderboardForEpoch(deployments.award, epochId);
+      let topRow = null;
+      if (leaderboard.items.length > 0) {
+        topRow = leaderboard.items[0];
+      }
+      rows.push({
         epochId,
-        topTrader: normalizeAddress(topTrader),
-        topVolumeWei: topVolume.toString(),
-        rewarded,
+        topTrader: (() => {
+          let topTrader = ethers.ZeroAddress;
+          if (topRow) {
+            topTrader = topRow.trader;
+          }
+          return topTrader;
+        })(),
+        topVolumeWei: (() => {
+          let topVolumeWei = '0';
+          if (topRow) {
+            topVolumeWei = topRow.qtyWei;
+          }
+          return topVolumeWei;
+        })(),
+        rewarded: false,
       });
     }
-    items.sort((a, b) => b.epochId - a.epochId);
-    res.json({ available: true, items });
+    rows.sort((a, b) => b.epochId - a.epochId);
+    res.json({ available: true, items: rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/award/finalize', async (req, res) => {
-  try {
-    const deployments = loadDeployments();
-    if (!deployments.award) {
-      return res.status(400).json({ error: 'award contract not deployed' });
-    }
-    let epochIdRaw = 0;
-    if (req.body && req.body.epochId) {
-      epochIdRaw = req.body.epochId;
-    }
-    const epochId = Number(epochIdRaw);
-    if (!Number.isFinite(epochId) || epochId < 0) {
-      return res.status(400).json({ error: 'invalid epochId' });
-    }
-    const data = awardInterface.encodeFunctionData('finalizeEpoch', [BigInt(epochId)]);
-    const txHash = await hardhatRpc('eth_sendTransaction', [{
-      from: deployments.admin,
-      to: deployments.award,
-      data,
-    }]);
-    await waitForReceipt(txHash);
-    res.json({ txHash, epochId });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post('/api/award/finalize', async (_req, res) => {
+  return res.status(400).json({ error: 'finalize removed in stage 13.5 use /api/award/claim' });
 });
 
 app.get('/api/aggregator/summary', async (req, res) => {
@@ -3750,7 +8691,14 @@ app.post('/api/leveraged/products/create', async (req, res) => {
     const body = req.body;
     const baseSymbol = String(body.baseSymbol).toUpperCase();
     const leverage = Number(body.leverage);
-    if (!baseSymbol || !Number.isFinite(leverage)) {
+    let invalidProductInput = false;
+    if (!baseSymbol) {
+      invalidProductInput = true;
+    }
+    if (!Number.isFinite(leverage)) {
+      invalidProductInput = true;
+    }
+    if (invalidProductInput) {
       return res.status(400).json({ error: 'baseSymbol and leverage are required' });
     }
 
@@ -3780,7 +8728,10 @@ app.post('/api/leveraged/products/create', async (req, res) => {
       productToken,
     });
   } catch (err) {
-    const message = String(err.message || '');
+    let message = '';
+    if (err.message) {
+      message = String(err.message);
+    }
     let cleanedError = message;
     const reasonMatch = message.match(/reverted with reason string '([^']+)'/);
     if (reasonMatch) {
@@ -3836,6 +8787,7 @@ app.get('/api/leveraged/products', async (_req, res) => {
 app.post('/api/leveraged/mint', async (req, res) => {
   try {
     const body = req.body;
+    const clientSign = wantsClientSign(body);
     const wallet = normalizeAddress(String(body.wallet));
     const productSymbol = String(body.productSymbol).toUpperCase();
     const ttokenInWei = BigInt(String(body.ttokenInWei));
@@ -3843,7 +8795,17 @@ app.post('/api/leveraged/mint', async (req, res) => {
     if (body.minOutWei) {
       minOutWei = BigInt(String(body.minOutWei));
     }
-    if (!wallet || !productSymbol || ttokenInWei <= 0n) {
+    let invalidMintInput = false;
+    if (!wallet) {
+      invalidMintInput = true;
+    }
+    if (!productSymbol) {
+      invalidMintInput = true;
+    }
+    if (ttokenInWei <= 0n) {
+      invalidMintInput = true;
+    }
+    if (invalidMintInput) {
       return res.status(400).json({ error: 'wallet, productSymbol, ttokenInWei are required' });
     }
 
@@ -3851,7 +8813,17 @@ app.post('/api/leveraged/mint', async (req, res) => {
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
     const ttokenAddress = getTTokenAddressFromDeployments();
-    if (!factoryAddress || !routerAddress || !ttokenAddress) {
+    let missingLeveragedDeployment = false;
+    if (!factoryAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (!routerAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (!ttokenAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (missingLeveragedDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -3859,7 +8831,14 @@ app.post('/api/leveraged/mint', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingProductToken = false;
+    if (!productToken) {
+      missingProductToken = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingProductToken = true;
+    }
+    if (missingProductToken) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -3872,6 +8851,20 @@ app.post('/api/leveraged/mint', async (req, res) => {
     }
 
     const approveData = equityTokenInterface.encodeFunctionData('approve', [routerAddress, ttokenInWei]);
+    if (clientSign) {
+      const mintDataPrepared = leveragedRouterInterface.encodeFunctionData('mintLong', [productToken, ttokenInWei, minOutWei]);
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'approve_ttoken_for_leveraged', from: wallet, to: ttokenAddress, data: approveData },
+          { label: 'mint_leveraged', from: wallet, to: routerAddress, data: mintDataPrepared },
+        ],
+        wallet,
+        productSymbol,
+        productToken,
+        ttokenInWei: ttokenInWei.toString(),
+      });
+    }
     const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: ttokenAddress,
@@ -3896,6 +8889,7 @@ app.post('/api/leveraged/mint', async (req, res) => {
 app.post('/api/leveraged/unwind', async (req, res) => {
   try {
     const body = req.body;
+    const clientSign = wantsClientSign(body);
     const wallet = normalizeAddress(String(body.wallet));
     const productSymbol = String(body.productSymbol).toUpperCase();
     const qtyWei = BigInt(String(body.qtyWei));
@@ -3903,7 +8897,17 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     if (body.minOutWei) {
       minOutWei = BigInt(String(body.minOutWei));
     }
-    if (!wallet || !productSymbol || qtyWei <= 0n) {
+    let invalidUnwindInput = false;
+    if (!wallet) {
+      invalidUnwindInput = true;
+    }
+    if (!productSymbol) {
+      invalidUnwindInput = true;
+    }
+    if (qtyWei <= 0n) {
+      invalidUnwindInput = true;
+    }
+    if (invalidUnwindInput) {
       return res.status(400).json({ error: 'wallet, productSymbol, qtyWei are required' });
     }
 
@@ -3911,7 +8915,17 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
     const ttokenAddress = getTTokenAddressFromDeployments();
-    if (!factoryAddress || !routerAddress || !ttokenAddress) {
+    let missingUnwindDeployment = false;
+    if (!factoryAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (!routerAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (!ttokenAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (missingUnwindDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -3919,7 +8933,14 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingUnwindProductToken = false;
+    if (!productToken) {
+      missingUnwindProductToken = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingUnwindProductToken = true;
+    }
+    if (missingUnwindProductToken) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -3953,6 +8974,18 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     }
 
     const unwindData = leveragedRouterInterface.encodeFunctionData('unwindLong', [productToken, qtyWei, minOutWei]);
+    if (clientSign) {
+      return res.json({
+        clientSign: true,
+        txs: [
+          { label: 'unwind_leveraged', from: wallet, to: routerAddress, data: unwindData },
+        ],
+        wallet,
+        productSymbol,
+        productToken,
+        qtyWei: qtyWei.toString(),
+      });
+    }
     const txHash = await hardhatRpc('eth_sendTransaction', [{
       from: wallet,
       to: routerAddress,
@@ -3973,7 +9006,14 @@ app.get('/api/leveraged/quote', async (req, res) => {
     const deployments = loadDeployments();
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
-    if (!factoryAddress || !routerAddress) {
+    let missingQuoteDeployment = false;
+    if (!factoryAddress) {
+      missingQuoteDeployment = true;
+    }
+    if (!routerAddress) {
+      missingQuoteDeployment = true;
+    }
+    if (missingQuoteDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -3981,7 +9021,14 @@ app.get('/api/leveraged/quote', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingQuoteProduct = false;
+    if (!productToken) {
+      missingQuoteProduct = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingQuoteProduct = true;
+    }
+    if (missingQuoteProduct) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -4032,9 +9079,20 @@ app.get('/api/leveraged/quote', async (req, res) => {
 app.post('/api/leveraged/price-adjust', async (req, res) => {
   try {
     const body = req.body;
-    const productSymbol = String(body.productSymbol || '').toUpperCase();
+    let productSymbolText = '';
+    if (body.productSymbol) {
+      productSymbolText = String(body.productSymbol);
+    }
+    const productSymbol = productSymbolText.toUpperCase();
     const changePct = Number(body.changePct);
-    if (!productSymbol || !Number.isFinite(changePct)) {
+    let invalidPriceAdjustInput = false;
+    if (!productSymbol) {
+      invalidPriceAdjustInput = true;
+    }
+    if (!Number.isFinite(changePct)) {
+      invalidPriceAdjustInput = true;
+    }
+    if (invalidPriceAdjustInput) {
       return res.status(400).json({ error: 'productSymbol and changePct are required' });
     }
 
@@ -4081,7 +9139,14 @@ app.get('/api/leveraged/positions', async (req, res) => {
     const deployments = loadDeployments();
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
-    if (!factoryAddress || !routerAddress) {
+    let missingPositionsDeployment = false;
+    if (!factoryAddress) {
+      missingPositionsDeployment = true;
+    }
+    if (!routerAddress) {
+      missingPositionsDeployment = true;
+    }
+    if (missingPositionsDeployment) {
       return res.json({ wallet, positions: [] });
     }
 
@@ -4111,19 +9176,101 @@ app.get('/api/leveraged/positions', async (req, res) => {
         const unrealizedPnlWei = (BigInt(currentValueWei) - BigInt(costBasisWei)).toString();
         const currentPriceWei = ((BigInt(currentValueWei) * 1000000000000000000n) / BigInt(qtyWei)).toString();
         let basePriceCents = 0;
-        let baseChangePct = 0;
+        let baseChangePct = Number.NaN;
         try {
           const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
+          let yahooPriceRaw = 0;
           if (quote.regularMarketPrice) {
-            basePriceCents = Math.round(Number(quote.regularMarketPrice) * 100);
+            yahooPriceRaw = quote.regularMarketPrice;
+          } else if (quote.price) {
+            yahooPriceRaw = quote.price;
           }
-          if (quote.regularMarketChangePercent) {
-            baseChangePct = Number(quote.regularMarketChangePercent) * 100;
+          const yahooPrice = Number(yahooPriceRaw);
+          if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
+            basePriceCents = Math.round(yahooPrice * 100);
+          }
+          const yahooOpen = Number(quote.regularMarketOpen);
+          if (
+            Number.isFinite(yahooOpen)
+            && yahooOpen > 0
+            && Number.isFinite(yahooPrice)
+            && yahooPrice > 0
+          ) {
+            baseChangePct = ((yahooPrice - yahooOpen) / yahooOpen) * 100;
+          }
+          const yahooChangeRaw = Number(quote.regularMarketChangePercent);
+          if (Number.isFinite(yahooChangeRaw) && (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001)) {
+            if (Math.abs(yahooChangeRaw) <= 1) {
+              baseChangePct = yahooChangeRaw * 100;
+            } else {
+              baseChangePct = yahooChangeRaw;
+            }
+          }
+          const yahooPrevClose = Number(quote.regularMarketPreviousClose);
+          if (
+            Number.isFinite(yahooPrevClose)
+            && yahooPrevClose > 0
+            && Number.isFinite(yahooPrice)
+            && yahooPrice > 0
+            && (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001)
+          ) {
+            baseChangePct = ((yahooPrice - yahooPrevClose) / yahooPrevClose) * 100;
           }
         } catch {
         }
+        if (!(basePriceCents > 0) || !Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001) {
+          try {
+            const fmpShort = await fetchFmpJson(getFmpUrl('quote', { symbol: String(item.baseSymbol).toUpperCase() }));
+            let first = null;
+            if (Array.isArray(fmpShort) && fmpShort.length > 0) {
+              first = fmpShort[0];
+            } else if (fmpShort && typeof fmpShort === 'object') {
+              first = fmpShort;
+            }
+            if (first) {
+              let fmpPriceRaw = 0;
+              if (first.price) {
+                fmpPriceRaw = first.price;
+              }
+              const fmpPrice = Number(fmpPriceRaw);
+              if (Number.isFinite(fmpPrice) && fmpPrice > 0) {
+                basePriceCents = Math.round(fmpPrice * 100);
+              }
+              const fmpOpen = Number(first.open);
+              if (
+                Number.isFinite(fmpOpen)
+                && fmpOpen > 0
+                && Number.isFinite(fmpPrice)
+                && fmpPrice > 0
+              ) {
+                baseChangePct = ((fmpPrice - fmpOpen) / fmpOpen) * 100;
+              }
+              if (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001) {
+                let fmpPctRaw = Number.NaN;
+                if (first.changePercent !== undefined && first.changePercent !== null) {
+                  fmpPctRaw = first.changePercent;
+                } else if (first.changesPercentage !== undefined && first.changesPercentage !== null) {
+                  fmpPctRaw = first.changesPercentage;
+                }
+                const fmpPct = Number(fmpPctRaw);
+                if (Number.isFinite(fmpPct) && Math.abs(fmpPct) >= 0.0001) {
+                  baseChangePct = fmpPct;
+                } else {
+                  const fmpPrevClose = Number(first.previousClose);
+                  if (Number.isFinite(fmpPrevClose) && fmpPrevClose > 0 && Number.isFinite(fmpPrice) && fmpPrice > 0) {
+                    baseChangePct = ((fmpPrice - fmpPrevClose) / fmpPrevClose) * 100;
+                  }
+                }
+              }
+            }
+          } catch {
+          }
+        }
         if (!(basePriceCents > 0)) {
-          basePriceCents = Number(navCents);
+          const navNum = Number(navCents);
+          if (Number.isFinite(navNum) && navNum > 0) {
+            basePriceCents = navNum;
+          }
         }
         positions.push({
           productSymbol: item.productSymbol,
@@ -4151,7 +9298,11 @@ app.get('/api/leveraged/positions', async (req, res) => {
 
 app.post('/api/admin/symbols/freeze', async (req, res) => {
   try {
-    const symbol = String(req.body.symbol || '').toUpperCase();
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
@@ -4164,7 +9315,11 @@ app.post('/api/admin/symbols/freeze', async (req, res) => {
 
 app.post('/api/admin/symbols/unfreeze', async (req, res) => {
   try {
-    const symbol = String(req.body.symbol || '').toUpperCase();
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
@@ -4177,7 +9332,11 @@ app.post('/api/admin/symbols/unfreeze', async (req, res) => {
 
 app.post('/api/admin/symbols/delist', async (req, res) => {
   try {
-    const symbol = String(req.body.symbol || '').toUpperCase();
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
@@ -4190,7 +9349,11 @@ app.post('/api/admin/symbols/delist', async (req, res) => {
 
 app.post('/api/admin/symbols/list', async (req, res) => {
   try {
-    const symbol = String(req.body.symbol || '').toUpperCase();
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
@@ -4224,18 +9387,387 @@ app.get('/api/admin/symbols/status', async (_req, res) => {
   }
 });
 
+app.post('/api/admin/price/set', async (req, res) => {
+  try {
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase().trim();
+    const priceCents = Number(req.body.priceCents);
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    if (!Number.isFinite(priceCents) || priceCents <= 0) {
+      return res.status(400).json({ error: 'priceCents must be > 0' });
+    }
+    const updateResult = await setOnchainPriceForSymbol(symbol, Math.round(priceCents));
+    if (!updateResult.ok) {
+      return res.status(400).json({ error: updateResult.error });
+    }
+    res.json({
+      symbol,
+      priceCents: Math.round(priceCents),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/price-set', async (req, res) => {
+  try {
+    let symbolText = '';
+    if (req.body.symbol) {
+      symbolText = String(req.body.symbol);
+    }
+    const symbol = symbolText.toUpperCase().trim();
+    const priceCents = Number(req.body.priceCents);
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    if (!Number.isFinite(priceCents) || priceCents <= 0) {
+      return res.status(400).json({ error: 'priceCents must be > 0' });
+    }
+    const updateResult = await setOnchainPriceForSymbol(symbol, Math.round(priceCents));
+    if (!updateResult.ok) {
+      return res.status(400).json({ error: updateResult.error });
+    }
+    res.json({
+      symbol,
+      priceCents: Math.round(priceCents),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/award/session', async (_req, res) => {
+  try {
+    const snapshot = await getAwardStatusSnapshot();
+    const state = readAwardSessionState();
+    res.json({
+      available: Boolean(snapshot.available),
+      currentEpoch: (() => {
+        let value = 0;
+        if (snapshot.currentEpoch) {
+          value = Number(snapshot.currentEpoch);
+        }
+        return value;
+      })(),
+      chainEpochDurationSec: (() => {
+        let value = 0;
+        if (snapshot.chainEpochDurationSec) {
+          value = Number(snapshot.chainEpochDurationSec);
+        }
+        return value;
+      })(),
+      activeEpochDurationSec: (() => {
+        let value = 0;
+        if (snapshot.epochDurationSec) {
+          value = Number(snapshot.epochDurationSec);
+        }
+        return value;
+      })(),
+      sessionTerminated: Boolean(snapshot.sessionTerminated),
+      nextAwardWindowSec: (() => {
+        let value = 60;
+        if (state.nextAwardWindowSec) {
+          value = Number(state.nextAwardWindowSec);
+        }
+        return value;
+      })(),
+      nextAwardWindowAppliesAtEpoch: (() => {
+        let value = -1;
+        if (state.nextAwardWindowAppliesAtEpoch) {
+          value = Number(state.nextAwardWindowAppliesAtEpoch);
+        }
+        return value;
+      })(),
+      terminateNextSession: Boolean(state.terminateNextSession),
+      terminateAtEpoch: (() => {
+        let terminateAtEpoch = -1;
+        if (state.terminateAtEpoch) {
+          terminateAtEpoch = Number(state.terminateAtEpoch);
+        }
+        return terminateAtEpoch;
+      })(),
+      updatedAtMs: (() => {
+        let updatedAtMs = 0;
+        if (state.updatedAtMs) {
+          updatedAtMs = Number(state.updatedAtMs);
+        }
+        return updatedAtMs;
+      })(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/award/session', async (req, res) => {
+  try {
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    const snapshot = await getAwardStatusSnapshot();
+    if (!snapshot.available) {
+      return res.status(400).json({ error: 'award contract not deployed' });
+    }
+
+    const nextAwardWindowSecRaw = Number(body.nextAwardWindowSec);
+    const terminateNextSessionRaw = Boolean(body.terminateNextSession);
+    let nextAwardWindowSecInvalid = false;
+    if (!Number.isFinite(nextAwardWindowSecRaw)) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecRaw <= 0) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecRaw > 3600) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecInvalid) {
+      return res.status(400).json({ error: 'nextAwardWindowSec must be between 1 and 3600' });
+    }
+
+    const state = readAwardSessionState();
+    state.nextAwardWindowSec = Math.floor(nextAwardWindowSecRaw);
+    state.nextAwardWindowAppliesAtEpoch = Number(snapshot.currentEpoch) + 1;
+    state.terminateNextSession = terminateNextSessionRaw;
+    if (terminateNextSessionRaw) {
+      state.terminateAtEpoch = Number(snapshot.currentEpoch) + 1;
+    } else {
+      state.terminateAtEpoch = -1;
+    }
+    state.updatedAtMs = Date.now();
+    writeAwardSessionState(state);
+    awardCache.status = null;
+
+    res.json({
+      ok: true,
+      nextAwardWindowSec: state.nextAwardWindowSec,
+      nextAwardWindowAppliesAtEpoch: state.nextAwardWindowAppliesAtEpoch,
+      terminateNextSession: state.terminateNextSession,
+      terminateAtEpoch: state.terminateAtEpoch,
+      updatedAtMs: state.updatedAtMs,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/gas/run', async (req, res) => {
+  let suite = 'core';
+  if (req.body && req.body.suite) {
+    suite = String(req.body.suite).toLowerCase();
+  }
+  let isValidSuite = false;
+  switch (suite) {
+    case 'core':
+    case 'stress':
+    case 'all':
+      isValidSuite = true;
+      break;
+    default:
+      break;
+  }
+  if (!isValidSuite) {
+    return res.status(400).json({ error: 'suite must be core, stress, or all' });
+  }
+  try {
+    const report = await runGasPackGuarded(suite);
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/gas/latest', async (_req, res) => {
+  try {
+    let walletText = '';
+    if (_req.query && _req.query.wallet) {
+      walletText = String(_req.query.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    if (!ENABLE_GAS_PACK) {
+      if (wallet) {
+        const walletRows = await buildWalletGasRowsFromIndexer(wallet, 20);
+        const walletReport = {
+          suite: 'wallet',
+          startedAtMs: Date.now(),
+          finishedAtMs: Date.now(),
+          durationMs: 0,
+          chainId: 0,
+          latestBlock: 0,
+          thresholdPct: GAS_WARN_THRESHOLD_PCT,
+          warnCount: 0,
+          skipCount: 0,
+          totalRows: walletRows.length,
+          pollMs: GAS_PAGE_POLL_MS,
+          rows: walletRows,
+        };
+        return res.json({
+          ok: true,
+          disabled: true,
+          source: 'wallet_indexed_receipts',
+          lastRunAtMs: gasRuntimeState.lastRunAtMs,
+          report: walletReport,
+        });
+      }
+      const disabledReport = {
+        suite: 'core',
+        startedAtMs: Date.now(),
+        finishedAtMs: Date.now(),
+        durationMs: 0,
+        chainId: 0,
+        latestBlock: 0,
+        thresholdPct: GAS_WARN_THRESHOLD_PCT,
+        warnCount: 0,
+        skipCount: 1,
+        totalRows: 1,
+        pollMs: GAS_PAGE_POLL_MS,
+        rows: [{
+          txName: 'gas_pack_disabled',
+          gasUsed: '0',
+          effectiveGasPrice: '0',
+          costWei: '0',
+          costEth: '0',
+          baselineGasUsed: '0',
+          deltaPct: null,
+          status: 'SKIP',
+          skipReason: 'disabled on this network',
+        }],
+      };
+      return res.json({
+        ok: true,
+        disabled: true,
+        lastRunAtMs: gasRuntimeState.lastRunAtMs,
+        report: disabledReport,
+      });
+    }
+    if (!gasRuntimeState.latest) {
+      await runGasPackGuarded('core');
+    }
+    res.json({
+      ok: true,
+      lastRunAtMs: gasRuntimeState.lastRunAtMs,
+      report: gasRuntimeState.latest,
+    });
+  } catch (err) {
+    const fallbackReport = {
+      suite: 'core',
+      startedAtMs: Date.now(),
+      finishedAtMs: Date.now(),
+      durationMs: 0,
+      chainId: 0,
+      latestBlock: 0,
+      thresholdPct: GAS_WARN_THRESHOLD_PCT,
+      warnCount: 0,
+      skipCount: 0,
+      totalRows: 1,
+      pollMs: GAS_PAGE_POLL_MS,
+      rows: [{
+        txName: 'gas_pack_error',
+        gasUsed: '0',
+        effectiveGasPrice: '0',
+        costWei: '0',
+        costEth: '0',
+        baselineGasUsed: '0',
+        deltaPct: null,
+        status: 'SKIP',
+        skipReason: (() => {
+          let reason = 'gas pack failed';
+          if (err.message) {
+            reason = err.message;
+          }
+          return reason;
+        })(),
+      }],
+    };
+    res.json({
+      ok: false,
+      error: err.message,
+      lastRunAtMs: gasRuntimeState.lastRunAtMs,
+      report: fallbackReport,
+    });
+  }
+});
+
+app.get('/api/gas/baseline', async (_req, res) => {
+  res.json({
+    thresholdPct: GAS_WARN_THRESHOLD_PCT,
+    baseline: gasRuntimeState.baseline,
+  });
+});
+
+app.post('/api/gas/baseline/accept', async (_req, res) => {
+  let missingLatestGasState = false;
+  if (!gasRuntimeState.latest) {
+    missingLatestGasState = true;
+  }
+  if (!Array.isArray(gasRuntimeState.latest.rows)) {
+    missingLatestGasState = true;
+  }
+  if (missingLatestGasState) {
+    return res.status(400).json({ error: 'no latest gas report available' });
+  }
+  const next = {};
+  for (let i = 0; i < gasRuntimeState.latest.rows.length; i += 1) {
+    const row = gasRuntimeState.latest.rows[i];
+    if (row.status !== 'SKIP') {
+      next[row.txName] = Number(row.gasUsed);
+    }
+  }
+  gasRuntimeState.baseline = next;
+  res.json({
+    ok: true,
+    baseline: gasRuntimeState.baseline,
+  });
+});
+
 app.post('/api/autotrade/rules/create', async (req, res) => {
   try {
-    const body = req.body || {};
-    const wallet = normalizeAddress(String(body.wallet || ''));
-    const symbol = String(body.symbol || '').toUpperCase();
-    const side = String(body.side || '').toUpperCase();
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
+    let walletText = '';
+    if (body.wallet) {
+      walletText = String(body.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    let symbolText = '';
+    if (body.symbol) {
+      symbolText = String(body.symbol);
+    }
+    const symbol = symbolText.toUpperCase();
+    let sideText = '';
+    if (body.side) {
+      sideText = String(body.side);
+    }
+    const side = sideText.toUpperCase();
     const triggerPriceCents = Number(body.triggerPriceCents);
-    const qtyWei = String(body.qtyWei || '');
-    const maxSlippageBps = Number(body.maxSlippageBps || 0);
+    let qtyWei = '';
+    if (body.qtyWei) {
+      qtyWei = String(body.qtyWei);
+    }
+    let maxSlippageBpsRaw = 0;
+    if (body.maxSlippageBps) {
+      maxSlippageBpsRaw = body.maxSlippageBps;
+    }
+    const maxSlippageBps = Number(maxSlippageBpsRaw);
     const enabled = Boolean(body.enabled !== false);
-    const cooldownSec = Number(body.cooldownSec || 0);
-    const maxExecutionsPerDay = Number(body.maxExecutionsPerDay || 0);
+    let cooldownSecRaw = 0;
+    if (body.cooldownSec) {
+      cooldownSecRaw = body.cooldownSec;
+    }
+    const cooldownSec = Number(cooldownSecRaw);
+    let maxExecutionsPerDayRaw = 0;
+    if (body.maxExecutionsPerDay) {
+      maxExecutionsPerDayRaw = body.maxExecutionsPerDay;
+    }
+    const maxExecutionsPerDay = Number(maxExecutionsPerDayRaw);
 
     if (!wallet) {
       return res.status(400).json({ error: 'wallet is required' });
@@ -4246,11 +9778,52 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
     if (side !== 'BUY' && side !== 'SELL') {
       return res.status(400).json({ error: 'side must be BUY or SELL' });
     }
-    if (!Number.isFinite(triggerPriceCents) || triggerPriceCents <= 0) {
+    let invalidTriggerPrice = false;
+    if (!Number.isFinite(triggerPriceCents)) {
+      invalidTriggerPrice = true;
+    }
+    if (triggerPriceCents <= 0) {
+      invalidTriggerPrice = true;
+    }
+    if (invalidTriggerPrice) {
       return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
     }
-    if (!(BigInt(qtyWei) > 0n)) {
+    const qtyWeiBig = BigInt(qtyWei);
+    if (!(qtyWeiBig > 0n)) {
       return res.status(400).json({ error: 'qtyWei must be > 0' });
+    }
+    const oneTokenWei = 10n ** 18n;
+    if (qtyWeiBig % oneTokenWei !== 0n) {
+      return res.status(400).json({ error: 'qtyWei must be whole tokens (18 decimals)' });
+    }
+    const qtyUnits = qtyWeiBig / oneTokenWei;
+    if (qtyUnits < BigInt(MIN_STOCK_QTY_UNITS)) {
+      return res.status(400).json({ error: `qty must be at least ${MIN_STOCK_QTY_UNITS}` });
+    }
+    if (qtyUnits % BigInt(MIN_STOCK_QTY_UNITS) !== 0n) {
+      return res.status(400).json({ error: `qty must be in steps of ${MIN_STOCK_QTY_UNITS}` });
+    }
+    if (side === 'BUY') {
+      const deployments = loadDeployments();
+      const ttokenAddr = normalizeAddress(getTTokenAddressFromDeployments());
+      if (ttokenAddr) {
+        const requiredQuoteWei = quoteAmountWei(qtyWeiBig, triggerPriceCents);
+        const balanceData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+        const balanceResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: balanceData }, 'latest']);
+        const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balanceResult);
+        const balanceWei = BigInt(balanceWeiRaw.toString());
+        if (balanceWei < requiredQuoteWei) {
+          return res.status(400).json({
+            error: `insufficient TToken for auto buy: need ${ethers.formatUnits(requiredQuoteWei, 18)}, have ${ethers.formatUnits(balanceWei, 18)}`,
+          });
+        }
+      }
+    }
+    const canSend = await canServerSendFromAddress(wallet);
+    if (!canSend) {
+      return res.status(400).json({
+        error: `autotrade requires server signer for ${wallet}; add wallet key in TX_SIGNER_PRIVATE_KEYS`,
+      });
     }
 
     const state = readAutoTradeState();
@@ -4260,7 +9833,7 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
       symbol,
       side,
       triggerPriceCents: Number(triggerPriceCents),
-      qtyWei: String(qtyWei),
+      qtyWei: qtyWeiBig.toString(),
       maxSlippageBps,
       enabled,
       cooldownSec,
@@ -4284,9 +9857,19 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
 
 app.post('/api/autotrade/rules/update', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     const ruleId = Number(body.ruleId);
-    if (!Number.isFinite(ruleId) || ruleId <= 0) {
+    let invalidRuleId = false;
+    if (!Number.isFinite(ruleId)) {
+      invalidRuleId = true;
+    }
+    if (ruleId <= 0) {
+      invalidRuleId = true;
+    }
+    if (invalidRuleId) {
       return res.status(400).json({ error: 'ruleId is required' });
     }
     const state = readAutoTradeState();
@@ -4300,30 +9883,37 @@ app.post('/api/autotrade/rules/update', async (req, res) => {
       return res.status(404).json({ error: 'rule not found' });
     }
 
-    if (body.triggerPriceCents !== undefined) {
+    if ('triggerPriceCents' in body) {
       const nextTriggerPrice = Number(body.triggerPriceCents);
-      if (!Number.isFinite(nextTriggerPrice) || nextTriggerPrice <= 0) {
+      let invalidNextTriggerPrice = false;
+      if (!Number.isFinite(nextTriggerPrice)) {
+        invalidNextTriggerPrice = true;
+      }
+      if (nextTriggerPrice <= 0) {
+        invalidNextTriggerPrice = true;
+      }
+      if (invalidNextTriggerPrice) {
         return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
       }
       rule.triggerPriceCents = nextTriggerPrice;
     }
-    if (body.qtyWei !== undefined) {
+    if ('qtyWei' in body) {
       const nextQtyWei = String(body.qtyWei);
       if (!(BigInt(nextQtyWei) > 0n)) {
         return res.status(400).json({ error: 'qtyWei must be > 0' });
       }
       rule.qtyWei = nextQtyWei;
     }
-    if (body.maxSlippageBps !== undefined) {
+    if ('maxSlippageBps' in body) {
       rule.maxSlippageBps = Number(body.maxSlippageBps);
     }
-    if (body.cooldownSec !== undefined) {
+    if ('cooldownSec' in body) {
       rule.cooldownSec = Number(body.cooldownSec);
     }
-    if (body.maxExecutionsPerDay !== undefined) {
+    if ('maxExecutionsPerDay' in body) {
       rule.maxExecutionsPerDay = Number(body.maxExecutionsPerDay);
     }
-    if (body.enabled !== undefined) {
+    if ('enabled' in body) {
       rule.enabled = Boolean(body.enabled);
     }
     rule.updatedAtMs = Date.now();
@@ -4408,13 +9998,23 @@ app.post('/api/autotrade/rules/delete', async (req, res) => {
 
 app.get('/api/autotrade/rules', async (req, res) => {
   try {
-    const walletRaw = String(req.query.wallet || '');
+    let walletRaw = '';
+    if (req.query.wallet) {
+      walletRaw = String(req.query.wallet);
+    }
     const wallet = normalizeAddress(walletRaw);
     const state = readAutoTradeState();
     const rows = [];
     for (let i = 0; i < state.rules.length; i += 1) {
       const row = state.rules[i];
-      if (!wallet || row.wallet === wallet) {
+      let includeRow = false;
+      if (!wallet) {
+        includeRow = true;
+      }
+      if (row.wallet === wallet) {
+        includeRow = true;
+      }
+      if (includeRow) {
         rows.push(normalizeRuleForResponse(row));
       }
     }
@@ -4427,14 +10027,28 @@ app.get('/api/autotrade/rules', async (req, res) => {
 
 app.get('/api/autotrade/executions', async (req, res) => {
   try {
-    const walletRaw = String(req.query.wallet || '');
+    let walletRaw = '';
+    if (req.query.wallet) {
+      walletRaw = String(req.query.wallet);
+    }
     const wallet = normalizeAddress(walletRaw);
-    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    let limitRaw = 50;
+    if (req.query.limit) {
+      limitRaw = Number(req.query.limit);
+    }
+    const limit = Math.min(200, Math.max(1, Number(limitRaw)));
     const state = readAutoTradeState();
     const rows = [];
     for (let i = 0; i < state.executions.length; i += 1) {
       const row = state.executions[i];
-      if (!wallet || row.wallet === wallet) {
+      let includeRow = false;
+      if (!wallet) {
+        includeRow = true;
+      }
+      if (row.wallet === wallet) {
+        includeRow = true;
+      }
+      if (includeRow) {
         rows.push(normalizeExecutionForResponse(row));
       }
     }
@@ -4456,7 +10070,13 @@ app.get('/api/autotrade/status', async (_req, res) => {
     }
     res.json({
       listenerRunning: Boolean(state.listenerRunning),
-      lastTickAtMs: Number(state.lastTickAtMs || 0),
+      lastTickAtMs: (() => {
+        let lastTickAtMs = 0;
+        if (state.lastTickAtMs) {
+          lastTickAtMs = Number(state.lastTickAtMs);
+        }
+        return lastTickAtMs;
+      })(),
       ruleCount: state.rules.length,
       enabledRuleCount: enabledCount,
       executionCount: state.executions.length,
@@ -4470,7 +10090,11 @@ app.post('/api/autotrade/listener/start', async (_req, res) => {
   try {
     const state = readAutoTradeState();
     state.listenerRunning = true;
-    state.lastTickAtMs = Number(state.lastTickAtMs || 0);
+    if (state.lastTickAtMs) {
+      state.lastTickAtMs = Number(state.lastTickAtMs);
+    } else {
+      state.lastTickAtMs = 0;
+    }
     writeAutoTradeState(state);
     await runAutoTradeTick();
     res.json({ listenerRunning: true });
@@ -4494,7 +10118,14 @@ app.post('/api/equity/create', async (req, res) => {
   const body = req.body;
   const symbol = String(body.symbol).toUpperCase();
   const name = String(body.name).trim();
-  if (symbol.length === 0 || name.length === 0) {
+  let missingCreateFields = false;
+  if (symbol.length === 0) {
+    missingCreateFields = true;
+  }
+  if (name.length === 0) {
+    missingCreateFields = true;
+  }
+  if (missingCreateFields) {
     return res.status(400).json({ error: '' });
   }
 
@@ -4532,14 +10163,24 @@ app.post('/api/equity/mint', async (req, res) => {
     return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
-  if (!amountIsNumber || amount < 1000) {
+  let invalidAmount = false;
+  if (!amountIsNumber) {
+    invalidAmount = true;
+  }
+  if (amount < 100) {
+    invalidAmount = true;
+  }
+  if (invalidAmount) {
     return res.status(400).json({ error: '' });
   }
 
   try {
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
-    const minter = deployments.defaultMinter || deployments.admin;
+    let minter = deployments.admin;
+    if (deployments.defaultMinter) {
+      minter = deployments.defaultMinter;
+    }
     const registryDeployed = await ensureContract(registryAddr);
     if (!registryDeployed) {
       return res.status(500).json({ error: '' });
@@ -4559,6 +10200,20 @@ app.post('/api/equity/mint', async (req, res) => {
       to: tokenAddr,
       data: mintData,
     }]);
+    const receipt = await waitForReceipt(txHash);
+    const blockNumber = parseRpcInt(receipt.blockNumber);
+    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    appendManualMintActivity({
+      wallet: to,
+      tokenAddress: tokenAddr,
+      symbol,
+      assetType: 'EQUITY',
+      amountWei: amountWei.toString(),
+      reason: 'MINT_EQUITY',
+      txHash,
+      blockNumber,
+      timestampMs,
+    });
     res.json({ txHash, tokenAddress: tokenAddr });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -4571,7 +10226,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
   const name = String(body.name).trim();
   const to = String(body.to);
   const amount = Number(body.amount);
-  if (symbol.length === 0 || name.length === 0) {
+  let missingCreateMintFields = false;
+  if (symbol.length === 0) {
+    missingCreateMintFields = true;
+  }
+  if (name.length === 0) {
+    missingCreateMintFields = true;
+  }
+  if (missingCreateMintFields) {
     return res.status(400).json({ error: '' });
   }
   const recipientValid = isValidAddress(to);
@@ -4579,7 +10241,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
     return res.status(400).json({ error: '' });
   }
   const amountIsNumber = Number.isFinite(amount);
-  if (!amountIsNumber || amount < 1000) {
+  let invalidCreateMintAmount = false;
+  if (!amountIsNumber) {
+    invalidCreateMintAmount = true;
+  }
+  if (amount < 100) {
+    invalidCreateMintAmount = true;
+  }
+  if (invalidCreateMintAmount) {
     return res.status(400).json({ error: '' });
   }
 
@@ -4588,10 +10257,20 @@ app.post('/api/equity/create-mint', async (req, res) => {
     const factoryAddr = deployments.equityTokenFactory;
     const registryAddr = deployments.listingsRegistry;
     const admin = deployments.admin;
-    const minter = deployments.defaultMinter || deployments.admin;
+    let minter = deployments.admin;
+    if (deployments.defaultMinter) {
+      minter = deployments.defaultMinter;
+    }
     const factoryDeployed = await ensureContract(factoryAddr);
     const registryDeployed = await ensureContract(registryAddr);
-    if (!factoryDeployed || !registryDeployed) {
+    let missingCoreDeployment = false;
+    if (!factoryDeployed) {
+      missingCoreDeployment = true;
+    }
+    if (!registryDeployed) {
+      missingCoreDeployment = true;
+    }
+    if (missingCoreDeployment) {
       return res.status(500).json({ error: '' });
     }
 
@@ -4632,6 +10311,20 @@ app.post('/api/equity/create-mint', async (req, res) => {
       to: tokenAddr,
       data: mintData,
     }]);
+    const receipt = await waitForReceipt(mintTx);
+    const blockNumber = parseRpcInt(receipt.blockNumber);
+    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    appendManualMintActivity({
+      wallet: to,
+      tokenAddress: tokenAddr,
+      symbol,
+      assetType: 'EQUITY',
+      amountWei: amountWei.toString(),
+      reason: 'MINT_EQUITY',
+      txHash: mintTx,
+      blockNumber,
+      timestampMs,
+    });
     res.json({ createTx, mintTx, tokenAddress: tokenAddr });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -4645,14 +10338,18 @@ app.get('/api/registry/listings', async (req, res) => {
     const registryAddr = deployments.listingsRegistry;
     const registryDeployed = await ensureContract(registryAddr);
     if (!registryDeployed) {
-      return res.status(500).json({ error: '' });
+      return res.json({ listings: [] });
     }
     const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
     const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
     const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
 
     let includeDelisted = false;
-    if (String(req.query.includeDelisted || '') === '1') {
+    let includeDelistedRaw = '';
+    if (req.query.includeDelisted) {
+      includeDelistedRaw = String(req.query.includeDelisted);
+    }
+    if (includeDelistedRaw === '1') {
       includeDelisted = true;
     }
 
@@ -4767,7 +10464,17 @@ app.get('/api/candles', async (req, res) => {
   }
 
   const intervalValid = Number.isFinite(interval);
-  if (!intervalValid || interval < 5 || interval % 5 !== 0) {
+  let invalidInterval = false;
+  if (!intervalValid) {
+    invalidInterval = true;
+  }
+  if (interval < 5) {
+    invalidInterval = true;
+  }
+  if (interval % 5 !== 0) {
+    invalidInterval = true;
+  }
+  if (invalidInterval) {
     return res.status(400).json({
       error: '',
     });
@@ -4869,23 +10576,52 @@ app.get('/api/candles', async (req, res) => {
 ensureIndexerDir();
 ensureIndexerSynced();
 ensureAutoTradeDir();
+ensureAdminDir();
+ensureDividendsMerkleDir();
 if (!fs.existsSync(AUTOTRADE_STATE_FILE)) {
   writeAutoTradeState(getDefaultAutoTradeState());
 }
 if (!fs.existsSync(SYMBOL_STATUS_FILE)) {
   writeSymbolStatusState(getDefaultSymbolStatusState());
 }
+if (!fs.existsSync(AWARD_SESSION_FILE)) {
+  writeAwardSessionState(getDefaultAwardSessionState());
+}
 if (fs.existsSync(AUTOTRADE_STATE_FILE)) {
   const autoState = readAutoTradeState();
-  autoState.listenerRunning = true;
+  autoState.listenerRunning = ENABLE_AUTOTRADE;
   writeAutoTradeState(autoState);
 }
 setInterval(() => {
   ensureIndexerSynced();
 }, INDEXER_SYNC_INTERVAL_MS);
-setInterval(() => {
-  runAutoTradeTick();
-}, AUTOTRADE_POLL_INTERVAL_MS);
+if (ENABLE_AUTOTRADE) {
+  setInterval(() => {
+    runAutoTradeTick().catch((err) => {
+      let msg = 'auto trade interval failed';
+      if (err && err.message) {
+        msg = err.message;
+      }
+      console.error('[autotrade]', msg);
+    });
+  }, AUTOTRADE_POLL_INTERVAL_MS);
+}
+if (ENABLE_GAS_PACK) {
+  const gasIntervalId = setInterval(() => {
+    runGasPackGuarded('core').catch((err) => {
+      let msg = 'gas pack interval failed';
+      if (err && err.message) {
+        msg = err.message;
+      }
+      if (msg.includes('need at least 2 local accounts')) {
+        console.error('[gas] disabled background gas loop: Sepolia RPC does not expose local unlocked accounts');
+        clearInterval(gasIntervalId);
+        return;
+      }
+      console.error('[gas]', msg);
+    });
+  }, GAS_AUTO_RUN_INTERVAL_MS);
+}
 
 app.use((_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -4894,10 +10630,19 @@ app.use((_req, res) => {
 const DEFAULT_PORT = 3000;
 
 let PORT = DEFAULT_PORT;
-if (process.env.STAGE0_PORT) {
+if (process.env.PORT) {
+  PORT = Number(process.env.PORT);
+} else if (process.env.STAGE0_PORT) {
   PORT = Number(process.env.STAGE0_PORT);
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`RPC URL: ${HARDHAT_RPC_URL}`);
+  console.log(`Deployments file: ${DEPLOYMENTS_FILE}`);
+  console.log(`Signer keys loaded: ${RPC_SIGNERS.size}`);
+  console.log(`Autotrade loop enabled: ${ENABLE_AUTOTRADE}`);
+  console.log(`Autotrade interval ms: ${AUTOTRADE_POLL_INTERVAL_MS}`);
+  console.log(`Gas loop enabled: ${ENABLE_GAS_PACK}`);
+  console.log(`Gas interval ms: ${GAS_AUTO_RUN_INTERVAL_MS}`);
 });

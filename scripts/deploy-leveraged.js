@@ -7,7 +7,7 @@ async function ensureDir(dirPath) {
 }
 
 async function readDeployments(networkName) {
-  const filePath = path.join(__dirname, "..", "..", "deployments", `${networkName}.json`);
+  const filePath = path.join(__dirname, "..", "deployments", `${networkName}.json`);
   try {
     const raw = await fs.promises.readFile(filePath, "utf8");
     const data = JSON.parse(raw);
