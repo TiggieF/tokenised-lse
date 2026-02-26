@@ -759,6 +759,25 @@
       }
     }
 
+    async function fetchJsonWithTimeout(url, timeoutMs) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (_err) {
+          data = {};
+        }
+        return { ok: res.ok, data };
+      } catch (_err) {
+        return { ok: false, data: { error: "request_timeout" } };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     async function refreshPortfolio() {
       if (!isValidWalletAddress(currentWallet)) {
         holdingsStatus.textContent = "Wallet not connected";
@@ -773,18 +792,18 @@
       holdingsStatus.textContent = "Loading";
 
       const [summaryRes, positionsRes, claimablesRes, leveragedRes, lifecycleRes] = await Promise.all([
-        fetch(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch("/api/admin/symbols/status"),
+        fetchJsonWithTimeout(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`, 12000),
+        fetchJsonWithTimeout(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`, 12000),
+        fetchJsonWithTimeout(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`, 5000),
+        fetchJsonWithTimeout(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`, 8000),
+        fetchJsonWithTimeout("/api/admin/symbols/status", 5000),
       ]);
 
-      const summaryData = await summaryRes.json();
-      const positionsData = await positionsRes.json();
-      const claimablesData = await claimablesRes.json();
-      const leveragedData = await leveragedRes.json();
-      const lifecycleData = await lifecycleRes.json();
+      const summaryData = summaryRes.data || {};
+      const positionsData = positionsRes.data || {};
+      const claimablesData = claimablesRes.data || {};
+      const leveragedData = leveragedRes.data || {};
+      const lifecycleData = lifecycleRes.data || {};
       let lifecycleRows = [];
       if (Array.isArray(lifecycleData.symbols)) {
         lifecycleRows = lifecycleData.symbols;
@@ -821,14 +840,14 @@
       renderSummary(summaryData);
       renderPositions(positionsData.positions);
       renderMarketAlert(positionsData.positions);
-      renderClaimables(claimablesData.claimables);
-      renderLeveragedPositions(leveragedData.positions);
+      renderClaimables(Array.isArray(claimablesData.claimables) ? claimablesData.claimables : []);
+      renderLeveragedPositions(Array.isArray(leveragedData.positions) ? leveragedData.positions : []);
       holdingsStatus.textContent = ``;
       holdingsStatus.textContent = ``;
       // Loaded ${positionsData.positions.length} positions
 
-      dividendsStatus.textContent = "Ready";
-      leveragedStatus.textContent = "Ready";
+      dividendsStatus.textContent = claimablesRes.ok ? "Ready" : "Temporarily unavailable";
+      leveragedStatus.textContent = leveragedRes.ok ? "Ready" : "Temporarily unavailable";
     }
 
     function setPolling(enabled) {

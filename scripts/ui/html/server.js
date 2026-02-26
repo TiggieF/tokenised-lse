@@ -6234,7 +6234,10 @@ app.get('/api/portfolio/positions', async (req, res) => {
   }
 
   try {
-    await ensureIndexerSynced();
+    await Promise.race([
+      ensureIndexerSynced(),
+      new Promise((resolve) => setTimeout(resolve, 4000)),
+    ]);
     const snapshot = readIndexerSnapshot();
     const deployments = loadDeployments();
     const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
@@ -6568,7 +6571,10 @@ app.get('/api/portfolio/summary', async (req, res) => {
   }
 
   try {
-    await ensureIndexerSynced();
+    await Promise.race([
+      ensureIndexerSynced(),
+      new Promise((resolve) => setTimeout(resolve, 4000)),
+    ]);
     const snapshot = readIndexerSnapshot();
     const deployments = loadDeployments();
     const chainIdHex = await hardhatRpc('eth_chainId', []);
