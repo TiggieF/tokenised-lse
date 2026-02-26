@@ -354,7 +354,7 @@
         <a class="nav-link" href="#" data-page="award">Award</a>
         <a class="nav-link" href="#" data-page="gas">Gas</a>
         <a id="admin-nav-link" class="nav-link" href="#" data-page="admin">Admin</a>
-        <button id="live-updates-toggle" class="nav-toggle-btn enabled" type="button">Live updates: Enabled</button>
+        <button id="live-updates-toggle" class="nav-toggle-btn enabled" type="button" style="display:none;">Live updates: Enabled</button>
       </nav>
     </aside>
 
@@ -449,30 +449,23 @@
       if (adminNavLink) {
         adminNavLink.style.display = adminFeaturesEnabled ? "inline-flex" : "none";
       }
-      liveUpdatesToggle.style.display = adminFeaturesEnabled ? "inline-flex" : "none";
-      liveUpdatesToggle.disabled = !adminFeaturesEnabled;
-      if (adminFeaturesEnabled) {
-        // Keep live updates enabled by default for allowed admin wallets.
-        if (liveUpdatesEnabled) {
-          setLiveUpdatesEnabled(true);
-        }
-      }
-      if (!adminFeaturesEnabled) {
-        if (liveUpdatesEnabled) {
-          setLiveUpdatesEnabled(false);
-        } else {
-          pageFrame.contentWindow.postMessage(
-            {
-              type: "LIVE_UPDATES",
-              enabled: false,
-            },
-            "*"
-          );
-        }
-      }
       if (!adminFeaturesEnabled && pageFrame.title === "Admin") {
         loadPage("markets");
       }
+    }
+
+    async function refreshGlobalLiveUpdates() {
+      try {
+        const res = await fetch("/api/live-updates/status");
+        const data = await res.json();
+        if (res.ok && data) {
+          setLiveUpdatesEnabled(data.enabled !== false);
+          return;
+        }
+      } catch {
+      }
+      // Fail open to keep prices updating when status endpoint is unavailable.
+      setLiveUpdatesEnabled(true);
     }
 
     async function refreshUiPermissions() {
@@ -742,18 +735,15 @@
     applyAdminFeatureVisibility();
 
     liveUpdatesToggle.addEventListener("click", () => {
-      if (!adminFeaturesEnabled) {
-        return;
-      }
-      const nextState = !liveUpdatesEnabled;
-      setLiveUpdatesEnabled(nextState);
-      // event listener for live update
+      // Control moved to Admin page.
     });
 
     pageFrame.addEventListener("load", () => {
-      setLiveUpdatesEnabled(liveUpdatesEnabled && adminFeaturesEnabled);
+      refreshGlobalLiveUpdates();
     });
 
+    refreshGlobalLiveUpdates();
+    setInterval(refreshGlobalLiveUpdates, 10000);
     loadIndexTicker();
     setInterval(loadIndexTicker, INDEX_TICKER_ROLL_MS);
   </script>
