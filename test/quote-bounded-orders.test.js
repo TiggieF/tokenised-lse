@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 const ONE_SHARE = 10n ** 18n;
@@ -45,7 +45,9 @@ async function deployBuyExactQuoteFixture() {
   return { admin, maker1, maker2, taker, ttoken, equity, dex };
 }
 
-describe("buyExactQuote", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("buyExactQuote", function () {
   it("respects quote budget and refunds leftover", async function () {
     const fixture = await loadFixture(deployBuyExactQuoteFixture);
     const admin = fixture.admin;

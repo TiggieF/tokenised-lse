@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 const MAX_SUPPLY = 3n * 10n ** 50n;
@@ -18,7 +18,9 @@ async function deployTTokenFixture() {
   return { token, admin, otherUser, anotherUser };
 }
 
-describe("TToken token", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("TToken token", function () {
   describe("Deployment", function () {
     it("assigns deployer as admin and minter", async function () {
       const fixture = await loadFixture(deployTTokenFixture);

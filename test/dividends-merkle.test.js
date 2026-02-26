@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 async function deployMerkleDividendsFixture() {
@@ -95,7 +95,9 @@ function proofForIndex(leafHashes, leafIndex) {
   return proof;
 }
 
-describe("DividendsMerkle", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("DividendsMerkle", function () {
   it("claims with valid proof and tracks accounting", async function () {
     const fixture = await loadFixture(deployMerkleDividendsFixture);
     const admin = fixture.admin;

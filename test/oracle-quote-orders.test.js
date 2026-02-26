@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
 
 const ONE_SHARE = 10n ** 18n;
@@ -45,7 +45,9 @@ async function deployOracleQuoteFixture() {
   return { admin, maker1, maker2, taker, ttoken, registry, priceFeed, equity, dex };
 }
 
-describe("buyExactQuoteAtOracle", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("buyExactQuoteAtOracle", function () {
   it("uses oracle max bound to filter asks", async function () {
     const fixture = await loadFixture(deployOracleQuoteFixture);
     const admin = fixture.admin;

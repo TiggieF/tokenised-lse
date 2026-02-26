@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 const ONE_SHARE = 10n ** 18n;
@@ -45,7 +45,9 @@ async function deployDividendsFixture() {
   return { admin, alice, bob, carol, ttoken, registry, equity, dividends };
 }
 
-describe("Dividends", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("Dividends", function () {
   it("uses snapshot balances for claims", async function () {
     const fixture = await loadFixture(deployDividendsFixture);
     const admin = fixture.admin;

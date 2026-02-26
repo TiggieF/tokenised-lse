@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 const ONE = 10n ** 18n;
@@ -57,7 +57,9 @@ async function deployLeveragedProductsFixture() {
   };
 }
 
-describe("Leveraged Products", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("Leveraged Products", function () {
   it("creates a 5x long product for listed base symbol", async function () {
     const fixture = await loadFixture(deployLeveragedProductsFixture);
     const admin = fixture.admin;

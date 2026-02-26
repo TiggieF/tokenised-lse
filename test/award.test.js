@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
 
 const ONE_SHARE = 10n ** 18n;
@@ -67,7 +67,9 @@ async function deployAwardFixture() {
   return { admin, minter, seller, buyer, other, ttoken, equity, dex, award, equityAddress };
 }
 
-describe("Award", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("Award", function () {
   it("uses 60 second epochs and fixed 100 ttoken reward", async function () {
     const { award } = await loadFixture(deployAwardFixture);
     expect(await award.EPOCH_DURATION()).to.equal(60n);

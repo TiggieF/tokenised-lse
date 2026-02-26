@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 const PRICE = 10_000n;
@@ -47,7 +47,9 @@ async function deployOrderBookFixture() {
   return { admin, alice, bob, carol, dave, ttoken, equity, dex };
 }
 
-describe("OrderBookDEX", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("OrderBookDEX", function () {
   it("processes partial fills on buys", async function () {
     const fixture = await loadFixture(deployOrderBookFixture);
     const admin = fixture.admin;

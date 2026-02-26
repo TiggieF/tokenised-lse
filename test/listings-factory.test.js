@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 async function deployListingsFixture() {
@@ -27,7 +27,9 @@ async function deployListingsFixture() {
   return { admin, otherUser, minter, registry, factory };
 }
 
-describe("Listings & Factory", function () {
+const describeLocal = network.name === "hardhat" ? describe : describe.skip;
+
+describeLocal("Listings & Factory", function () {
   it("deploys and registers a new equity token per symbol", async function () {
     const fixture = await loadFixture(deployListingsFixture);
     const admin = fixture.admin;
