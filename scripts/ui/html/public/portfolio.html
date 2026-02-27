@@ -237,6 +237,7 @@
           <th>Current</th>
           <th>Cost Basis</th>
           <th>Market Value</th>
+          <th>P/L %</th>
         </tr>
       </thead>
       <tbody id="positions-body"></tbody>
@@ -462,7 +463,7 @@
       positionsBody.innerHTML = "";
       if (!positions.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="6" class="muted">No holdings yet</td>';
+        tr.innerHTML = '<td colspan="7" class="muted">No holdings yet</td>';
         positionsBody.appendChild(tr);
         return;
       }
@@ -474,6 +475,28 @@
           lifecycle = String(lifecycleRow.status).toUpperCase();
         }
         const isTradable = lifecycle === "ACTIVE";
+        let pnlPct = Number(p.unrealizedPnlPct);
+        if (!Number.isFinite(pnlPct)) {
+          const cost = Number(p.costBasisWei);
+          const value = Number(p.currentValueWei);
+          if (Number.isFinite(cost) && cost > 0 && Number.isFinite(value)) {
+            pnlPct = ((value - cost) / cost) * 100;
+          }
+        }
+        let pnlClass = "gain neutral";
+        let pnlText = "-";
+        if (Number.isFinite(pnlPct)) {
+          if (pnlPct > 0) {
+            pnlClass = "gain positive";
+            pnlText = `+${pnlPct.toFixed(2)}%`;
+          } else if (pnlPct < 0) {
+            pnlClass = "gain negative";
+            pnlText = `${pnlPct.toFixed(2)}%`;
+          } else {
+            pnlClass = "gain neutral";
+            pnlText = "0.00%";
+          }
+        }
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${p.symbol}</td>
@@ -482,6 +505,7 @@
           <td>${formatCents(p.priceCents)}</td>
           <td>${formatUsdFromWei(p.costBasisWei)}</td>
           <td>${formatUsdFromWei(p.currentValueWei)}</td>
+          <td class="${pnlClass}">${pnlText}</td>
         `;
         if (isTradable) {
           tr.style.cursor = "pointer";
@@ -708,8 +732,13 @@
         actionWrap.appendChild(sellBtn);
         actionTd.appendChild(actionWrap);
         const leverage = Number(item.leverage);
+        let livePriceCents = Number(item.navCents);
+        const baseLivePriceCents = Number(item.basePriceCents);
+        if (Number.isFinite(baseLivePriceCents) && baseLivePriceCents > 0) {
+          livePriceCents = baseLivePriceCents;
+        }
         let changePct = null;
-        const livePrice = Number(item.navCents) / 100;
+        const livePrice = Number(livePriceCents) / 100;
         const avgEntry = Number(item.avgEntryPriceCents) / 100;
         if (
           Number.isFinite(livePrice)
@@ -749,13 +778,25 @@
         }
         tr.innerHTML = `
           <td>${item.productSymbol}</td>
-          <td>${formatCents(item.navCents)}</td>
+          <td>${formatCents(livePriceCents)}</td>
           <td class="${changeClass}">${changeText}</td>
           <td>${formatCents(item.avgEntryPriceCents)}</td>
           <td>${formatUsdFromWei(item.currentValueWei)}</td>
         `;
         tr.appendChild(actionTd);
         leveragedBody.appendChild(tr);
+      }
+    }
+
+    async function fetchJsonWithTimeout(url, timeoutMs = 8000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        const data = await res.json();
+        return { res, data };
+      } finally {
+        clearTimeout(timer);
       }
     }
 
@@ -771,22 +812,38 @@
         return;
       }
       holdingsStatus.textContent = "Loading";
-
-      const [summaryRes, positionsRes, claimablesRes, leveragedRes, lifecycleRes] = await Promise.all([
-        fetch(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch("/api/admin/symbols/status"),
+      const results = await Promise.allSettled([
+        fetchJsonWithTimeout(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
+        fetchJsonWithTimeout(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
+        fetchJsonWithTimeout(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
+        fetchJsonWithTimeout(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
+        fetchJsonWithTimeout("/api/admin/symbols/status"),
       ]);
 
-      const summaryData = await summaryRes.json();
-      const positionsData = await positionsRes.json();
-      const claimablesData = await claimablesRes.json();
-      const leveragedData = await leveragedRes.json();
-      const lifecycleData = await lifecycleRes.json();
+      let summaryData = null;
+      let positionsData = null;
+      let claimablesData = null;
+      let leveragedData = null;
+      let lifecycleData = null;
+
+      if (results[0].status === "fulfilled") {
+        summaryData = results[0].value.data;
+      }
+      if (results[1].status === "fulfilled") {
+        positionsData = results[1].value.data;
+      }
+      if (results[2].status === "fulfilled") {
+        claimablesData = results[2].value.data;
+      }
+      if (results[3].status === "fulfilled") {
+        leveragedData = results[3].value.data;
+      }
+      if (results[4].status === "fulfilled") {
+        lifecycleData = results[4].value.data;
+      }
+
       let lifecycleRows = [];
-      if (Array.isArray(lifecycleData.symbols)) {
+      if (lifecycleData && Array.isArray(lifecycleData.symbols)) {
         lifecycleRows = lifecycleData.symbols;
       }
       lifecycleBySymbol = {};
@@ -795,40 +852,50 @@
         lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
       }
 
-      let summaryFailed = false;
-      if (!summaryRes.ok) {
-        summaryFailed = true;
+      let summaryOk = false;
+      if (summaryData && !summaryData.error) {
+        summaryOk = true;
       }
-      if (summaryData.error) {
-        summaryFailed = true;
+      let positionsOk = false;
+      if (positionsData && !positionsData.error && Array.isArray(positionsData.positions)) {
+        positionsOk = true;
       }
-      if (summaryFailed) {
-        holdingsStatus.textContent = String(summaryData.error);
-        return;
+      if (summaryOk) {
+        renderSummary(summaryData);
       }
-      let positionsFailed = false;
-      if (!positionsRes.ok) {
-        positionsFailed = true;
+      if (positionsOk) {
+        renderPositions(positionsData.positions);
+        renderMarketAlert(positionsData.positions);
       }
-      if (positionsData.error) {
-        positionsFailed = true;
-      }
-      if (positionsFailed) {
-        holdingsStatus.textContent = String(positionsData.error);
-        return;
+      if (summaryOk && positionsOk) {
+        holdingsStatus.textContent = "";
+      } else {
+        holdingsStatus.textContent = "Partial data loaded (RPC/indexer still syncing)";
       }
 
-      renderSummary(summaryData);
-      renderPositions(positionsData.positions);
-      renderMarketAlert(positionsData.positions);
-      renderClaimables(claimablesData.claimables);
-      renderLeveragedPositions(leveragedData.positions);
-      holdingsStatus.textContent = ``;
-      holdingsStatus.textContent = ``;
-      // Loaded ${positionsData.positions.length} positions
+      let claimablesOk = false;
+      if (claimablesData && !claimablesData.error && Array.isArray(claimablesData.claimables)) {
+        claimablesOk = true;
+      }
+      if (claimablesOk) {
+        renderClaimables(claimablesData.claimables);
+        dividendsStatus.textContent = "Ready";
+      } else {
+        renderClaimables([]);
+        dividendsStatus.textContent = "Slow / unavailable right now";
+      }
 
-      dividendsStatus.textContent = "Ready";
-      leveragedStatus.textContent = "Ready";
+      let leveragedOk = false;
+      if (leveragedData && !leveragedData.error && Array.isArray(leveragedData.positions)) {
+        leveragedOk = true;
+      }
+      if (leveragedOk) {
+        renderLeveragedPositions(leveragedData.positions);
+        leveragedStatus.textContent = "Ready";
+      } else {
+        renderLeveragedPositions([]);
+        leveragedStatus.textContent = "Slow / unavailable right now";
+      }
     }
 
     function setPolling(enabled) {

@@ -380,6 +380,16 @@ const INDEXER_ENABLE_LEVERAGED = process.env.INDEXER_ENABLE_LEVERAGED
 const TXS_ENABLE_LEVERAGE_FALLBACK_SCAN = process.env.TXS_ENABLE_LEVERAGE_FALLBACK_SCAN
   ? String(process.env.TXS_ENABLE_LEVERAGE_FALLBACK_SCAN).toLowerCase() === 'true'
   : false;
+const INDEXER_SYNC_WAIT_MS = (() => {
+  const raw = Number(process.env.INDEXER_SYNC_WAIT_MS || '');
+  if (Number.isFinite(raw) && raw >= 500) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 4000;
+  }
+  return 8000;
+})();
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
@@ -2214,6 +2224,8 @@ async function getBlockTimestampMs(blockNumberRaw) {
 
 function appendManualMintActivity(input) {
   ensureIndexerDir();
+  const orders = readJsonFile(INDEXER_ORDERS_FILE, {});
+  const fills = readJsonFile(INDEXER_FILLS_FILE, []);
   const cashflows = readJsonFile(INDEXER_CASHFLOWS_FILE, []);
   const transfers = readJsonFile(INDEXER_TRANSFERS_FILE, []);
   const transferId = `${input.txHash}:manual-mint-transfer:${input.tokenAddress}:${input.wallet}`;
@@ -2263,8 +2275,110 @@ function appendManualMintActivity(input) {
     });
   }
 
+  const entryPriceCents = Number(input.priceCents);
+  if (Number.isFinite(entryPriceCents) && entryPriceCents > 0) {
+    const fillId = `${input.txHash}:manual-mint-fill:${normalizeAddress(input.wallet)}:${input.symbol}`;
+    let hasFill = false;
+    for (let i = 0; i < fills.length; i += 1) {
+      if (fills[i].id === fillId) {
+        hasFill = true;
+        break;
+      }
+    }
+    if (!hasFill) {
+      fills.push({
+        id: fillId,
+        makerId: 0,
+        takerId: 0,
+        makerTrader: '',
+        takerTrader: normalizeAddress(input.wallet),
+        side: 'BUY',
+        symbol: input.symbol,
+        equityToken: normalizeAddress(input.tokenAddress),
+        priceCents: Math.round(entryPriceCents),
+        qtyWei: String(input.amountWei),
+        blockNumber: Number(input.blockNumber),
+        txHash: input.txHash,
+        logIndex: 1,
+        timestampMs: Number(input.timestampMs),
+      });
+    }
+  }
+
+  writeJsonFile(INDEXER_ORDERS_FILE, orders);
+  writeJsonFile(INDEXER_FILLS_FILE, fills);
   writeJsonFile(INDEXER_CASHFLOWS_FILE, cashflows);
   writeJsonFile(INDEXER_TRANSFERS_FILE, transfers);
+}
+
+async function resolveEntryPriceCentsForSymbol(symbol, deployments) {
+  const upper = String(symbol || '').toUpperCase().trim();
+  if (!upper) {
+    return 0;
+  }
+  try {
+    const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol: upper }));
+    const quote = Array.isArray(payload) ? payload[0] : payload;
+    const price = Number(quote && quote.price);
+    if (Number.isFinite(price) && price > 0) {
+      return Math.round(price * 100);
+    }
+  } catch {
+  }
+  try {
+    const quote = await fetchQuote(upper);
+    const yahooPrice = Number(quote.regularMarketPrice || quote.price || 0);
+    if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
+      return Math.round(yahooPrice * 100);
+    }
+  } catch {
+  }
+  const priceFeedAddr = normalizeAddress(deployments && deployments.priceFeed);
+  if (priceFeedAddr) {
+    try {
+      const feedData = priceFeedInterface.encodeFunctionData('getPrice', [upper]);
+      const feedResult = await hardhatRpc('eth_call', [{ to: priceFeedAddr, data: feedData }, 'latest']);
+      const [onchainPriceRaw] = priceFeedInterface.decodeFunctionResult('getPrice', feedResult);
+      const onchainPrice = Number(onchainPriceRaw);
+      if (Number.isFinite(onchainPrice) && onchainPrice > 0) {
+        return Math.round(onchainPrice);
+      }
+    } catch {
+    }
+  }
+  const snapshot = readIndexerSnapshot();
+  const rows = Array.isArray(snapshot.fills) ? snapshot.fills : [];
+  let latest = null;
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (String(row.symbol || '').toUpperCase() !== upper) {
+      continue;
+    }
+    if (!latest) {
+      latest = row;
+      continue;
+    }
+    const prevTs = Number(latest.timestampMs) || 0;
+    const currTs = Number(row.timestampMs) || 0;
+    if (currTs > prevTs) {
+      latest = row;
+      continue;
+    }
+    if (currTs === prevTs) {
+      const prevBlock = Number(latest.blockNumber) || 0;
+      const currBlock = Number(row.blockNumber) || 0;
+      if (currBlock > prevBlock) {
+        latest = row;
+      }
+    }
+  }
+  if (latest) {
+    const fallback = Number(latest.priceCents);
+    if (Number.isFinite(fallback) && fallback > 0) {
+      return Math.round(fallback);
+    }
+  }
+  return 0;
 }
 
 async function lookupSymbolByToken(registryAddr, tokenAddr) {
@@ -2822,6 +2936,13 @@ async function ensureIndexerSynced() {
   return indexerSyncPromise;
 }
 
+async function waitForIndexerSyncBounded() {
+  await Promise.race([
+    ensureIndexerSynced(),
+    new Promise((resolve) => setTimeout(resolve, INDEXER_SYNC_WAIT_MS)),
+  ]);
+}
+
 function readIndexerSnapshot() {
   ensureIndexerDir();
   return {
@@ -2983,6 +3104,47 @@ async function computeOverallGasForWallet(snapshot, wallet) {
 
 function quoteAmountWei(qtyWei, priceCents) {
   return (BigInt(qtyWei) * BigInt(priceCents)) / 100n;
+}
+
+function getStableUnmatchedCostCents(snapshot, symbol, usedQty, usedCostWei) {
+  if (usedQty > 0n && usedCostWei > 0n) {
+    const avgKnown = Number((usedCostWei * 100n) / usedQty);
+    if (Number.isFinite(avgKnown) && avgKnown > 0) {
+      return avgKnown;
+    }
+  }
+  const fills = Array.isArray(snapshot && snapshot.fills) ? snapshot.fills : [];
+  let latest = null;
+  for (let i = 0; i < fills.length; i += 1) {
+    const row = fills[i];
+    if (String(row.symbol || '').toUpperCase() !== String(symbol || '').toUpperCase()) {
+      continue;
+    }
+    if (!latest) {
+      latest = row;
+      continue;
+    }
+    const prevTs = Number(latest.timestampMs) || 0;
+    const currTs = Number(row.timestampMs) || 0;
+    if (currTs > prevTs) {
+      latest = row;
+      continue;
+    }
+    if (currTs === prevTs) {
+      const prevBlock = Number(latest.blockNumber) || 0;
+      const currBlock = Number(row.blockNumber) || 0;
+      if (currBlock > prevBlock) {
+        latest = row;
+      }
+    }
+  }
+  if (latest) {
+    const fallback = Number(latest.priceCents);
+    if (Number.isFinite(fallback) && fallback > 0) {
+      return fallback;
+    }
+  }
+  return 0;
 }
 
 async function getListingBySymbol(registryAddr, symbol) {
@@ -6104,10 +6266,7 @@ app.get('/api/txs', async (req, res) => {
   }
 
   try {
-    await Promise.race([
-      ensureIndexerSynced(),
-      new Promise((resolve) => setTimeout(resolve, 4000)),
-    ]);
+    await waitForIndexerSyncBounded();
     const snapshot = readIndexerSnapshot();
     const { orders, fills, cancellations, cashflows, transfers, leveragedEvents } = snapshot;
     const items = [];
@@ -6174,7 +6333,9 @@ app.get('/api/txs', async (req, res) => {
     if (includeFills) {
       for (const fill of fills) {
         let side = '';
-        if (fill.makerTrader === wallet) {
+        if (fill.side) {
+          side = String(fill.side).toUpperCase();
+        } else if (fill.makerTrader === wallet) {
           const makerOrder = orders[String(fill.makerId)];
           if (makerOrder && makerOrder.side) {
             side = makerOrder.side;
@@ -6390,7 +6551,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
   }
 
   try {
-    await ensureIndexerSynced();
+    await waitForIndexerSyncBounded();
     const snapshot = readIndexerSnapshot();
     const deployments = loadDeployments();
     const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
@@ -6417,7 +6578,9 @@ app.get('/api/portfolio/positions', async (req, res) => {
       }
       if (isWalletFill) {
         let side = '';
-        if (fill.makerTrader === walletNorm) {
+        if (fill.side) {
+          side = String(fill.side).toUpperCase();
+        } else if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
           if (makerOrder) {
             side = makerOrder.side;
@@ -6654,8 +6817,11 @@ app.get('/api/portfolio/positions', async (req, res) => {
         currentValueWei = quoteAmountWei(balanceWei, priceCents);
       }
       let unmatchedCostWei = 0n;
-      if (priceCents > 0) {
-        unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, priceCents);
+      if (unmatchedQtyWei > 0n) {
+        const unmatchedCostCents = getStableUnmatchedCostCents(snapshot, listing.symbol, usedQty, usedCostWei);
+        if (unmatchedCostCents > 0) {
+          unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, unmatchedCostCents);
+        }
       }
       const effectiveCostBasisWei = usedCostWei + unmatchedCostWei;
       let avgCostCents = 0;
@@ -6724,7 +6890,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
   }
 
   try {
-    await ensureIndexerSynced();
+    await waitForIndexerSyncBounded();
     const snapshot = readIndexerSnapshot();
     const deployments = loadDeployments();
     const chainIdHex = await hardhatRpc('eth_chainId', []);
@@ -6764,7 +6930,9 @@ app.get('/api/portfolio/summary', async (req, res) => {
       }
       if (matchesFillWallet) {
         let side = '';
-        if (fill.makerTrader === walletNorm) {
+        if (fill.side) {
+          side = String(fill.side).toUpperCase();
+        } else if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
           if (makerOrder) {
             side = makerOrder.side;
@@ -7001,8 +7169,11 @@ app.get('/api/portfolio/summary', async (req, res) => {
         currentValueWei = quoteAmountWei(balanceWei, priceCents);
       }
       let unmatchedCostWei = 0n;
-      if (priceCents > 0) {
-        unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, priceCents);
+      if (unmatchedQtyWei > 0n) {
+        const unmatchedCostCents = getStableUnmatchedCostCents(snapshot, listing.symbol, usedQty, usedCostWei);
+        if (unmatchedCostCents > 0) {
+          unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, unmatchedCostCents);
+        }
       }
       const effectiveCostBasisWei = usedCostWei + unmatchedCostWei;
       let avgCostCents = 0;
@@ -7180,7 +7351,9 @@ app.get('/api/portfolio/rebuild-audit', async (req, res) => {
       }
       if (relatedToWallet) {
         let side = '';
-        if (fill.makerTrader === walletNorm) {
+        if (fill.side) {
+          side = String(fill.side).toUpperCase();
+        } else if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
           if (makerOrder) {
             side = makerOrder.side;
@@ -8905,35 +9078,20 @@ app.post('/api/award/claim', async (req, res) => {
 
 app.get('/api/award/current', async (_req, res) => {
   try {
-    const deployments = loadDeployments();
-    if (!deployments.award) {
+    const snapshot = await getAwardStatusSnapshot();
+    if (!snapshot.available) {
       return res.json({ available: false });
     }
-    let selfBaseUrl = `http://127.0.0.1:${PORT}`;
-    if (process.env.SERVER_BASE_URL) {
-      selfBaseUrl = String(process.env.SERVER_BASE_URL);
-    }
-    const statusRes = await fetch(`${selfBaseUrl}/api/award/status`);
-    const statusData = await statusRes.json();
-    if (!statusRes.ok) {
-      let reason = 'failed to load status';
-      if (statusData.error) {
-        reason = statusData.error;
-      }
-      return res.status(500).json({ error: reason });
-    }
-    const leaderboardRes = await fetch(`${selfBaseUrl}/api/award/leaderboard?epochId=${Math.max(0, statusData.currentEpoch - 1)}`);
-    const leaderboardData = await leaderboardRes.json();
+    const previousEpoch = Math.max(0, snapshot.currentEpoch - 1);
+    const leaderboard = await buildAwardLeaderboardForEpoch(snapshot.deployments.award, previousEpoch);
     let topRow = null;
-    if (leaderboardData.items) {
-      if (leaderboardData.items.length > 0) {
-        topRow = leaderboardData.items[0];
-      }
+    if (Array.isArray(leaderboard.items) && leaderboard.items.length > 0) {
+      topRow = leaderboard.items[0];
     }
     res.json({
       available: true,
-      currentEpoch: statusData.currentEpoch,
-      previousEpoch: Math.max(0, statusData.currentEpoch - 1),
+      currentEpoch: snapshot.currentEpoch,
+      previousEpoch,
       topTrader: (() => {
         let topTrader = ethers.ZeroAddress;
         if (topRow) {
@@ -9524,88 +9682,59 @@ app.get('/api/leveraged/positions', async (req, res) => {
         let basePriceCents = 0;
         let baseChangePct = Number.NaN;
         try {
-          const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
-          let yahooPriceRaw = 0;
-          if (quote.regularMarketPrice) {
-            yahooPriceRaw = quote.regularMarketPrice;
-          } else if (quote.price) {
-            yahooPriceRaw = quote.price;
+          const fmpShort = await fetchFmpJson(getFmpUrl('quote', { symbol: String(item.baseSymbol).toUpperCase() }));
+          let first = null;
+          if (Array.isArray(fmpShort) && fmpShort.length > 0) {
+            first = fmpShort[0];
+          } else if (fmpShort && typeof fmpShort === 'object') {
+            first = fmpShort;
           }
-          const yahooPrice = Number(yahooPriceRaw);
-          if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
-            basePriceCents = Math.round(yahooPrice * 100);
-          }
-          const yahooOpen = Number(quote.regularMarketOpen);
-          if (
-            Number.isFinite(yahooOpen)
-            && yahooOpen > 0
-            && Number.isFinite(yahooPrice)
-            && yahooPrice > 0
-          ) {
-            baseChangePct = ((yahooPrice - yahooOpen) / yahooOpen) * 100;
-          }
-          const yahooChangeRaw = Number(quote.regularMarketChangePercent);
-          if (Number.isFinite(yahooChangeRaw) && (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001)) {
-            if (Math.abs(yahooChangeRaw) <= 1) {
-              baseChangePct = yahooChangeRaw * 100;
-            } else {
-              baseChangePct = yahooChangeRaw;
+          if (first) {
+            const fmpPrice = Number(first.price);
+            if (Number.isFinite(fmpPrice) && fmpPrice > 0) {
+              basePriceCents = Math.round(fmpPrice * 100);
             }
-          }
-          const yahooPrevClose = Number(quote.regularMarketPreviousClose);
-          if (
-            Number.isFinite(yahooPrevClose)
-            && yahooPrevClose > 0
-            && Number.isFinite(yahooPrice)
-            && yahooPrice > 0
-            && (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001)
-          ) {
-            baseChangePct = ((yahooPrice - yahooPrevClose) / yahooPrevClose) * 100;
+            const fmpPrevClose = Number(first.previousClose);
+            if (Number.isFinite(fmpPrevClose) && fmpPrevClose > 0 && Number.isFinite(fmpPrice) && fmpPrice > 0) {
+              baseChangePct = ((fmpPrice - fmpPrevClose) / fmpPrevClose) * 100;
+            } else {
+              let fmpPctRaw = Number.NaN;
+              if (first.changePercent !== undefined && first.changePercent !== null) {
+                fmpPctRaw = Number(first.changePercent);
+              } else if (first.changesPercentage !== undefined && first.changesPercentage !== null) {
+                fmpPctRaw = Number(first.changesPercentage);
+              }
+              if (Number.isFinite(fmpPctRaw)) {
+                if (Math.abs(fmpPctRaw) <= 1) {
+                  baseChangePct = fmpPctRaw * 100;
+                } else {
+                  baseChangePct = fmpPctRaw;
+                }
+              }
+            }
           }
         } catch {
-        }
-        if (!(basePriceCents > 0) || !Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001) {
           try {
-            const fmpShort = await fetchFmpJson(getFmpUrl('quote', { symbol: String(item.baseSymbol).toUpperCase() }));
-            let first = null;
-            if (Array.isArray(fmpShort) && fmpShort.length > 0) {
-              first = fmpShort[0];
-            } else if (fmpShort && typeof fmpShort === 'object') {
-              first = fmpShort;
+            const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
+            const yahooPrice = Number(quote.regularMarketPrice || quote.price || 0);
+            if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
+              basePriceCents = Math.round(yahooPrice * 100);
             }
-            if (first) {
-              let fmpPriceRaw = 0;
-              if (first.price) {
-                fmpPriceRaw = first.price;
-              }
-              const fmpPrice = Number(fmpPriceRaw);
-              if (Number.isFinite(fmpPrice) && fmpPrice > 0) {
-                basePriceCents = Math.round(fmpPrice * 100);
-              }
-              const fmpOpen = Number(first.open);
-              if (
-                Number.isFinite(fmpOpen)
-                && fmpOpen > 0
-                && Number.isFinite(fmpPrice)
-                && fmpPrice > 0
-              ) {
-                baseChangePct = ((fmpPrice - fmpOpen) / fmpOpen) * 100;
-              }
-              if (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001) {
-                let fmpPctRaw = Number.NaN;
-                if (first.changePercent !== undefined && first.changePercent !== null) {
-                  fmpPctRaw = first.changePercent;
-                } else if (first.changesPercentage !== undefined && first.changesPercentage !== null) {
-                  fmpPctRaw = first.changesPercentage;
-                }
-                const fmpPct = Number(fmpPctRaw);
-                if (Number.isFinite(fmpPct) && Math.abs(fmpPct) >= 0.0001) {
-                  baseChangePct = fmpPct;
+            const yahooPrevClose = Number(quote.regularMarketPreviousClose);
+            if (
+              Number.isFinite(yahooPrevClose)
+              && yahooPrevClose > 0
+              && Number.isFinite(yahooPrice)
+              && yahooPrice > 0
+            ) {
+              baseChangePct = ((yahooPrice - yahooPrevClose) / yahooPrevClose) * 100;
+            } else {
+              const yahooChangeRaw = Number(quote.regularMarketChangePercent);
+              if (Number.isFinite(yahooChangeRaw)) {
+                if (Math.abs(yahooChangeRaw) <= 1) {
+                  baseChangePct = yahooChangeRaw * 100;
                 } else {
-                  const fmpPrevClose = Number(first.previousClose);
-                  if (Number.isFinite(fmpPrevClose) && fmpPrevClose > 0 && Number.isFinite(fmpPrice) && fmpPrice > 0) {
-                    baseChangePct = ((fmpPrice - fmpPrevClose) / fmpPrevClose) * 100;
-                  }
+                  baseChangePct = yahooChangeRaw;
                 }
               }
             }
@@ -10590,12 +10719,14 @@ app.post('/api/equity/mint', async (req, res) => {
     const receipt = await waitForReceipt(txHash);
     const blockNumber = parseRpcInt(receipt.blockNumber);
     const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    const entryPriceCents = await resolveEntryPriceCentsForSymbol(symbol, deployments);
     appendManualMintActivity({
       wallet: to,
       tokenAddress: tokenAddr,
       symbol,
       assetType: 'EQUITY',
       amountWei: amountWei.toString(),
+      priceCents: entryPriceCents,
       reason: 'MINT_EQUITY',
       txHash,
       blockNumber,
@@ -10701,12 +10832,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
     const receipt = await waitForReceipt(mintTx);
     const blockNumber = parseRpcInt(receipt.blockNumber);
     const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    const entryPriceCents = await resolveEntryPriceCentsForSymbol(symbol, deployments);
     appendManualMintActivity({
       wallet: to,
       tokenAddress: tokenAddr,
       symbol,
       assetType: 'EQUITY',
       amountWei: amountWei.toString(),
+      priceCents: entryPriceCents,
       reason: 'MINT_EQUITY',
       txHash: mintTx,
       blockNumber,
