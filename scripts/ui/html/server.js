@@ -390,6 +390,18 @@ const INDEXER_SYNC_WAIT_MS = (() => {
   }
   return 8000;
 })();
+const INDEXER_STALE_ALLOW_MS = (() => {
+  if (NETWORK_NAME === 'sepolia') {
+    return 30000;
+  }
+  return 10000;
+})();
+const LISTINGS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
+const LEVERAGED_PRODUCTS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
+const PORTFOLIO_HOLDINGS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 5000 : 2000;
+const PORTFOLIO_RPC_CONCURRENCY = NETWORK_NAME === 'sepolia' ? 4 : 8;
+const ORDERBOOK_CHAIN_FILLS_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
+const PORTFOLIO_GAS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 60000 : 15000;
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
@@ -409,6 +421,21 @@ const awardCache = {
 };
 const txReceiptGasCache = new Map();
 const signerTxQueues = new Map();
+let listingsCache = {
+  registryAddr: '',
+  timestampMs: 0,
+  items: [],
+};
+let leveragedProductsCache = {
+  factoryAddr: '',
+  timestampMs: 0,
+  items: [],
+};
+const portfolioHoldingsCache = new Map();
+const contractDeploymentBlockCache = new Map();
+const orderbookChainFillsCache = new Map();
+const portfolioGasCache = new Map();
+const portfolioGasInflight = new Map();
 
 async function enqueueSignerSend(address, job) {
   const key = String(address || '').toLowerCase();
@@ -843,11 +870,11 @@ function isRpcRateLimitError(messageRaw) {
   return false;
 }
 
-async function getLogsChunked(baseFilter, startBlock, endBlock) {
+async function getLogsChunked(baseFilter, startBlock, endBlock, preferredChunkSize) {
   const allLogs = [];
   let from = Number(startBlock);
   const end = Number(endBlock);
-  let chunkSize = Math.max(1, GET_LOGS_BLOCK_RANGE);
+  let chunkSize = Math.max(1, Number(preferredChunkSize) || GET_LOGS_BLOCK_RANGE);
   let rateRetryCount = 0;
   while (from <= end) {
     const to = Math.min(end, from + chunkSize - 1);
@@ -1060,6 +1087,162 @@ async function fetchRecentLeveragedEventsForWallet(wallet, lookbackBlocksInput) 
     }
   }
   return events;
+}
+
+async function findContractDeploymentBlock(addressRaw) {
+  const address = normalizeAddress(addressRaw);
+  if (!address) {
+    return 0;
+  }
+  if (contractDeploymentBlockCache.has(address)) {
+    return contractDeploymentBlockCache.get(address);
+  }
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = parseRpcInt(latestBlockHex);
+  const latestCode = await hardhatRpc('eth_getCode', [address, 'latest']);
+  if (!latestCode || latestCode === '0x') {
+    contractDeploymentBlockCache.set(address, 0);
+    return 0;
+  }
+  let low = 0;
+  let high = latestBlock;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    const code = await hardhatRpc('eth_getCode', [address, ethers.toQuantity(mid)]);
+    if (code && code !== '0x') {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  contractDeploymentBlockCache.set(address, low);
+  return low;
+}
+
+async function fetchOrderbookFillsFromChain(orderBookAddr, registryAddr) {
+  const cacheKey = `${orderBookAddr}:${registryAddr}`;
+  const cached = orderbookChainFillsCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestampMs) < ORDERBOOK_CHAIN_FILLS_TTL_MS) {
+    return cached.rows;
+  }
+
+  let startBlock = 0;
+  const configuredStart = Number(process.env.ORDERBOOK_FILLS_START_BLOCK || process.env.INDEXER_START_BLOCK || '');
+  if (Number.isFinite(configuredStart) && configuredStart >= 0) {
+    startBlock = Math.floor(configuredStart);
+  } else {
+    startBlock = await findContractDeploymentBlock(orderBookAddr);
+  }
+
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = parseRpcInt(latestBlockHex);
+  const topics = [
+    ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)'),
+    ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)'),
+  ];
+  const logs = await getLogsChunked({
+    address: orderBookAddr,
+    topics: [topics],
+  }, startBlock, latestBlock, NETWORK_NAME === 'sepolia' ? 2000 : 10000);
+  logs.sort((a, b) => {
+    const aBlock = Number(a.blockNumber);
+    const bBlock = Number(b.blockNumber);
+    if (aBlock !== bBlock) {
+      return aBlock - bBlock;
+    }
+    return Number(a.logIndex) - Number(b.logIndex);
+  });
+
+  const orderMetaById = new Map();
+  const tokenSymbolCache = new Map();
+  const fillRows = [];
+  for (let i = 0; i < logs.length; i += 1) {
+    const log = logs[i];
+    let parsed = null;
+    try {
+      parsed = orderBookInterface.parseLog(log);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) {
+      continue;
+    }
+    if (parsed.name === 'OrderPlaced') {
+      const id = Number(parsed.args.id);
+      const equityToken = normalizeAddress(parsed.args.equityToken);
+      let symbol = tokenSymbolCache.get(equityToken) || '';
+      if (!symbol) {
+        symbol = await lookupSymbolByToken(registryAddr, equityToken);
+        tokenSymbolCache.set(equityToken, symbol);
+      }
+      orderMetaById.set(id, {
+        trader: normalizeAddress(parsed.args.trader),
+        symbol,
+        equityToken,
+      });
+      continue;
+    }
+    if (parsed.name === 'OrderFilled') {
+      const makerId = Number(parsed.args.makerId);
+      const takerId = Number(parsed.args.takerId);
+      const equityToken = normalizeAddress(parsed.args.equityToken);
+      const makerOrder = orderMetaById.get(makerId) || null;
+      const takerOrder = orderMetaById.get(takerId) || null;
+      let symbol = '';
+      if (makerOrder && makerOrder.symbol) {
+        symbol = makerOrder.symbol;
+      } else if (takerOrder && takerOrder.symbol) {
+        symbol = takerOrder.symbol;
+      } else {
+        symbol = tokenSymbolCache.get(equityToken) || '';
+        if (!symbol) {
+          symbol = await lookupSymbolByToken(registryAddr, equityToken);
+          tokenSymbolCache.set(equityToken, symbol);
+        }
+      }
+      fillRows.push({
+        makerId,
+        takerId,
+        makerTrader: makerOrder ? makerOrder.trader : '',
+        takerTrader: takerOrder ? takerOrder.trader : '',
+        symbol,
+        priceCents: Number(parsed.args.price),
+        qty: parsed.args.qty.toString(),
+        blockNumber: Number(log.blockNumber),
+        txHash: String(log.transactionHash),
+        logIndex: Number(log.logIndex),
+      });
+    }
+  }
+
+  const blockNumbers = Array.from(new Set(fillRows.map((row) => row.blockNumber)));
+  const blockTimestampRows = await mapWithConcurrency(blockNumbers, PORTFOLIO_RPC_CONCURRENCY, async (blockNumber) => {
+    const timestampMs = await getBlockTimestampMs(blockNumber);
+    return { blockNumber, timestampMs };
+  });
+  const blockTimestampMap = new Map();
+  for (let i = 0; i < blockTimestampRows.length; i += 1) {
+    const row = blockTimestampRows[i];
+    blockTimestampMap.set(row.blockNumber, row.timestampMs);
+  }
+  for (let i = 0; i < fillRows.length; i += 1) {
+    fillRows[i].timestampMs = blockTimestampMap.get(fillRows[i].blockNumber) || 0;
+  }
+  fillRows.sort((a, b) => {
+    const timestampDiff = b.timestampMs - a.timestampMs;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+    if (b.blockNumber !== a.blockNumber) {
+      return b.blockNumber - a.blockNumber;
+    }
+    return b.logIndex - a.logIndex;
+  });
+  orderbookChainFillsCache.set(cacheKey, {
+    timestampMs: Date.now(),
+    rows: fillRows,
+  });
+  return fillRows;
 }
 
 function collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount) {
@@ -2503,26 +2686,13 @@ async function ensureIndexerSynced() {
       addresses.add(ttoken);
       symbolByTokenCache.set(ttoken, 'TTOKEN');
     }
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-    for (const symbol of symbols) {
-      const lookupData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
-      const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
-      const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
-      const normalized = normalizeAddress(tokenAddr);
-      const isMissing = !normalized;
-      const isZero = normalized === ethers.ZeroAddress;
-      let includeToken = true;
-      if (isMissing) {
-        includeToken = false;
-      }
-      if (isZero) {
-        includeToken = false;
-      }
-      if (includeToken) {
+    const listings = await getIndexedListings(registryAddr);
+    for (let i = 0; i < listings.length; i += 1) {
+      const listing = listings[i];
+      const normalized = normalizeAddress(listing.tokenAddress);
+      if (normalized && normalized !== ethers.ZeroAddress) {
         addresses.add(normalized);
-        symbolByTokenCache.set(normalized, symbol);
+        symbolByTokenCache.set(normalized, listing.symbol);
       }
     }
     const tokenAddresses = Array.from(addresses);
@@ -2580,10 +2750,18 @@ async function ensureIndexerSynced() {
       blocksNeeded.add(log.blockNumber);
     }
 
-    const blockTimestampsMs = new Map();
-    for (const blockHex of blocksNeeded) {
+    const blockNumbers = Array.from(blocksNeeded);
+    const blockTimestampRows = await mapWithConcurrency(blockNumbers, PORTFOLIO_RPC_CONCURRENCY, async (blockHex) => {
       const block = await hardhatRpc('eth_getBlockByNumber', [blockHex, false]);
-      blockTimestampsMs.set(blockHex, Number(block.timestamp) * 1000);
+      return {
+        blockHex,
+        timestampMs: Number(block.timestamp) * 1000,
+      };
+    });
+    const blockTimestampsMs = new Map();
+    for (let i = 0; i < blockTimestampRows.length; i += 1) {
+      const row = blockTimestampRows[i];
+      blockTimestampsMs.set(row.blockHex, row.timestampMs);
     }
 
     const existingTransferIds = new Set();
@@ -2937,6 +3115,16 @@ async function ensureIndexerSynced() {
 }
 
 async function waitForIndexerSyncBounded() {
+  const snapshot = readIndexerSnapshot();
+  const lastIndexedBlock = Number(snapshot.state && snapshot.state.lastIndexedBlock);
+  const lastSyncAtMs = Number(snapshot.state && snapshot.state.lastSyncAtMs);
+  if (lastIndexedBlock >= 0) {
+    const ageMs = Date.now() - lastSyncAtMs;
+    if (ageMs <= INDEXER_STALE_ALLOW_MS || indexerSyncPromise) {
+      ensureIndexerSynced().catch(() => {});
+      return;
+    }
+  }
   await Promise.race([
     ensureIndexerSynced(),
     new Promise((resolve) => setTimeout(resolve, INDEXER_SYNC_WAIT_MS)),
@@ -3080,16 +3268,17 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
 async function computeOverallGasForWallet(snapshot, wallet) {
   const walletNorm = normalizeAddress(wallet);
   const txHashes = collectWalletRelatedTxHashes(snapshot, walletNorm);
+  const receiptRows = await mapWithConcurrency(txHashes, PORTFOLIO_RPC_CONCURRENCY, async (txHash) => {
+    try {
+      return await readReceiptGasData(txHash);
+    } catch {
+      return null;
+    }
+  });
   let totalGasUsed = 0n;
   let totalCostWei = 0n;
-  for (let i = 0; i < txHashes.length; i += 1) {
-    const txHash = txHashes[i];
-    let receiptData = null;
-    try {
-      receiptData = await readReceiptGasData(txHash);
-    } catch {
-      receiptData = null;
-    }
+  for (let i = 0; i < receiptRows.length; i += 1) {
+    const receiptData = receiptRows[i];
     if (receiptData && receiptData.from === walletNorm) {
       totalGasUsed += receiptData.gasUsed;
       totalCostWei += receiptData.costWei;
@@ -3100,6 +3289,88 @@ async function computeOverallGasForWallet(snapshot, wallet) {
     gasCostWei: totalCostWei,
     txCount: txHashes.length,
   };
+}
+
+function readPortfolioGasCache(wallet) {
+  const key = normalizeAddress(wallet);
+  if (!key) {
+    return null;
+  }
+  const cached = portfolioGasCache.get(key);
+  if (!cached) {
+    return null;
+  }
+  if ((Date.now() - cached.timestampMs) > PORTFOLIO_GAS_CACHE_TTL_MS) {
+    return null;
+  }
+  return cached.value;
+}
+
+function getEmptyPortfolioGasSummary() {
+  return {
+    gasUsedUnits: 0n,
+    gasCostWei: 0n,
+    txCount: 0,
+  };
+}
+
+function startPortfolioGasRefresh(snapshot, wallet) {
+  const key = normalizeAddress(wallet);
+  if (!key) {
+    return Promise.resolve(getEmptyPortfolioGasSummary());
+  }
+  if (portfolioGasInflight.has(key)) {
+    return portfolioGasInflight.get(key);
+  }
+  const refreshPromise = computeOverallGasForWallet(snapshot, key)
+    .then((value) => {
+      portfolioGasCache.set(key, {
+        value,
+        timestampMs: Date.now(),
+      });
+      return value;
+    })
+    .finally(() => {
+      portfolioGasInflight.delete(key);
+    });
+  portfolioGasInflight.set(key, refreshPromise);
+  return refreshPromise;
+}
+
+async function getPortfolioGasSummary(snapshot, wallet, waitForFresh) {
+  const key = normalizeAddress(wallet);
+  if (!key) {
+    return getEmptyPortfolioGasSummary();
+  }
+  const cached = readPortfolioGasCache(key);
+  if (cached) {
+    return cached;
+  }
+  if (portfolioGasCache.has(key)) {
+    const stale = portfolioGasCache.get(key);
+    const ageMs = Date.now() - stale.timestampMs;
+    if (ageMs > PORTFOLIO_GAS_CACHE_TTL_MS) {
+      const refreshPromise = startPortfolioGasRefresh(snapshot, key);
+      if (waitForFresh) {
+        try {
+          return await refreshPromise;
+        } catch {
+          return stale.value;
+        }
+      }
+    }
+    return stale.value;
+  }
+  const refreshPromise = startPortfolioGasRefresh(snapshot, key);
+  if (!waitForFresh) {
+    refreshPromise.catch(() => {});
+    return getEmptyPortfolioGasSummary();
+  }
+  try {
+    return await refreshPromise;
+  } catch {
+    return getEmptyPortfolioGasSummary();
+  }
 }
 
 function quoteAmountWei(qtyWei, priceCents) {
@@ -3163,6 +3434,632 @@ async function getSymbolByToken(registryAddr, tokenAddress) {
     symbolText = String(symbol);
   }
   return symbolText.toUpperCase();
+}
+
+async function getIndexedListings(registryAddr) {
+  const now = Date.now();
+  if (
+    listingsCache.registryAddr === registryAddr
+    && (now - listingsCache.timestampMs) < LISTINGS_CACHE_TTL_MS
+    && Array.isArray(listingsCache.items)
+  ) {
+    return listingsCache.items;
+  }
+  const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
+  const listResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']);
+  const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
+  const resolved = await mapWithConcurrency(symbols, PORTFOLIO_RPC_CONCURRENCY, async (symbol) => {
+    const tokenAddress = await getListingBySymbol(registryAddr, symbol);
+    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+      return null;
+    }
+    symbolByTokenCache.set(tokenAddress, symbol);
+    return {
+      symbol: String(symbol),
+      tokenAddress,
+    };
+  });
+  const items = [];
+  for (let i = 0; i < resolved.length; i += 1) {
+    if (resolved[i]) {
+      items.push(resolved[i]);
+    }
+  }
+  listingsCache = {
+    registryAddr,
+    timestampMs: now,
+    items,
+  };
+  return items;
+}
+
+async function getLeveragedProducts(factoryAddr) {
+  const now = Date.now();
+  if (
+    leveragedProductsCache.factoryAddr === factoryAddr
+    && (now - leveragedProductsCache.timestampMs) < LEVERAGED_PRODUCTS_CACHE_TTL_MS
+    && Array.isArray(leveragedProductsCache.items)
+  ) {
+    return leveragedProductsCache.items;
+  }
+  const countData = leveragedFactoryInterface.encodeFunctionData('productCount', []);
+  const countResult = await hardhatRpc('eth_call', [{ to: factoryAddr, data: countData }, 'latest']);
+  const [countRaw] = leveragedFactoryInterface.decodeFunctionResult('productCount', countResult);
+  const count = Number(countRaw);
+  const indexes = [];
+  for (let i = 0; i < count; i += 1) {
+    indexes.push(i);
+  }
+  const resolved = await mapWithConcurrency(indexes, PORTFOLIO_RPC_CONCURRENCY, async (index) => {
+    const itemData = leveragedFactoryInterface.encodeFunctionData('getProductAt', [index]);
+    const itemResult = await hardhatRpc('eth_call', [{ to: factoryAddr, data: itemData }, 'latest']);
+    const [item] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', itemResult);
+    return {
+      productSymbol: String(item.productSymbol),
+      baseSymbol: String(item.baseSymbol),
+      baseToken: normalizeAddress(item.baseToken),
+      leverage: Number(item.leverage),
+      isLong: Boolean(item.isLong),
+      token: normalizeAddress(item.token),
+    };
+  });
+  leveragedProductsCache = {
+    factoryAddr,
+    timestampMs: now,
+    items: resolved,
+  };
+  return resolved;
+}
+
+async function getPortfolioHoldings(wallet, deployments) {
+  const aggregatorAddress = normalizeAddress(deployments && deployments.portfolioAggregator);
+  if (!aggregatorAddress) {
+    return null;
+  }
+  const cacheKey = `${aggregatorAddress}:${normalizeAddress(wallet)}`;
+  const cached = portfolioHoldingsCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestampMs) < PORTFOLIO_HOLDINGS_CACHE_TTL_MS) {
+    return cached.items;
+  }
+  const data = aggregatorInterface.encodeFunctionData('getHoldings', [wallet]);
+  const result = await hardhatRpc('eth_call', [{ to: aggregatorAddress, data }, 'latest']);
+  const [holdingsRaw] = aggregatorInterface.decodeFunctionResult('getHoldings', result);
+  const items = [];
+  for (let i = 0; i < holdingsRaw.length; i += 1) {
+    const row = holdingsRaw[i];
+    items.push({
+      symbol: String(row.symbol),
+      tokenAddress: normalizeAddress(row.token),
+      balanceWei: BigInt(row.balanceWei.toString()),
+      priceCents: Number(row.priceCents),
+      valueWei: BigInt(row.valueWei.toString()),
+    });
+  }
+  portfolioHoldingsCache.set(cacheKey, {
+    timestampMs: Date.now(),
+    items,
+  });
+  return items;
+}
+
+function findLatestFillPriceCents(snapshot, symbol) {
+  const rows = Array.isArray(snapshot && snapshot.fills) ? snapshot.fills : [];
+  const upper = String(symbol || '').toUpperCase();
+  let latest = null;
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (String(row.symbol || '').toUpperCase() !== upper) {
+      continue;
+    }
+    if (!latest) {
+      latest = row;
+      continue;
+    }
+    const prevTs = Number(latest.timestampMs) || 0;
+    const currTs = Number(row.timestampMs) || 0;
+    if (currTs > prevTs) {
+      latest = row;
+      continue;
+    }
+    if (currTs === prevTs) {
+      const prevBlock = Number(latest.blockNumber) || 0;
+      const currBlock = Number(row.blockNumber) || 0;
+      if (currBlock > prevBlock) {
+        latest = row;
+      }
+    }
+  }
+  if (!latest) {
+    return 0;
+  }
+  const priceCents = Number(latest.priceCents);
+  if (!Number.isFinite(priceCents) || priceCents <= 0) {
+    return 0;
+  }
+  return priceCents;
+}
+
+async function getBestLivePriceCents(snapshot, deployments, symbol) {
+  let symbolText = '';
+  if (symbol) {
+    symbolText = String(symbol);
+  }
+  const upper = symbolText.toUpperCase();
+  if (!upper) {
+    return {
+      priceCents: 0,
+      priceSource: 'NONE',
+    };
+  }
+
+  const lifecycleStatus = getSymbolLifecycleStatus(symbolText);
+  if (lifecycleStatus === 'DELISTED') {
+    return {
+      priceCents: 0,
+      priceSource: 'DELISTED',
+    };
+  }
+
+  const cached = fmpQuoteCache.get(upper);
+  if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
+    const cachedPrice = Number(cached.data && cached.data.price);
+    if (Number.isFinite(cachedPrice) && cachedPrice > 0) {
+      return {
+        priceCents: Math.round(cachedPrice * 100),
+        priceSource: String(cached.data.source || 'LIVE'),
+      };
+    }
+  }
+
+  const priceFeedAddr = normalizeAddress(deployments && deployments.priceFeed);
+  if (priceFeedAddr) {
+    try {
+      const feedData = priceFeedInterface.encodeFunctionData('getPrice', [symbolText]);
+      const feedResult = await hardhatRpc('eth_call', [{ to: priceFeedAddr, data: feedData }, 'latest']);
+      const [onchainPriceRaw] = priceFeedInterface.decodeFunctionResult('getPrice', feedResult);
+      const onchainPrice = Number(onchainPriceRaw);
+      if (Number.isFinite(onchainPrice) && onchainPrice > 0) {
+        return {
+          priceCents: onchainPrice,
+          priceSource: 'ONCHAIN_PRICEFEED',
+        };
+      }
+    } catch {
+    }
+  }
+
+  const lastFillCents = findLatestFillPriceCents(snapshot, symbolText);
+  if (lastFillCents > 0) {
+    return {
+      priceCents: lastFillCents,
+      priceSource: 'LAST_FILL',
+    };
+  }
+
+  try {
+    const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol: upper }));
+    const quote = Array.isArray(payload) ? payload[0] : payload;
+    const price = Number(quote && quote.price);
+    if (Number.isFinite(price) && price > 0) {
+      fmpQuoteCache.set(upper, {
+        data: { symbol: upper, price, source: 'LIVE' },
+        timestamp: Date.now(),
+      });
+      return {
+        priceCents: Math.round(price * 100),
+        priceSource: 'LIVE',
+      };
+    }
+  } catch {
+  }
+
+  try {
+    const yahoo = await fetchQuote(upper);
+    const price = Number(yahoo && (yahoo.regularMarketPrice || yahoo.price || 0));
+    if (Number.isFinite(price) && price > 0) {
+      fmpQuoteCache.set(upper, {
+        data: { symbol: upper, price, source: 'YAHOO' },
+        timestamp: Date.now(),
+      });
+      return {
+        priceCents: Math.round(price * 100),
+        priceSource: 'YAHOO',
+      };
+    }
+  } catch {
+  }
+
+  try {
+    const candle = await buildCandleFallback(upper);
+    const price = Number(candle && candle.close);
+    if (Number.isFinite(price) && price > 0) {
+      fmpQuoteCache.set(upper, {
+        data: { symbol: upper, price, source: 'CANDLES' },
+        timestamp: Date.now(),
+      });
+      return {
+        priceCents: Math.round(price * 100),
+        priceSource: 'CANDLES',
+      };
+    }
+  } catch {
+  }
+
+  return {
+    priceCents: 0,
+    priceSource: 'NONE',
+  };
+}
+
+function buildWalletFillRows(snapshot, wallet) {
+  const fillRows = [];
+  const walletNorm = normalizeAddress(wallet);
+  const fills = Array.isArray(snapshot && snapshot.fills) ? snapshot.fills : [];
+  for (let i = 0; i < fills.length; i += 1) {
+    const fill = fills[i];
+    let isWalletFill = false;
+    if (fill.makerTrader === walletNorm) {
+      isWalletFill = true;
+    }
+    if (fill.takerTrader === walletNorm) {
+      isWalletFill = true;
+    }
+    if (!isWalletFill) {
+      continue;
+    }
+    let side = '';
+    if (fill.side) {
+      side = String(fill.side).toUpperCase();
+    } else if (fill.makerTrader === walletNorm) {
+      const makerOrder = snapshot.orders[String(fill.makerId)];
+      if (makerOrder && makerOrder.side) {
+        side = makerOrder.side;
+      }
+    } else {
+      const takerOrder = snapshot.orders[String(fill.takerId)];
+      if (takerOrder && takerOrder.side) {
+        side = takerOrder.side;
+      }
+    }
+    fillRows.push({
+      symbol: fill.symbol,
+      side,
+      qtyWei: fill.qtyWei,
+      priceCents: fill.priceCents,
+      timestampMs: fill.timestampMs,
+      blockNumber: fill.blockNumber,
+      txHash: fill.txHash,
+      logIndex: fill.logIndex,
+    });
+  }
+  fillRows.sort((a, b) => {
+    const timestampDiff = a.timestampMs - b.timestampMs;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+    const blockDiff = a.blockNumber - b.blockNumber;
+    if (blockDiff !== 0) {
+      return blockDiff;
+    }
+    return a.logIndex - b.logIndex;
+  });
+  return fillRows;
+}
+
+function buildLotsAndRealized(fillRows) {
+  const lotsBySymbol = new Map();
+  const realizedBySymbol = new Map();
+  for (let i = 0; i < fillRows.length; i += 1) {
+    const row = fillRows[i];
+    if (!lotsBySymbol.has(row.symbol)) {
+      lotsBySymbol.set(row.symbol, []);
+    }
+    if (!realizedBySymbol.has(row.symbol)) {
+      realizedBySymbol.set(row.symbol, 0n);
+    }
+    const lots = lotsBySymbol.get(row.symbol);
+    if (row.side === 'BUY') {
+      lots.push({ qtyWei: BigInt(row.qtyWei), priceCents: row.priceCents });
+      continue;
+    }
+    if (row.side === 'SELL') {
+      let remainingSell = BigInt(row.qtyWei);
+      while (remainingSell > 0n && lots.length > 0) {
+        const lot = lots[0];
+        let consume = lot.qtyWei;
+        if (remainingSell < lot.qtyWei) {
+          consume = remainingSell;
+        }
+        const sellQuote = quoteAmountWei(consume, row.priceCents);
+        const buyQuote = quoteAmountWei(consume, lot.priceCents);
+        const previousRealized = realizedBySymbol.get(row.symbol);
+        realizedBySymbol.set(row.symbol, previousRealized + (sellQuote - buyQuote));
+        lot.qtyWei -= consume;
+        remainingSell -= consume;
+        if (lot.qtyWei === 0n) {
+          lots.shift();
+        }
+      }
+    }
+  }
+  return {
+    lotsBySymbol,
+    realizedBySymbol,
+  };
+}
+
+function formatQtyNumber(balanceWei) {
+  const qtyValueWeiText = balanceWei.toString();
+  const qtyNegative = String(qtyValueWeiText).startsWith('-');
+  let qtyRaw = String(qtyValueWeiText);
+  if (qtyNegative) {
+    qtyRaw = String(qtyValueWeiText).slice(1);
+  }
+  const qtyPadded = qtyRaw.padStart(19, '0');
+  const qtyWhole = qtyPadded.slice(0, -18);
+  const qtyFraction = qtyPadded.slice(-18, -12);
+  let qtyNumber = Number(`${qtyWhole}.${qtyFraction}`);
+  if (qtyNegative) {
+    qtyNumber = -qtyNumber;
+  }
+  return qtyNumber;
+}
+
+async function buildPortfolioPositions(snapshot, wallet, deployments) {
+  const fillRows = buildWalletFillRows(snapshot, wallet);
+  const { lotsBySymbol, realizedBySymbol } = buildLotsAndRealized(fillRows);
+  if (!INDEXER_ENABLE_TRANSFERS && fillRows.length > 0) {
+    const symbolTokenMap = new Map();
+    const orderValues = Object.values(snapshot.orders || {});
+    for (let i = 0; i < orderValues.length; i += 1) {
+      const order = orderValues[i];
+      if (order && order.symbol && order.equityToken && !symbolTokenMap.has(order.symbol)) {
+        symbolTokenMap.set(order.symbol, order.equityToken);
+      }
+    }
+    const symbols = new Set();
+    for (const symbol of lotsBySymbol.keys()) {
+      symbols.add(symbol);
+    }
+    for (const symbol of realizedBySymbol.keys()) {
+      symbols.add(symbol);
+    }
+    const positions = [];
+    for (const symbol of symbols) {
+      const lots = lotsBySymbol.get(symbol) || [];
+      let balanceWei = 0n;
+      let costBasisWei = 0n;
+      for (let i = 0; i < lots.length; i += 1) {
+        balanceWei += lots[i].qtyWei;
+        costBasisWei += quoteAmountWei(lots[i].qtyWei, lots[i].priceCents);
+      }
+      let realizedPnlWei = 0n;
+      const realizedFound = realizedBySymbol.get(symbol);
+      if (realizedFound) {
+        realizedPnlWei = realizedFound;
+      }
+      if (balanceWei === 0n && realizedPnlWei === 0n) {
+        continue;
+      }
+      let priceCents = 0;
+      let priceSource = 'NONE';
+      if (balanceWei > 0n) {
+        priceCents = findLatestFillPriceCents(snapshot, symbol);
+        if (priceCents > 0) {
+          priceSource = 'LAST_FILL';
+        }
+      }
+      let currentValueWei = 0n;
+      if (priceCents > 0) {
+        currentValueWei = quoteAmountWei(balanceWei, priceCents);
+      }
+      let avgCostCents = 0;
+      if (balanceWei > 0n && costBasisWei > 0n) {
+        avgCostCents = Number((costBasisWei * 100n) / balanceWei);
+      }
+      const unrealizedPnlWei = currentValueWei - costBasisWei;
+      let unrealizedPnlPct = null;
+      if (costBasisWei > 0n) {
+        unrealizedPnlPct = Number(unrealizedPnlWei * 10000n / costBasisWei) / 100;
+      }
+      positions.push({
+        symbol,
+        tokenAddress: symbolTokenMap.get(symbol) || '',
+        balanceWei: balanceWei.toString(),
+        qty: formatQtyNumber(balanceWei),
+        avgCostCents,
+        costBasisWei: costBasisWei.toString(),
+        priceCents,
+        priceSource,
+        currentValueWei: currentValueWei.toString(),
+        realizedPnlWei: realizedPnlWei.toString(),
+        unrealizedPnlWei: unrealizedPnlWei.toString(),
+        unrealizedPnlPct,
+        totalPnlWei: (realizedPnlWei + unrealizedPnlWei).toString(),
+        unmatchedQtyWei: '0',
+      });
+    }
+    positions.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    return positions;
+  }
+  let listingRows = [];
+  let holdingsBySymbol = new Map();
+  try {
+    const holdings = await getPortfolioHoldings(wallet, deployments);
+    if (holdings && holdings.length > 0) {
+      for (let i = 0; i < holdings.length; i += 1) {
+        const holding = holdings[i];
+        holdingsBySymbol.set(holding.symbol, holding);
+      }
+      const realizedSymbols = Array.from(realizedBySymbol.keys());
+      const symbolsNeeded = new Set();
+      for (let i = 0; i < holdings.length; i += 1) {
+        const holding = holdings[i];
+        if (holding.balanceWei > 0n || realizedBySymbol.has(holding.symbol)) {
+          symbolsNeeded.add(holding.symbol);
+        }
+      }
+      for (let i = 0; i < realizedSymbols.length; i += 1) {
+        symbolsNeeded.add(realizedSymbols[i]);
+      }
+      const listings = await getIndexedListings(deployments.listingsRegistry);
+      const listingLookup = new Map();
+      for (let i = 0; i < listings.length; i += 1) {
+        listingLookup.set(listings[i].symbol, listings[i].tokenAddress);
+      }
+      listingRows = Array.from(symbolsNeeded).map((symbol) => {
+        const holding = holdingsBySymbol.get(symbol);
+        return {
+          symbol,
+          tokenAddress: holding ? holding.tokenAddress : (listingLookup.get(symbol) || ''),
+        };
+      });
+    }
+  } catch {
+    listingRows = [];
+    holdingsBySymbol = new Map();
+  }
+  if (listingRows.length === 0) {
+    listingRows = await getIndexedListings(deployments.listingsRegistry);
+  }
+  const rows = await mapWithConcurrency(listingRows, PORTFOLIO_RPC_CONCURRENCY, async (listing) => {
+    const holding = holdingsBySymbol.get(listing.symbol) || null;
+    let balanceWei = 0n;
+    if (holding) {
+      balanceWei = holding.balanceWei;
+    } else {
+      const balData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+      const balResult = await hardhatRpc('eth_call', [{ to: listing.tokenAddress, data: balData }, 'latest']);
+      const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balResult);
+      balanceWei = BigInt(balanceWeiRaw.toString());
+    }
+    const lots = lotsBySymbol.get(listing.symbol) || [];
+    let realizedPnlWei = 0n;
+    const realizedFound = realizedBySymbol.get(listing.symbol);
+    if (realizedFound) {
+      realizedPnlWei = realizedFound;
+    }
+    if (balanceWei === 0n && realizedPnlWei === 0n) {
+      return null;
+    }
+    let remaining = balanceWei;
+    let usedQty = 0n;
+    let usedCostWei = 0n;
+    for (let i = 0; i < lots.length; i += 1) {
+      const lot = lots[i];
+      if (remaining === 0n) {
+        break;
+      }
+      let useQty = lot.qtyWei;
+      if (remaining < lot.qtyWei) {
+        useQty = remaining;
+      }
+      usedQty += useQty;
+      usedCostWei += quoteAmountWei(useQty, lot.priceCents);
+      remaining -= useQty;
+    }
+    let unmatchedQtyWei = 0n;
+    if (balanceWei > usedQty) {
+      unmatchedQtyWei = balanceWei - usedQty;
+    }
+    let valuation = {
+      priceCents: 0,
+      priceSource: 'NONE',
+    };
+    let currentValueWei = 0n;
+    if (holding && holding.balanceWei > 0n && holding.priceCents > 0) {
+      valuation = {
+        priceCents: holding.priceCents,
+        priceSource: 'ONCHAIN_PRICEFEED',
+      };
+      currentValueWei = holding.valueWei;
+    } else if (balanceWei > 0n) {
+      valuation = await getBestLivePriceCents(snapshot, deployments, listing.symbol);
+      if (valuation.priceCents > 0) {
+        currentValueWei = quoteAmountWei(balanceWei, valuation.priceCents);
+      }
+    }
+    let unmatchedCostWei = 0n;
+    if (unmatchedQtyWei > 0n) {
+      const unmatchedCostCents = getStableUnmatchedCostCents(snapshot, listing.symbol, usedQty, usedCostWei);
+      if (unmatchedCostCents > 0) {
+        unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, unmatchedCostCents);
+      }
+    }
+    const effectiveCostBasisWei = usedCostWei + unmatchedCostWei;
+    let avgCostCents = 0;
+    if (balanceWei > 0n) {
+      avgCostCents = Number((effectiveCostBasisWei * 100n) / balanceWei);
+    }
+    const unrealizedPnlWei = currentValueWei - effectiveCostBasisWei;
+    let unrealizedPnlPct = null;
+    if (effectiveCostBasisWei > 0n) {
+      unrealizedPnlPct = Number(unrealizedPnlWei * 10000n / effectiveCostBasisWei) / 100;
+    }
+    return {
+      symbol: listing.symbol,
+      tokenAddress: listing.tokenAddress,
+      balanceWei: balanceWei.toString(),
+      qty: formatQtyNumber(balanceWei),
+      avgCostCents,
+      costBasisWei: effectiveCostBasisWei.toString(),
+      priceCents: valuation.priceCents,
+      priceSource: valuation.priceSource,
+      currentValueWei: currentValueWei.toString(),
+      realizedPnlWei: realizedPnlWei.toString(),
+      unrealizedPnlWei: unrealizedPnlWei.toString(),
+      unrealizedPnlPct,
+      totalPnlWei: (realizedPnlWei + unrealizedPnlWei).toString(),
+      unmatchedQtyWei: unmatchedQtyWei.toString(),
+    };
+  });
+  const positions = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    if (rows[i]) {
+      positions.push(rows[i]);
+    }
+  }
+  positions.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  return positions;
+}
+
+async function computeLeveragedValueWei(snapshot, wallet, deployments) {
+  const factoryAddress = normalizeAddress(deployments.leveragedTokenFactory);
+  const routerAddress = normalizeAddress(deployments.leveragedProductRouter);
+  if (!factoryAddress || !routerAddress) {
+    return 0n;
+  }
+  const walletNorm = normalizeAddress(wallet);
+  let hasWalletEvents = false;
+  const leveragedEvents = Array.isArray(snapshot && snapshot.leveragedEvents) ? snapshot.leveragedEvents : [];
+  for (let i = 0; i < leveragedEvents.length; i += 1) {
+    if (normalizeAddress(leveragedEvents[i].wallet) === walletNorm) {
+      hasWalletEvents = true;
+      break;
+    }
+  }
+  if (!hasWalletEvents) {
+    return 0n;
+  }
+  const products = await getLeveragedProducts(factoryAddress);
+  const rows = await mapWithConcurrency(products, PORTFOLIO_RPC_CONCURRENCY, async (item) => {
+    const positionData = leveragedRouterInterface.encodeFunctionData('positions', [wallet, item.token]);
+    const positionResult = await hardhatRpc('eth_call', [{ to: routerAddress, data: positionData }, 'latest']);
+    const [qtyWeiRaw] = leveragedRouterInterface.decodeFunctionResult('positions', positionResult);
+    const qtyWei = BigInt(qtyWeiRaw.toString());
+    if (qtyWei <= 0n) {
+      return 0n;
+    }
+    const quoteData = leveragedRouterInterface.encodeFunctionData('previewUnwind', [wallet, item.token, qtyWei]);
+    const quoteResult = await hardhatRpc('eth_call', [{ to: routerAddress, data: quoteData }, 'latest']);
+    const [ttokenOutWeiRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', quoteResult);
+    return BigInt(ttokenOutWeiRaw.toString());
+  });
+  let total = 0n;
+  for (let i = 0; i < rows.length; i += 1) {
+    total += rows[i];
+  }
+  return total;
 }
 
 function ensureAutoTradeDir() {
@@ -5861,59 +6758,31 @@ app.post('/api/orderbook/limit', async (req, res) => {
 // get orders that's no filled
 app.get('/api/orderbook/open', async (_req, res) => {
   try {
-    const deployments = loadDeployments();
-    const registryAddr = deployments.listingsRegistry;
-    const orderBookAddr = deployments.orderBookDex;
-
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-
+    await waitForIndexerSyncBounded();
+    const snapshot = readIndexerSnapshot();
+    const orderValues = Object.values(snapshot.orders || {});
     const orders = [];
-    for (const symbol of symbols) {
-      const lookupData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
-      const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
-      const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
-
-      const buyData = orderBookInterface.encodeFunctionData('getBuyOrders', [tokenAddr]);
-      const buyResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: buyData }, 'latest']);
-      const [buyOrders] = orderBookInterface.decodeFunctionResult('getBuyOrders', buyResult);
-
-      const sellData = orderBookInterface.encodeFunctionData('getSellOrders', [tokenAddr]);
-      const sellResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: sellData }, 'latest']);
-      const [sellOrders] = orderBookInterface.decodeFunctionResult('getSellOrders', sellResult);
-
-      for (const order of buyOrders) {
-        orders.push({
-          id: Number(order.id),
-          side: 'BUY',
-          symbol: symbol,
-          priceCents: Number(order.price),
-          qty: order.qty.toString(),
-          remaining: order.remaining.toString(),
-          trader: order.trader,
-          active: order.active,
-        });
+    for (let i = 0; i < orderValues.length; i += 1) {
+      const order = orderValues[i];
+      if (!order || order.active !== true) {
+        continue;
       }
-
-      for (const order of sellOrders) {
-        orders.push({
-          id: Number(order.id),
-          side: 'SELL',
-          symbol: symbol,
-          priceCents: Number(order.price),
-          qty: order.qty.toString(),
-          remaining: order.remaining.toString(),
-          trader: order.trader,
-          active: order.active,
-        });
+      if (BigInt(String(order.remainingWei || '0')) <= 0n) {
+        continue;
       }
+      orders.push({
+        id: Number(order.id),
+        side: String(order.side || ''),
+        symbol: String(order.symbol || ''),
+        priceCents: Number(order.priceCents || 0),
+        qty: String(order.qtyWei || '0'),
+        remaining: String(order.remainingWei || '0'),
+        trader: order.trader,
+        active: true,
+      });
     }
-
-    orders.sort((a, b) => {
-      return a.id - b.id;
-    });
-    res.json({ orders: orders });
+    orders.sort((a, b) => a.id - b.id);
+    res.json({ orders });
   } catch (err) {
     res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
@@ -5922,25 +6791,12 @@ app.get('/api/orderbook/open', async (_req, res) => {
 // rest api to get all the filled orders
 app.get('/api/orderbook/fills', async (_req, res) => {
   try {
-    await ensureIndexerSynced();
-    const snapshot = readIndexerSnapshot();
-    const fills = [];
-    for (const row of snapshot.fills) {
-      fills.push({
-        makerId: Number(row.makerId),
-        takerId: Number(row.takerId),
-        makerTrader: row.makerTrader,
-        takerTrader: row.takerTrader,
-        symbol: row.symbol,
-        priceCents: Number(row.priceCents),
-        qty: row.qtyWei,
-        blockNumber: Number(row.blockNumber),
-        txHash: row.txHash,
-        timestampMs: Number(row.timestampMs),
-      });
-    }
-    fills.sort((a, b) => b.timestampMs - a.timestampMs);
-    res.json({ fills: fills });
+    const deployments = loadDeployments();
+    const fills = await fetchOrderbookFillsFromChain(
+      deployments.orderBookDex,
+      deployments.listingsRegistry
+    );
+    res.json({ fills });
   } catch (err) {
     res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
@@ -6554,323 +7410,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
     await waitForIndexerSyncBounded();
     const snapshot = readIndexerSnapshot();
     const deployments = loadDeployments();
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: deployments.listingsRegistry, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-    const listings = [];
-    for (const symbol of symbols) {
-      const token = await getListingBySymbol(deployments.listingsRegistry, symbol);
-      const hasToken = Boolean(token);
-      const isNonZero = token !== ethers.ZeroAddress;
-      if (hasToken && isNonZero) {
-        listings.push({ symbol, tokenAddress: token });
-      }
-    }
-    const fillRows = [];
-    const walletNorm = normalizeAddress(wallet);
-    for (const fill of snapshot.fills) {
-      let isWalletFill = false;
-      if (fill.makerTrader === walletNorm) {
-        isWalletFill = true;
-      }
-      if (fill.takerTrader === walletNorm) {
-        isWalletFill = true;
-      }
-      if (isWalletFill) {
-        let side = '';
-        if (fill.side) {
-          side = String(fill.side).toUpperCase();
-        } else if (fill.makerTrader === walletNorm) {
-          const makerOrder = snapshot.orders[String(fill.makerId)];
-          if (makerOrder) {
-            side = makerOrder.side;
-          } else {
-            side = '';
-          }
-        } else {
-          const takerOrder = snapshot.orders[String(fill.takerId)];
-          if (takerOrder) {
-            side = takerOrder.side;
-          } else {
-            side = '';
-          }
-        }
-        fillRows.push({
-          symbol: fill.symbol,
-          side,
-          qtyWei: fill.qtyWei,
-          priceCents: fill.priceCents,
-          timestampMs: fill.timestampMs,
-          blockNumber: fill.blockNumber,
-          txHash: fill.txHash,
-          logIndex: fill.logIndex,
-        });
-      }
-    }
-    fillRows.sort((a, b) => {
-      const timestampDiff = a.timestampMs - b.timestampMs;
-      if (timestampDiff !== 0) {
-        return timestampDiff;
-      }
-      const blockDiff = a.blockNumber - b.blockNumber;
-      if (blockDiff !== 0) {
-        return blockDiff;
-      }
-      const logDiff = a.logIndex - b.logIndex;
-      return logDiff;
-    });
-    const lotsBySymbol = new Map();
-    const realizedBySymbol = new Map();
-    for (const row of fillRows) {
-      if (!lotsBySymbol.has(row.symbol)) {
-        lotsBySymbol.set(row.symbol, []);
-      }
-      if (!realizedBySymbol.has(row.symbol)) {
-        realizedBySymbol.set(row.symbol, 0n);
-      }
-      const lots = lotsBySymbol.get(row.symbol);
-      if (row.side === 'BUY') {
-        lots.push({ qtyWei: BigInt(row.qtyWei), priceCents: row.priceCents });
-      } else if (row.side === 'SELL') {
-        let remainingSell = BigInt(row.qtyWei);
-        while (remainingSell > 0n && lots.length > 0) {
-          const lot = lots[0];
-          let consume = lot.qtyWei;
-          if (remainingSell < lot.qtyWei) {
-            consume = remainingSell;
-          }
-          const sellQuote = quoteAmountWei(consume, row.priceCents);
-          const buyQuote = quoteAmountWei(consume, lot.priceCents);
-          const previousRealized = realizedBySymbol.get(row.symbol);
-          const nextRealized = previousRealized + (sellQuote - buyQuote);
-          realizedBySymbol.set(row.symbol, nextRealized);
-          lot.qtyWei -= consume;
-          remainingSell -= consume;
-          if (lot.qtyWei === 0n) {
-            lots.shift();
-          }
-        }
-      }
-    }
-    const positions = [];
-    for (const listing of listings) {
-      const balData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
-      const balResult = await hardhatRpc('eth_call', [{ to: listing.tokenAddress, data: balData }, 'latest']);
-      const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balResult);
-      const balanceWei = BigInt(balanceWeiRaw.toString());
-      let lots = [];
-      const existingLots = lotsBySymbol.get(listing.symbol);
-      if (existingLots) {
-        lots = existingLots;
-      }
-      let remaining = BigInt(balanceWei);
-      let usedQty = 0n;
-      let usedCostWei = 0n;
-      for (const lot of lots) {
-        if (remaining === 0n) {
-          break;
-        }
-        let useQty = lot.qtyWei;
-        if (remaining < lot.qtyWei) {
-          useQty = remaining;
-        }
-        usedQty += useQty;
-        usedCostWei += quoteAmountWei(useQty, lot.priceCents);
-        remaining -= useQty;
-      }
-      let unmatchedQtyWei = 0n;
-      if (balanceWei > usedQty) {
-        unmatchedQtyWei = balanceWei - usedQty;
-      }
-      let liveCents = 0;
-      let symbolText = '';
-      if (listing.symbol) {
-        symbolText = String(listing.symbol);
-      }
-      const upper = symbolText.toUpperCase();
-      if (upper) {
-        const cached = fmpQuoteCache.get(upper);
-        if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
-          let cachedPriceRaw = 0;
-          if (cached.data.price) {
-            cachedPriceRaw = cached.data.price;
-          }
-          liveCents = Math.round(Number(cachedPriceRaw) * 100);
-        } else {
-          try {
-            const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol: upper }));
-            let quote = payload;
-            if (Array.isArray(payload)) {
-              quote = payload[0];
-            }
-            let quotePriceRaw = 0;
-            if (quote.price) {
-              quotePriceRaw = quote.price;
-            }
-            const price = Number(quotePriceRaw);
-            const data = { symbol: upper, price };
-            fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-            liveCents = Math.round(price * 100);
-          } catch {
-            try {
-              const yahoo = await fetchQuote(upper);
-              let yahooPriceRaw = 0;
-              if (yahoo.regularMarketPrice) {
-                yahooPriceRaw = yahoo.regularMarketPrice;
-              }
-              const price = Number(yahooPriceRaw);
-              if (price > 0) {
-                const data = { symbol: upper, price, source: 'yahoo' };
-                fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                liveCents = Math.round(price * 100);
-              } else {
-                try {
-                  const candle = await buildCandleFallback(upper);
-                  let candlePriceRaw = 0;
-                  if (candle.close) {
-                    candlePriceRaw = candle.close;
-                  }
-                  const candlePrice = Number(candlePriceRaw);
-                  if (candlePrice > 0) {
-                    const data = { symbol: upper, price: candlePrice, source: 'candles' };
-                    fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                    liveCents = Math.round(candlePrice * 100);
-                  } else {
-                    liveCents = 0;
-                  }
-                } catch {
-                  liveCents = 0;
-                }
-              }
-            } catch {
-              try {
-                const candle = await buildCandleFallback(upper);
-                let candlePriceRaw = 0;
-                if (candle.close) {
-                  candlePriceRaw = candle.close;
-                }
-                const candlePrice = Number(candlePriceRaw);
-                if (candlePrice > 0) {
-                  const data = { symbol: upper, price: candlePrice, source: 'candles' };
-                  fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                  liveCents = Math.round(candlePrice * 100);
-                } else {
-                  liveCents = 0;
-                }
-              } catch {
-                liveCents = 0;
-              }
-            }
-          }
-        }
-      }
-      const lifecycleStatus = getSymbolLifecycleStatus(listing.symbol);
-      let valuation = { priceCents: 0, priceSource: 'NONE' };
-      if (lifecycleStatus === 'DELISTED') {
-        valuation = { priceCents: 0, priceSource: 'DELISTED' };
-      } else if (liveCents > 0) {
-        valuation = { priceCents: liveCents, priceSource: 'LIVE' };
-      } else {
-        const priceFeedAddr = normalizeAddress(deployments.priceFeed);
-        if (priceFeedAddr) {
-          try {
-            const feedData = priceFeedInterface.encodeFunctionData('getPrice', [listing.symbol]);
-            const feedResult = await hardhatRpc('eth_call', [{ to: priceFeedAddr, data: feedData }, 'latest']);
-            const [onchainPriceRaw] = priceFeedInterface.decodeFunctionResult('getPrice', feedResult);
-            const onchainPrice = Number(onchainPriceRaw);
-            if (onchainPrice > 0) {
-              valuation = { priceCents: onchainPrice, priceSource: 'ONCHAIN_PRICEFEED' };
-            }
-          } catch {
-            // best-effort fallback chain
-          }
-        }
-        if (valuation.priceCents === 0) {
-          let latest = null;
-          for (const fill of snapshot.fills) {
-            if (fill.symbol === listing.symbol) {
-              if (!latest) {
-                latest = fill;
-              } else if (fill.timestampMs > latest.timestampMs) {
-                latest = fill;
-              } else if (fill.timestampMs === latest.timestampMs && fill.blockNumber > latest.blockNumber) {
-                latest = fill;
-              }
-            }
-          }
-          let lastFillCents = 0;
-          if (latest) {
-            let latestPriceRaw = 0;
-            if (latest.priceCents) {
-              latestPriceRaw = latest.priceCents;
-            }
-            lastFillCents = Number(latestPriceRaw);
-          }
-          if (lastFillCents > 0) {
-            valuation = { priceCents: lastFillCents, priceSource: 'LAST_FILL' };
-          }
-        }
-      }
-      const priceCents = valuation.priceCents;
-      let currentValueWei = 0n;
-      if (priceCents > 0) {
-        currentValueWei = quoteAmountWei(balanceWei, priceCents);
-      }
-      let unmatchedCostWei = 0n;
-      if (unmatchedQtyWei > 0n) {
-        const unmatchedCostCents = getStableUnmatchedCostCents(snapshot, listing.symbol, usedQty, usedCostWei);
-        if (unmatchedCostCents > 0) {
-          unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, unmatchedCostCents);
-        }
-      }
-      const effectiveCostBasisWei = usedCostWei + unmatchedCostWei;
-      let avgCostCents = 0;
-      if (balanceWei > 0n) {
-        avgCostCents = Number((effectiveCostBasisWei * 100n) / balanceWei);
-      }
-      let realizedPnlWei = 0n;
-      const realizedFound = realizedBySymbol.get(listing.symbol);
-      if (realizedFound) {
-        realizedPnlWei = realizedFound;
-      }
-      const unrealizedPnlWei = currentValueWei - effectiveCostBasisWei;
-      let unrealizedPnlPct = null;
-      if (effectiveCostBasisWei > 0n) {
-        unrealizedPnlPct = Number(unrealizedPnlWei * 10000n / effectiveCostBasisWei) / 100;
-      }
-      if (!(balanceWei === 0n && realizedPnlWei === 0n)) {
-        const qtyValueWeiText = balanceWei.toString();
-        const qtyNegative = String(qtyValueWeiText).startsWith('-');
-        let qtyRaw = String(qtyValueWeiText);
-        if (qtyNegative) {
-          qtyRaw = String(qtyValueWeiText).slice(1);
-        }
-        const qtyPadded = qtyRaw.padStart(19, '0');
-        const qtyWhole = qtyPadded.slice(0, -18);
-        const qtyFraction = qtyPadded.slice(-18, -12);
-        let qtyNumber = Number(`${qtyWhole}.${qtyFraction}`);
-        if (qtyNegative) {
-          qtyNumber = -qtyNumber;
-        }
-        positions.push({
-          symbol: listing.symbol,
-          tokenAddress: listing.tokenAddress,
-          balanceWei: balanceWei.toString(),
-          qty: qtyNumber,
-          avgCostCents,
-          costBasisWei: effectiveCostBasisWei.toString(),
-          priceCents,
-          priceSource: valuation.priceSource,
-          currentValueWei: currentValueWei.toString(),
-          realizedPnlWei: realizedPnlWei.toString(),
-          unrealizedPnlWei: unrealizedPnlWei.toString(),
-          unrealizedPnlPct,
-          totalPnlWei: (realizedPnlWei + unrealizedPnlWei).toString(),
-          unmatchedQtyWei: unmatchedQtyWei.toString(),
-        });
-      }
-    }
-    positions.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    const positions = await buildPortfolioPositions(snapshot, wallet, deployments);
     res.json({ wallet, positions });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -6893,6 +7433,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
     await waitForIndexerSyncBounded();
     const snapshot = readIndexerSnapshot();
     const deployments = loadDeployments();
+    const includeGas = String(req.query.includeGas || '').toLowerCase() === 'true';
     const chainIdHex = await hardhatRpc('eth_chainId', []);
     const chainId = parseRpcInt(chainIdHex);
     const nativeEthWeiHex = await hardhatRpc('eth_getBalance', [wallet, 'latest']);
@@ -6906,323 +7447,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
     const ttokenResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: ttokenData }, 'latest']);
     const [cashWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', ttokenResult);
     const cashWei = BigInt(cashWeiRaw.toString());
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: deployments.listingsRegistry, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-    const listings = [];
-    for (const symbol of symbols) {
-      const token = await getListingBySymbol(deployments.listingsRegistry, symbol);
-      const hasToken = Boolean(token);
-      const isNonZero = token !== ethers.ZeroAddress;
-      if (hasToken && isNonZero) {
-        listings.push({ symbol, tokenAddress: token });
-      }
-    }
-    const fillRows = [];
-    const walletNorm = normalizeAddress(wallet);
-    for (const fill of snapshot.fills) {
-      let matchesFillWallet = false;
-      if (fill.makerTrader === walletNorm) {
-        matchesFillWallet = true;
-      }
-      if (fill.takerTrader === walletNorm) {
-        matchesFillWallet = true;
-      }
-      if (matchesFillWallet) {
-        let side = '';
-        if (fill.side) {
-          side = String(fill.side).toUpperCase();
-        } else if (fill.makerTrader === walletNorm) {
-          const makerOrder = snapshot.orders[String(fill.makerId)];
-          if (makerOrder) {
-            side = makerOrder.side;
-          } else {
-            side = '';
-          }
-        } else {
-          const takerOrder = snapshot.orders[String(fill.takerId)];
-          if (takerOrder) {
-            side = takerOrder.side;
-          } else {
-            side = '';
-          }
-        }
-        fillRows.push({
-          symbol: fill.symbol,
-          side,
-          qtyWei: fill.qtyWei,
-          priceCents: fill.priceCents,
-          timestampMs: fill.timestampMs,
-          blockNumber: fill.blockNumber,
-          txHash: fill.txHash,
-          logIndex: fill.logIndex,
-        });
-      }
-    }
-    fillRows.sort((a, b) => {
-      const timestampDiff = a.timestampMs - b.timestampMs;
-      if (timestampDiff !== 0) {
-        return timestampDiff;
-      }
-      const blockDiff = a.blockNumber - b.blockNumber;
-      if (blockDiff !== 0) {
-        return blockDiff;
-      }
-      const logDiff = a.logIndex - b.logIndex;
-      return logDiff;
-    });
-    const lotsBySymbol = new Map();
-    const realizedBySymbol = new Map();
-    for (const row of fillRows) {
-      if (!lotsBySymbol.has(row.symbol)) {
-        lotsBySymbol.set(row.symbol, []);
-      }
-      if (!realizedBySymbol.has(row.symbol)) {
-        realizedBySymbol.set(row.symbol, 0n);
-      }
-      const lots = lotsBySymbol.get(row.symbol);
-      if (row.side === 'BUY') {
-        lots.push({ qtyWei: BigInt(row.qtyWei), priceCents: row.priceCents });
-      } else if (row.side === 'SELL') {
-        let remainingSell = BigInt(row.qtyWei);
-        while (remainingSell > 0n && lots.length > 0) {
-          const lot = lots[0];
-          let consume = lot.qtyWei;
-          if (remainingSell < lot.qtyWei) {
-            consume = remainingSell;
-          }
-          const sellQuote = quoteAmountWei(consume, row.priceCents);
-          const buyQuote = quoteAmountWei(consume, lot.priceCents);
-          const previousRealized = realizedBySymbol.get(row.symbol);
-          const nextRealized = previousRealized + (sellQuote - buyQuote);
-          realizedBySymbol.set(row.symbol, nextRealized);
-          lot.qtyWei -= consume;
-          remainingSell -= consume;
-          if (lot.qtyWei === 0n) {
-            lots.shift();
-          }
-        }
-      }
-    }
-    const positions = [];
-    for (const listing of listings) {
-      const balData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
-      const balResult = await hardhatRpc('eth_call', [{ to: listing.tokenAddress, data: balData }, 'latest']);
-      const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balResult);
-      const balanceWei = BigInt(balanceWeiRaw.toString());
-      let lots = [];
-      const existingLots = lotsBySymbol.get(listing.symbol);
-      if (existingLots) {
-        lots = existingLots;
-      }
-      let remaining = BigInt(balanceWei);
-      let usedQty = 0n;
-      let usedCostWei = 0n;
-      for (const lot of lots) {
-        if (remaining === 0n) {
-          break;
-        }
-        let useQty = lot.qtyWei;
-        if (remaining < lot.qtyWei) {
-          useQty = remaining;
-        }
-        usedQty += useQty;
-        usedCostWei += quoteAmountWei(useQty, lot.priceCents);
-        remaining -= useQty;
-      }
-      let unmatchedQtyWei = 0n;
-      if (balanceWei > usedQty) {
-        unmatchedQtyWei = balanceWei - usedQty;
-      }
-      let liveCents = 0;
-      let symbolText = '';
-      if (listing.symbol) {
-        symbolText = String(listing.symbol);
-      }
-      const upper = symbolText.toUpperCase();
-      if (upper) {
-        const cached = fmpQuoteCache.get(upper);
-        if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
-          let cachedPriceRaw = 0;
-          if (cached.data.price) {
-            cachedPriceRaw = cached.data.price;
-          }
-          liveCents = Math.round(Number(cachedPriceRaw) * 100);
-        } else {
-          try {
-            const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol: upper }));
-            let quote = payload;
-            if (Array.isArray(payload)) {
-              quote = payload[0];
-            }
-            let quotePriceRaw = 0;
-            if (quote.price) {
-              quotePriceRaw = quote.price;
-            }
-            const price = Number(quotePriceRaw);
-            const data = { symbol: upper, price };
-            fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-            liveCents = Math.round(price * 100);
-          } catch {
-            try {
-              const yahoo = await fetchQuote(upper);
-              let yahooPriceRaw = 0;
-              if (yahoo.regularMarketPrice) {
-                yahooPriceRaw = yahoo.regularMarketPrice;
-              }
-              const price = Number(yahooPriceRaw);
-              if (price > 0) {
-                const data = { symbol: upper, price, source: 'yahoo' };
-                fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                liveCents = Math.round(price * 100);
-              } else {
-                try {
-                  const candle = await buildCandleFallback(upper);
-                  let candlePriceRaw = 0;
-                  if (candle.close) {
-                    candlePriceRaw = candle.close;
-                  }
-                  const candlePrice = Number(candlePriceRaw);
-                  if (candlePrice > 0) {
-                    const data = { symbol: upper, price: candlePrice, source: 'candles' };
-                    fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                    liveCents = Math.round(candlePrice * 100);
-                  } else {
-                    liveCents = 0;
-                  }
-                } catch {
-                  liveCents = 0;
-                }
-              }
-            } catch {
-              try {
-                const candle = await buildCandleFallback(upper);
-                let candlePriceRaw = 0;
-                if (candle.close) {
-                  candlePriceRaw = candle.close;
-                }
-                const candlePrice = Number(candlePriceRaw);
-                if (candlePrice > 0) {
-                  const data = { symbol: upper, price: candlePrice, source: 'candles' };
-                  fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                  liveCents = Math.round(candlePrice * 100);
-                } else {
-                  liveCents = 0;
-                }
-              } catch {
-                liveCents = 0;
-              }
-            }
-          }
-        }
-      }
-      const lifecycleStatus = getSymbolLifecycleStatus(listing.symbol);
-      let valuation = { priceCents: 0, priceSource: 'NONE' };
-      if (lifecycleStatus === 'DELISTED') {
-        valuation = { priceCents: 0, priceSource: 'DELISTED' };
-      } else if (liveCents > 0) {
-        valuation = { priceCents: liveCents, priceSource: 'LIVE' };
-      } else {
-        const priceFeedAddr = normalizeAddress(deployments.priceFeed);
-        if (priceFeedAddr) {
-          try {
-            const feedData = priceFeedInterface.encodeFunctionData('getPrice', [listing.symbol]);
-            const feedResult = await hardhatRpc('eth_call', [{ to: priceFeedAddr, data: feedData }, 'latest']);
-            const [onchainPriceRaw] = priceFeedInterface.decodeFunctionResult('getPrice', feedResult);
-            const onchainPrice = Number(onchainPriceRaw);
-            if (onchainPrice > 0) {
-              valuation = { priceCents: onchainPrice, priceSource: 'ONCHAIN_PRICEFEED' };
-            }
-          } catch {
-            // best-effort fallback chain
-          }
-        }
-        if (valuation.priceCents === 0) {
-          let latest = null;
-          for (const fill of snapshot.fills) {
-            if (fill.symbol === listing.symbol) {
-              if (!latest) {
-                latest = fill;
-              } else if (fill.timestampMs > latest.timestampMs) {
-                latest = fill;
-              } else if (fill.timestampMs === latest.timestampMs && fill.blockNumber > latest.blockNumber) {
-                latest = fill;
-              }
-            }
-          }
-          let lastFillCents = 0;
-          if (latest) {
-            let latestPriceRaw = 0;
-            if (latest.priceCents) {
-              latestPriceRaw = latest.priceCents;
-            }
-            lastFillCents = Number(latestPriceRaw);
-          }
-          if (lastFillCents > 0) {
-            valuation = { priceCents: lastFillCents, priceSource: 'LAST_FILL' };
-          }
-        }
-      }
-      const priceCents = valuation.priceCents;
-      let currentValueWei = 0n;
-      if (priceCents > 0) {
-        currentValueWei = quoteAmountWei(balanceWei, priceCents);
-      }
-      let unmatchedCostWei = 0n;
-      if (unmatchedQtyWei > 0n) {
-        const unmatchedCostCents = getStableUnmatchedCostCents(snapshot, listing.symbol, usedQty, usedCostWei);
-        if (unmatchedCostCents > 0) {
-          unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, unmatchedCostCents);
-        }
-      }
-      const effectiveCostBasisWei = usedCostWei + unmatchedCostWei;
-      let avgCostCents = 0;
-      if (balanceWei > 0n) {
-        avgCostCents = Number((effectiveCostBasisWei * 100n) / balanceWei);
-      }
-      let realizedPnlWei = 0n;
-      const realizedFound = realizedBySymbol.get(listing.symbol);
-      if (realizedFound) {
-        realizedPnlWei = realizedFound;
-      }
-      const unrealizedPnlWei = currentValueWei - effectiveCostBasisWei;
-      let unrealizedPnlPct = null;
-      if (effectiveCostBasisWei > 0n) {
-        unrealizedPnlPct = Number(unrealizedPnlWei * 10000n / effectiveCostBasisWei) / 100;
-      }
-      if (!(balanceWei === 0n && realizedPnlWei === 0n)) {
-        const qtyValueWeiText = balanceWei.toString();
-        const qtyNegative = String(qtyValueWeiText).startsWith('-');
-        let qtyRaw = String(qtyValueWeiText);
-        if (qtyNegative) {
-          qtyRaw = String(qtyValueWeiText).slice(1);
-        }
-        const qtyPadded = qtyRaw.padStart(19, '0');
-        const qtyWhole = qtyPadded.slice(0, -18);
-        const qtyFraction = qtyPadded.slice(-18, -12);
-        let qtyNumber = Number(`${qtyWhole}.${qtyFraction}`);
-        if (qtyNegative) {
-          qtyNumber = -qtyNumber;
-        }
-        positions.push({
-          symbol: listing.symbol,
-          tokenAddress: listing.tokenAddress,
-          balanceWei: balanceWei.toString(),
-          qty: qtyNumber,
-          avgCostCents,
-          costBasisWei: effectiveCostBasisWei.toString(),
-          priceCents,
-          priceSource: valuation.priceSource,
-          currentValueWei: currentValueWei.toString(),
-          realizedPnlWei: realizedPnlWei.toString(),
-          unrealizedPnlWei: unrealizedPnlWei.toString(),
-          unrealizedPnlPct,
-          totalPnlWei: (realizedPnlWei + unrealizedPnlWei).toString(),
-          unmatchedQtyWei: unmatchedQtyWei.toString(),
-        });
-      }
-    }
-    positions.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    const positions = await buildPortfolioPositions(snapshot, wallet, deployments);
 
     let stockValueWei = 0n;
     let totalCostBasisWei = 0n;
@@ -7234,34 +7459,13 @@ app.get('/api/portfolio/summary', async (req, res) => {
       realizedPnlWei += BigInt(p.realizedPnlWei);
       unrealizedPnlWei += BigInt(p.unrealizedPnlWei);
     }
-    let leveragedValueWei = 0n;
-    if (deployments.leveragedTokenFactory && deployments.leveragedProductRouter) {
-      const countData = leveragedFactoryInterface.encodeFunctionData('productCount', []);
-      const countResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedTokenFactory, data: countData }, 'latest']);
-      const [countRaw] = leveragedFactoryInterface.decodeFunctionResult('productCount', countResult);
-      const count = Number(countRaw);
-      for (let i = 0; i < count; i += 1) {
-        const itemData = leveragedFactoryInterface.encodeFunctionData('getProductAt', [i]);
-        const itemResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedTokenFactory, data: itemData }, 'latest']);
-        const [item] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', itemResult);
-        const positionData = leveragedRouterInterface.encodeFunctionData('positions', [wallet, item.token]);
-        const positionResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedProductRouter, data: positionData }, 'latest']);
-        const [qtyWeiRaw] = leveragedRouterInterface.decodeFunctionResult('positions', positionResult);
-        const qtyWei = qtyWeiRaw.toString();
-        if (BigInt(qtyWei) > 0n) {
-          const quoteData = leveragedRouterInterface.encodeFunctionData('previewUnwind', [wallet, item.token, BigInt(qtyWei)]);
-          const quoteResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedProductRouter, data: quoteData }, 'latest']);
-          const [ttokenOutWeiRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', quoteResult);
-          leveragedValueWei += BigInt(ttokenOutWeiRaw.toString());
-        }
-      }
-    }
+    const leveragedValueWei = await computeLeveragedValueWei(snapshot, wallet, deployments);
     const totalValueWei = cashWei + stockValueWei + leveragedValueWei;
-    const gasSummary = await computeOverallGasForWallet(snapshot, wallet);
+    const gasSummary = await getPortfolioGasSummary(snapshot, wallet, includeGas);
 
     let aggregator = null;
     let drift = null;
-    if (deployments.portfolioAggregator) {
+    if (String(req.query.includeAggregator || '').toLowerCase() === 'true' && deployments.portfolioAggregator) {
       try {
         const aggData = aggregatorInterface.encodeFunctionData('getPortfolioSummary', [wallet]);
         const aggResult = await hardhatRpc('eth_call', [{ to: deployments.portfolioAggregator, data: aggData }, 'latest']);

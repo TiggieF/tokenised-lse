@@ -249,6 +249,17 @@
       return "";
     }
 
+    function signalPortfolioRefresh(reason) {
+      try {
+        localStorage.setItem("tlse:portfolio:refresh", JSON.stringify({
+          reason: String(reason || "mint_update"),
+          wallet: currentAccount,
+          timestampMs: Date.now(),
+        }));
+      } catch {
+      }
+    }
+
     equityMinusBtn.addEventListener("click", function () {
       let nextValue = equityAmount - STEP;
       if (nextValue < 100) {
@@ -295,6 +306,7 @@
         } else {
           setStatus("Airdrop sent: submitted");
         }
+        signalPortfolioRefresh("ttoken_airdrop");
         importHint.style.display = "block";
         importHint.textContent = `token address: ${ttokenAddress}`;
       } catch (err) {
@@ -338,6 +350,7 @@
         if (!mintHash && data.txHash) {
           mintHash = data.txHash;
         }
+        signalPortfolioRefresh("equity_mint");
         setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value} Tx: ${mintHash}`);
         equityImportHint.style.display = "block";
         equityImportHint.textContent = `${equitySymbol.value} address: ${data.tokenAddress}`;

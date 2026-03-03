@@ -292,7 +292,21 @@
 
     let currentWallet = "";
     let pollingEnabled = false;
-    let poller;
+    let fullRefreshPoller;
+    let livePricePoller;
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    let currentSummary = null;
+    let currentPositions = [];
+    let currentClaimables = [];
+    let currentLeveragedPositions = [];
+    let liveQuoteBySymbol = {};
+    let portfolioLoadedOnce = false;
+    let lastPortfolioSignal = "";
+    let gasRefreshPromise = null;
+    const PORTFOLIO_SIGNAL_KEY = "tlse:portfolio:refresh";
+    const FULL_REFRESH_INTERVAL_MS = 60000;
+    const LIVE_PRICE_INTERVAL_MS = 5000;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
 
     async function ensureSepoliaNetwork() {
@@ -352,6 +366,58 @@
       return "";
     }
 
+    function signalPortfolioRefresh(reason) {
+      try {
+        const payload = JSON.stringify({
+          reason: String(reason || "wallet_change"),
+          wallet: currentWallet,
+          timestampMs: Date.now(),
+        });
+        localStorage.setItem(PORTFOLIO_SIGNAL_KEY, payload);
+        lastPortfolioSignal = payload;
+      } catch {
+      }
+    }
+
+    function quoteAmountWei(valueWei, priceCents) {
+      return (BigInt(String(valueWei)) * BigInt(String(priceCents))) / 100n;
+    }
+
+    function normalizeChangePercent(rawValue) {
+      const raw = Number(rawValue);
+      if (!Number.isFinite(raw)) {
+        return null;
+      }
+      if (Math.abs(raw) <= 1) {
+        return raw * 100;
+      }
+      return raw;
+    }
+
+    function getDisplayPositionValues(position) {
+      const quote = liveQuoteBySymbol[String(position.symbol || "").toUpperCase()];
+      let priceCents = Number(position.priceCents);
+      if (quote && Number.isFinite(Number(quote.priceCents)) && Number(quote.priceCents) > 0) {
+        priceCents = Number(quote.priceCents);
+      }
+      let currentValueWei = BigInt(String(position.currentValueWei || "0"));
+      if (Number.isFinite(priceCents) && priceCents > 0) {
+        currentValueWei = quoteAmountWei(position.balanceWei, priceCents);
+      }
+      const costBasisWei = BigInt(String(position.costBasisWei || "0"));
+      let pnlPct = Number(position.unrealizedPnlPct);
+      if (!Number.isFinite(pnlPct) && costBasisWei > 0n) {
+        pnlPct = Number(((currentValueWei - costBasisWei) * 10000n) / costBasisWei) / 100;
+      } else if (costBasisWei > 0n) {
+        pnlPct = Number(((currentValueWei - costBasisWei) * 10000n) / costBasisWei) / 100;
+      }
+      return {
+        priceCents,
+        currentValueWei,
+        pnlPct,
+      };
+    }
+
     async function waitForWalletReceipt(txHash) {
       for (let i = 0; i < 120; i += 1) {
         const receipt = await window.ethereum.request({
@@ -387,6 +453,7 @@
         await waitForWalletReceipt(txHash);
         lastTxHash = txHash;
       }
+      signalPortfolioRefresh("wallet_tx_mined");
       return lastTxHash;
     }
 
@@ -435,17 +502,33 @@
     }
 
     function renderSummary(summary) {
+      if (!summary) {
+        return;
+      }
       const totalValueWei = BigInt(String(summary.totalValueWei));
-      const totalCostBasisWei = BigInt(String(summary.totalCostBasisWei));
+      let stockValueWei = 0n;
+      let totalCostBasisWei = 0n;
+      for (let i = 0; i < currentPositions.length; i += 1) {
+        const row = currentPositions[i];
+        const display = getDisplayPositionValues(row);
+        stockValueWei += display.currentValueWei;
+        totalCostBasisWei += BigInt(String(row.costBasisWei || "0"));
+      }
+      if (totalCostBasisWei === 0n) {
+        totalCostBasisWei = BigInt(String(summary.totalCostBasisWei || "0"));
+      }
+      const leveragedValueWei = BigInt(String(summary.leveragedValueWei || "0"));
+      const cashValueWei = BigInt(String(summary.cashValueWei || "0"));
+      const computedTotalValueWei = cashValueWei + stockValueWei + leveragedValueWei;
       const profitWei = totalValueWei - totalCostBasisWei;
       const nativeSymbol = summary.nativeSymbol ? String(summary.nativeSymbol) : "SepoliaETH";
       const nativeEthWei = summary.nativeEthWei ? summary.nativeEthWei : "0";
       const cards = [
-        ["Cash", formatUsdFromWei(summary.cashValueWei)],
-        ["Stock Value", formatUsdFromWei(summary.stockValueWei)],
-        ["Leveraged Value", formatUsdFromWei(summary.leveragedValueWei)],
-        ["Total Value", formatUsdFromWei(summary.totalValueWei)],
-        ["Cost Basis", formatUsdFromWei(summary.totalCostBasisWei)],
+        ["Cash", formatUsdFromWei(cashValueWei.toString())],
+        ["Stock Value", formatUsdFromWei(stockValueWei.toString())],
+        ["Leveraged Value", formatUsdFromWei(leveragedValueWei.toString())],
+        ["Total Value", formatUsdFromWei(computedTotalValueWei.toString())],
+        ["Cost Basis", formatUsdFromWei(totalCostBasisWei.toString())],
         ["Overall Gas Used", formatEthFromWei(summary.overallGasCostWei)],
         [nativeSymbol, formatEthFromWei(nativeEthWei)],
         // ["Profit", formatUsdFromWeiExact(profitWei.toString())],
@@ -457,6 +540,41 @@
         card.innerHTML = `<div class="summary-label">${label}</div><div class="summary-value">${value}</div>`;
         summaryGrid.appendChild(card);
       }
+    }
+
+    async function refreshGasSummaryInBackground() {
+      if (!isValidWalletAddress(currentWallet)) {
+        return;
+      }
+      if (gasRefreshPromise) {
+        return gasRefreshPromise;
+      }
+      const walletAtStart = currentWallet;
+      gasRefreshPromise = (async function () {
+        try {
+          const response = await fetchJsonWithTimeout(
+            `/api/portfolio/summary?wallet=${encodeURIComponent(walletAtStart)}&includeGas=true`,
+            15000
+          );
+          const data = response.data;
+          if (!data || data.error) {
+            return;
+          }
+          if (walletAtStart !== currentWallet) {
+            return;
+          }
+          currentSummary = {
+            ...(currentSummary || {}),
+            overallGasUsedUnits: data.overallGasUsedUnits,
+            overallGasCostWei: data.overallGasCostWei,
+          };
+          renderSummary(currentSummary);
+        } catch {
+        } finally {
+          gasRefreshPromise = null;
+        }
+      })();
+      return gasRefreshPromise;
     }
 
     function renderPositions(positions) {
@@ -475,14 +593,8 @@
           lifecycle = String(lifecycleRow.status).toUpperCase();
         }
         const isTradable = lifecycle === "ACTIVE";
-        let pnlPct = Number(p.unrealizedPnlPct);
-        if (!Number.isFinite(pnlPct)) {
-          const cost = Number(p.costBasisWei);
-          const value = Number(p.currentValueWei);
-          if (Number.isFinite(cost) && cost > 0 && Number.isFinite(value)) {
-            pnlPct = ((value - cost) / cost) * 100;
-          }
-        }
+        const display = getDisplayPositionValues(p);
+        let pnlPct = Number(display.pnlPct);
         let pnlClass = "gain neutral";
         let pnlText = "-";
         if (Number.isFinite(pnlPct)) {
@@ -502,9 +614,9 @@
           <td>${p.symbol}</td>
           <td>${formatWeiToToken(p.balanceWei, 2)}</td>
           <td>${formatCents(p.avgCostCents)}</td>
-          <td>${formatCents(p.priceCents)}</td>
+          <td>${formatCents(display.priceCents)}</td>
           <td>${formatUsdFromWei(p.costBasisWei)}</td>
-          <td>${formatUsdFromWei(p.currentValueWei)}</td>
+          <td>${formatUsdFromWei(display.currentValueWei.toString())}</td>
           <td class="${pnlClass}">${pnlText}</td>
         `;
         if (isTradable) {
@@ -587,6 +699,7 @@
         if (data.clientSign && Array.isArray(data.txs)) {
           txHash = await submitPreparedTxs(data.txs);
         }
+        signalPortfolioRefresh("dividend_claim");
         dividendsStatus.textContent = `Claimed ${symbol}. Tx: ${txHash}`;
         await refreshPortfolio();
       } catch (err) {
@@ -688,6 +801,7 @@
         if (data.clientSign && Array.isArray(data.txs)) {
           txHash = await submitPreparedTxs(data.txs);
         }
+        signalPortfolioRefresh("leveraged_sell");
         leveragedStatus.textContent = `Sold ${productSymbol} Tx: ${txHash}`;
         await refreshPortfolio();
       } catch (err) {
@@ -733,7 +847,11 @@
         actionTd.appendChild(actionWrap);
         const leverage = Number(item.leverage);
         let livePriceCents = Number(item.navCents);
-        const baseLivePriceCents = Number(item.basePriceCents);
+        let baseLivePriceCents = Number(item.basePriceCents);
+        const liveQuote = liveQuoteBySymbol[String(item.baseSymbol || "").toUpperCase()];
+        if (liveQuote && Number.isFinite(Number(liveQuote.priceCents)) && Number(liveQuote.priceCents) > 0) {
+          baseLivePriceCents = Number(liveQuote.priceCents);
+        }
         if (Number.isFinite(baseLivePriceCents) && baseLivePriceCents > 0) {
           livePriceCents = baseLivePriceCents;
         }
@@ -750,7 +868,10 @@
         ) {
           changePct = (((livePrice - avgEntry) / avgEntry) * leverage) * 100;
         } else {
-          const baseChangeRaw = item.baseChangePct;
+          let baseChangeRaw = item.baseChangePct;
+          if (liveQuote && liveQuote.changePercent !== null) {
+            baseChangeRaw = liveQuote.changePercent;
+          }
           const baseChangePct = (typeof baseChangeRaw === "number" && Number.isFinite(baseChangeRaw))
             ? baseChangeRaw
             : NaN;
@@ -800,112 +921,199 @@
       }
     }
 
+    async function refreshLiveQuotes() {
+      const symbols = new Set();
+      for (let i = 0; i < currentPositions.length; i += 1) {
+        const row = currentPositions[i];
+        if (row && row.symbol) {
+          symbols.add(String(row.symbol).toUpperCase());
+        }
+      }
+      for (let i = 0; i < currentLeveragedPositions.length; i += 1) {
+        const row = currentLeveragedPositions[i];
+        if (row && row.baseSymbol) {
+          symbols.add(String(row.baseSymbol).toUpperCase());
+        }
+      }
+      if (symbols.size === 0) {
+        return;
+      }
+      const nextQuotes = { ...liveQuoteBySymbol };
+      const allSymbols = Array.from(symbols);
+      const responses = await Promise.allSettled(
+        allSymbols.map((symbol) => fetchJsonWithTimeout(`/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`, 3000))
+      );
+      let anyChanged = false;
+      for (let i = 0; i < responses.length; i += 1) {
+        const row = responses[i];
+        if (row.status !== "fulfilled") {
+          continue;
+        }
+        const data = row.value.data;
+        if (!data || data.error) {
+          continue;
+        }
+        const price = Number(data.price);
+        const priceCents = Number.isFinite(price) && price > 0 ? Math.round(price * 100) : NaN;
+        const changePercent = normalizeChangePercent(data.changePercent);
+        if (Number.isFinite(priceCents) && priceCents > 0) {
+          nextQuotes[allSymbols[i]] = {
+            priceCents,
+            changePercent,
+          };
+          anyChanged = true;
+        }
+      }
+      if (!anyChanged) {
+        return;
+      }
+      liveQuoteBySymbol = nextQuotes;
+      renderPositions(currentPositions);
+      renderLeveragedPositions(currentLeveragedPositions);
+      renderSummary(currentSummary);
+    }
+
     async function refreshPortfolio() {
       if (!isValidWalletAddress(currentWallet)) {
         holdingsStatus.textContent = "Wallet not connected";
         return;
       }
+      if (refreshInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
       try {
         await ensureSepoliaNetwork();
       } catch (err) {
         holdingsStatus.textContent = err.message ? String(err.message) : "Please switch to Sepolia";
+        refreshInFlight = false;
         return;
       }
-      holdingsStatus.textContent = "Loading";
-      const results = await Promise.allSettled([
-        fetchJsonWithTimeout(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
-        fetchJsonWithTimeout(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
-        fetchJsonWithTimeout(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
-        fetchJsonWithTimeout(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
-        fetchJsonWithTimeout("/api/admin/symbols/status"),
-      ]);
+      try {
+        holdingsStatus.textContent = portfolioLoadedOnce ? "Refreshing" : "Loading";
+        const results = await Promise.allSettled([
+          fetchJsonWithTimeout(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
+          fetchJsonWithTimeout(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
+          fetchJsonWithTimeout(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
+          fetchJsonWithTimeout(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
+          fetchJsonWithTimeout("/api/admin/symbols/status"),
+        ]);
 
-      let summaryData = null;
-      let positionsData = null;
-      let claimablesData = null;
-      let leveragedData = null;
-      let lifecycleData = null;
+        let summaryData = null;
+        let positionsData = null;
+        let claimablesData = null;
+        let leveragedData = null;
+        let lifecycleData = null;
 
-      if (results[0].status === "fulfilled") {
-        summaryData = results[0].value.data;
-      }
-      if (results[1].status === "fulfilled") {
-        positionsData = results[1].value.data;
-      }
-      if (results[2].status === "fulfilled") {
-        claimablesData = results[2].value.data;
-      }
-      if (results[3].status === "fulfilled") {
-        leveragedData = results[3].value.data;
-      }
-      if (results[4].status === "fulfilled") {
-        lifecycleData = results[4].value.data;
-      }
+        if (results[0].status === "fulfilled") {
+          summaryData = results[0].value.data;
+        }
+        if (results[1].status === "fulfilled") {
+          positionsData = results[1].value.data;
+        }
+        if (results[2].status === "fulfilled") {
+          claimablesData = results[2].value.data;
+        }
+        if (results[3].status === "fulfilled") {
+          leveragedData = results[3].value.data;
+        }
+        if (results[4].status === "fulfilled") {
+          lifecycleData = results[4].value.data;
+        }
 
-      let lifecycleRows = [];
-      if (lifecycleData && Array.isArray(lifecycleData.symbols)) {
-        lifecycleRows = lifecycleData.symbols;
-      }
-      lifecycleBySymbol = {};
-      for (let i = 0; i < lifecycleRows.length; i += 1) {
-        const row = lifecycleRows[i];
-        lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
-      }
+        let lifecycleRows = [];
+        if (lifecycleData && Array.isArray(lifecycleData.symbols)) {
+          lifecycleRows = lifecycleData.symbols;
+        }
+        lifecycleBySymbol = {};
+        for (let i = 0; i < lifecycleRows.length; i += 1) {
+          const row = lifecycleRows[i];
+          lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
+        }
 
-      let summaryOk = false;
-      if (summaryData && !summaryData.error) {
-        summaryOk = true;
-      }
-      let positionsOk = false;
-      if (positionsData && !positionsData.error && Array.isArray(positionsData.positions)) {
-        positionsOk = true;
-      }
-      if (summaryOk) {
-        renderSummary(summaryData);
-      }
-      if (positionsOk) {
-        renderPositions(positionsData.positions);
-        renderMarketAlert(positionsData.positions);
-      }
-      if (summaryOk && positionsOk) {
-        holdingsStatus.textContent = "";
-      } else {
-        holdingsStatus.textContent = "Partial data loaded (RPC/indexer still syncing)";
-      }
+        let summaryOk = false;
+        if (summaryData && !summaryData.error) {
+          summaryOk = true;
+        }
+        let positionsOk = false;
+        if (positionsData && !positionsData.error && Array.isArray(positionsData.positions)) {
+          positionsOk = true;
+        }
+        if (summaryOk) {
+          currentSummary = summaryData;
+        }
+        if (positionsOk) {
+          currentPositions = positionsData.positions;
+          renderPositions(currentPositions);
+          renderMarketAlert(currentPositions);
+          portfolioLoadedOnce = true;
+        }
+        if (currentSummary) {
+          renderSummary(currentSummary);
+        }
+        refreshGasSummaryInBackground();
+        if (summaryOk && positionsOk) {
+          holdingsStatus.textContent = "";
+        } else if (portfolioLoadedOnce) {
+          holdingsStatus.textContent = "Showing latest available data";
+        } else {
+          holdingsStatus.textContent = "Partial data loaded (RPC/indexer still syncing)";
+        }
 
-      let claimablesOk = false;
-      if (claimablesData && !claimablesData.error && Array.isArray(claimablesData.claimables)) {
-        claimablesOk = true;
-      }
-      if (claimablesOk) {
-        renderClaimables(claimablesData.claimables);
-        dividendsStatus.textContent = "Ready";
-      } else {
-        renderClaimables([]);
-        dividendsStatus.textContent = "Slow / unavailable right now";
-      }
+        let claimablesOk = false;
+        if (claimablesData && !claimablesData.error && Array.isArray(claimablesData.claimables)) {
+          claimablesOk = true;
+        }
+        if (claimablesOk) {
+          currentClaimables = claimablesData.claimables;
+          renderClaimables(currentClaimables);
+          dividendsStatus.textContent = "Ready";
+        } else if (currentClaimables.length > 0) {
+          renderClaimables(currentClaimables);
+          dividendsStatus.textContent = "Showing last loaded data";
+        } else {
+          renderClaimables([]);
+          dividendsStatus.textContent = "Slow / unavailable right now";
+        }
 
-      let leveragedOk = false;
-      if (leveragedData && !leveragedData.error && Array.isArray(leveragedData.positions)) {
-        leveragedOk = true;
-      }
-      if (leveragedOk) {
-        renderLeveragedPositions(leveragedData.positions);
-        leveragedStatus.textContent = "Ready";
-      } else {
-        renderLeveragedPositions([]);
-        leveragedStatus.textContent = "Slow / unavailable right now";
+        let leveragedOk = false;
+        if (leveragedData && !leveragedData.error && Array.isArray(leveragedData.positions)) {
+          leveragedOk = true;
+        }
+        if (leveragedOk) {
+          currentLeveragedPositions = leveragedData.positions;
+          renderLeveragedPositions(currentLeveragedPositions);
+          leveragedStatus.textContent = "Ready";
+        } else if (currentLeveragedPositions.length > 0) {
+          renderLeveragedPositions(currentLeveragedPositions);
+          leveragedStatus.textContent = "Showing last loaded data";
+        } else {
+          renderLeveragedPositions([]);
+          leveragedStatus.textContent = "Slow / unavailable right now";
+        }
+        await refreshLiveQuotes();
+      } finally {
+        refreshInFlight = false;
+        if (refreshQueued) {
+          refreshQueued = false;
+          refreshPortfolio();
+        }
       }
     }
 
     function setPolling(enabled) {
       pollingEnabled = enabled;
-      if (poller) {
-        clearInterval(poller);
+      if (fullRefreshPoller) {
+        clearInterval(fullRefreshPoller);
+      }
+      if (livePricePoller) {
+        clearInterval(livePricePoller);
       }
       if (enabled) {
         refreshPortfolio();
-        poller = setInterval(refreshPortfolio, 10000);
+        fullRefreshPoller = setInterval(refreshPortfolio, FULL_REFRESH_INTERVAL_MS);
+        livePricePoller = setInterval(refreshLiveQuotes, LIVE_PRICE_INTERVAL_MS);
       }
     }
 
@@ -917,6 +1125,24 @@
       refreshPortfolio();
     });
     window.ethereum.on("chainChanged", function () {
+      refreshPortfolio();
+    });
+    window.addEventListener("focus", function () {
+      refreshPortfolio();
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) {
+        refreshPortfolio();
+      }
+    });
+    window.addEventListener("storage", function (event) {
+      if (event.key !== PORTFOLIO_SIGNAL_KEY) {
+        return;
+      }
+      if (!event.newValue || event.newValue === lastPortfolioSignal) {
+        return;
+      }
+      lastPortfolioSignal = event.newValue;
       refreshPortfolio();
     });
 

@@ -452,6 +452,17 @@
       throw new Error(`tx not mined yet: ${txHash}`);
     }
 
+    function signalPortfolioRefresh(reason) {
+      try {
+        localStorage.setItem("tlse:portfolio:refresh", JSON.stringify({
+          reason: String(reason || "trade_update"),
+          wallet: currentAccount,
+          timestampMs: Date.now(),
+        }));
+      } catch {
+      }
+    }
+
     async function submitPreparedTxs(txs) {
       if (!Array.isArray(txs) || txs.length === 0) {
         throw new Error("No transactions prepared");
@@ -473,6 +484,7 @@
         await waitForWalletReceipt(txHash);
         lastTxHash = txHash;
       }
+      signalPortfolioRefresh("wallet_tx_mined");
       return lastTxHash;
     }
 
@@ -1023,6 +1035,7 @@
       }
       showStatus(buyStatus, "Submitting");
       const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      signalPortfolioRefresh("buy_order_placed");
       showStatus(buyStatus, `Order placed: ${String(hash)}`);
       await loadTTokenBalance();
     });
@@ -1131,6 +1144,7 @@
         if (data.clientSign && Array.isArray(data.txs)) {
           txHash = await submitPreparedTxs(data.txs);
         }
+        signalPortfolioRefresh("leveraged_buy");
         showStatus(levStatus, `Bought leveraged tx ${txHash}`);
         if (data.productToken) {
           levTokenAddress.style.display = "block";
