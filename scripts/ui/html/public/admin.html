@@ -433,6 +433,8 @@
     const adminWalletRemoveBtn = document.getElementById("admin-wallet-remove-btn");
     const adminWalletStatus = document.getElementById("admin-wallet-status");
     const adminWalletsBody = document.getElementById("admin-wallets-body");
+    const SYMBOLS_SIGNAL_KEY = "tlse:symbols:refresh";
+    let lastSymbolsSignal = "";
     const listCreateBtn = document.getElementById("list-create-btn");
     const listStatus = document.getElementById("list-status");
     const divSymbol = document.getElementById("div-symbol");
@@ -762,6 +764,19 @@
       adminWalletStatus.style.color = nextColor;
     }
 
+    function signalSymbolsRefresh(reason, symbol) {
+      try {
+        const payload = JSON.stringify({
+          reason: String(reason || "symbols_update"),
+          symbol: String(symbol || "").toUpperCase(),
+          timestampMs: Date.now(),
+        });
+        localStorage.setItem(SYMBOLS_SIGNAL_KEY, payload);
+        lastSymbolsSignal = payload;
+      } catch {
+      }
+    }
+
     function renderAdminWalletRows(wallets, immutableAdminWallet) {
       adminWalletsBody.innerHTML = "";
       let rows = [];
@@ -944,8 +959,12 @@
       }
     }
 
-    async function loadDividendSymbols() {
-      const res = await fetch("/api/registry/listings");
+    async function loadDividendSymbols(forceFresh = true) {
+      let url = "/api/registry/listings";
+      if (forceFresh) {
+        url = "/api/registry/listings?noCache=1";
+      }
+      const res = await fetch(url);
       const data = await res.json();
       divSymbol.innerHTML = "";
       merkleDivSymbol.innerHTML = "";
@@ -1024,6 +1043,7 @@
           throw new Error(message);
         }
         setLifecycleStatus(`${symbol} set to ${data.status}`);
+        signalSymbolsRefresh("lifecycle_changed", symbol);
         await loadLifecycleTable();
       } catch (err) {
         let message = "Lifecycle update failed";
@@ -1138,8 +1158,7 @@
           }
           throw new Error(message);
         }
-        setMerkleDivStatus(`Merkle epoch ${data.epochId} auto-declared for ${data.symbol} Tx: ${data.txHash}`);
-        await viewMerkleTree();
+        setMerkleDivStatus(`Merkle epoch ${data.epochId} auto-declared for ${data.symbol} Tx: ${data.txHash}. Click "View Latest Tree" to load details.`);
       } catch (err) {
         let message = "Auto merkle declaration failed";
         if (err.message) {
@@ -1273,7 +1292,7 @@
           });
         } else {
           setListStatus("Listing symbol");
-          res = await fetch("/api/equity/create", {
+          res = await fetch("/api/equity/create?waitReceipt=1", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ symbol, name }),
@@ -1296,9 +1315,10 @@
         } else {
           setListStatus(`Listed ${symbol} Tx: ${data.txHash}`);
         }
+        signalSymbolsRefresh("listing_changed", symbol);
         await loadLifecycleTable();
         await loadListableStocks();
-        await loadDividendSymbols();
+        await loadDividendSymbols(true);
       } catch (err) {
         let message = "Listing failed";
         if (err.message) {
@@ -1434,6 +1454,18 @@
     symbolDelistBtn.addEventListener("click", () => changeSymbolLifecycle("delist"));
     fillsSourceModeSelect.addEventListener("change", () => {
       loadCompletedFillsTable();
+    });
+    window.addEventListener("storage", async (event) => {
+      if (event.key !== SYMBOLS_SIGNAL_KEY) {
+        return;
+      }
+      if (!event.newValue || event.newValue === lastSymbolsSignal) {
+        return;
+      }
+      lastSymbolsSignal = event.newValue;
+      await loadLifecycleTable();
+      await loadListableStocks();
+      await loadDividendSymbols(true);
     });
     (async function () {
       const hasAccess = await verifyAdminAccess();

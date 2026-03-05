@@ -388,6 +388,8 @@
     let buyLimitPriceTouched = false;
     let autoLimitPriceTouched = false;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+    const SYMBOLS_SIGNAL_KEY = "tlse:symbols:refresh";
+    let lastSymbolsSignal = "";
 
     async function ensureSepoliaNetwork() {
       const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
@@ -697,11 +699,15 @@
       renderLeveragedProductOptions();
     }
 
-    async function loadListedSymbols() {
+    async function loadListedSymbols(forceFresh = true) {
       const fallbackSymbols = ["TSLA", "AAPL", "MSFT"];
       let listings = [];
       try {
-        const res = await fetch("/api/registry/listings");
+        let url = "/api/registry/listings";
+        if (forceFresh) {
+          url = "/api/registry/listings?noCache=1";
+        }
+        const res = await fetch(url);
         const data = await res.json();
         if (Array.isArray(data.listings)) {
           listings = data.listings;
@@ -1204,11 +1210,24 @@
       loadLeveragedBaseQuote();
     });
     window.ethereum.on("chainChanged", function () {
+      loadListedSymbols(true);
       loadLifecycleStatuses();
       loadTradeLivePrice();
       loadTTokenBalance();
       loadAutoRules();
       loadLeveragedBaseQuote();
+    });
+    window.addEventListener("storage", async function (event) {
+      if (event.key !== SYMBOLS_SIGNAL_KEY) {
+        return;
+      }
+      if (!event.newValue || event.newValue === lastSymbolsSignal) {
+        return;
+      }
+      lastSymbolsSignal = event.newValue;
+      await loadListedSymbols(true);
+      await loadLifecycleStatuses();
+      await loadTradeLivePrice();
     });
     setInterval(loadLifecycleStatuses, 10000);
     setInterval(loadTradeLivePrice, 10000);

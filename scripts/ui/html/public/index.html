@@ -681,6 +681,11 @@
       }
     }
 
+    function refreshNotificationsFromStore() {
+      shellNotifications = readNotificationStore();
+      renderNotifications();
+    }
+
     function pushShellNotification(input) {
       if (!input || typeof input !== "object") {
         return;
@@ -1194,10 +1199,12 @@
         // connction to wallet and listens for changes
         await refreshWalletFromProvider();
         startOrderFillWatcher();
+        refreshNotificationsFromStore();
       } catch (err) {
         currentWalletAddress = "";
         setWalletStatus(false);
         await refreshUiPermissions();
+        refreshNotificationsFromStore();
       }
     })();
     activeEthereumProvider.on("accountsChanged", async (accounts) => {
@@ -1209,7 +1216,7 @@
         loadPage("markets");
       }
       startOrderFillWatcher();
-      renderNotifications();
+      refreshNotificationsFromStore();
       notifyCurrentPageWalletChanged();
     });
     walletStatus.addEventListener("click", async () => {
@@ -1217,12 +1224,13 @@
         await reconnectWalletInteractive();
         await refreshUiPermissions();
         startOrderFillWatcher();
-        renderNotifications();
+        refreshNotificationsFromStore();
         notifyCurrentPageWalletChanged();
       } catch (err) {
         currentWalletAddress = "";
         setWalletStatus(false);
         await refreshUiPermissions();
+        refreshNotificationsFromStore();
       }
     });
     let startPage = localStorage.getItem(LAST_PAGE_KEY);
@@ -1234,6 +1242,15 @@
     applyWalletLockedNavigation();
     shellNotifications = readNotificationStore();
     renderNotifications();
+
+    window.addEventListener("focus", () => {
+      refreshNotificationsFromStore();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        refreshNotificationsFromStore();
+      }
+    });
 
     liveUpdatesToggle.addEventListener("click", () => {
       // Control moved to Admin page.

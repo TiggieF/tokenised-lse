@@ -504,6 +504,17 @@ function writeUiReadCache(cacheKey, value) {
   });
 }
 
+function clearUiReadCacheByPrefix(prefix) {
+  const start = `${String(prefix)}|`;
+  const keys = Array.from(uiReadCache.keys());
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i];
+    if (String(key).startsWith(start)) {
+      uiReadCache.delete(key);
+    }
+  }
+}
+
 async function runUiCoalesced(cacheKey, loader) {
   const existing = uiReadInflight.get(cacheKey);
   if (existing) {
@@ -516,6 +527,35 @@ async function runUiCoalesced(cacheKey, loader) {
   });
   uiReadInflight.set(cacheKey, task);
   return task;
+}
+
+function invalidatePortfolioCachesForWallet(walletRaw) {
+  const wallet = normalizeAddress(walletRaw);
+  if (!wallet) {
+    return;
+  }
+  const lower = wallet.toLowerCase();
+  const cacheKeys = [];
+  cacheKeys.push(makeUiReadCacheKey('portfolio-summary', { wallet, includeGas: false, includeAggregator: false }));
+  cacheKeys.push(makeUiReadCacheKey('portfolio-summary', { wallet, includeGas: true, includeAggregator: false }));
+  cacheKeys.push(makeUiReadCacheKey('portfolio-summary', { wallet, includeGas: false, includeAggregator: true }));
+  cacheKeys.push(makeUiReadCacheKey('portfolio-summary', { wallet, includeGas: true, includeAggregator: true }));
+  cacheKeys.push(makeUiReadCacheKey('portfolio-positions', { wallet }));
+  cacheKeys.push(makeUiReadCacheKey('dividends-claimables', { wallet }));
+  for (let i = 0; i < cacheKeys.length; i += 1) {
+    uiReadCache.delete(cacheKeys[i]);
+  }
+  portfolioGasCache.delete(lower);
+  portfolioGasInflight.delete(lower);
+}
+
+function invalidateListingsCaches() {
+  listingsCache = {
+    registryAddr: '',
+    timestampMs: 0,
+    items: [],
+  };
+  clearUiReadCacheByPrefix('registry-listings');
 }
 
 async function withTimeout(promise, timeoutMs, timeoutMessage) {
@@ -2729,6 +2769,27 @@ function appendManualMintActivity(input) {
   writeJsonFile(INDEXER_TRANSFERS_FILE, transfers);
 }
 
+function appendManualMintActivityAfterReceipt(input) {
+  Promise.resolve().then(async () => {
+    const receipt = await waitForReceipt(input.txHash);
+    const blockNumber = parseRpcInt(receipt.blockNumber);
+    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    appendManualMintActivity({
+      wallet: input.wallet,
+      tokenAddress: input.tokenAddress,
+      symbol: input.symbol,
+      assetType: input.assetType,
+      amountWei: input.amountWei,
+      priceCents: input.priceCents,
+      reason: input.reason,
+      txHash: input.txHash,
+      blockNumber,
+      timestampMs,
+    });
+    invalidatePortfolioCachesForWallet(input.wallet);
+  }).catch(() => {});
+}
+
 async function resolveEntryPriceCentsForSymbol(symbol, deployments) {
   const upper = String(symbol || '').toUpperCase().trim();
   if (!upper) {
@@ -3436,9 +3497,16 @@ async function readReceiptGasData(txHashRaw) {
   };
 }
 
-function collectWalletRelatedTxHashes(snapshot, wallet) {
+function collectWalletRelatedTxContext(snapshot, wallet) {
   const walletNorm = normalizeAddress(wallet);
   const txHashes = new Set();
+  let latestEventTimestampMs = 0;
+  function markTimestamp(rawValue) {
+    const parsed = Number(rawValue);
+    if (Number.isFinite(parsed) && parsed > latestEventTimestampMs) {
+      latestEventTimestampMs = parsed;
+    }
+  }
   const orderIds = Object.keys(snapshot.orders);
   for (let i = 0; i < orderIds.length; i += 1) {
     const order = snapshot.orders[orderIds[i]];
@@ -3448,6 +3516,8 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(order.placedTimestampMs);
+      markTimestamp(order.timestampMs);
     }
   }
   for (let i = 0; i < snapshot.cancellations.length; i += 1) {
@@ -3458,6 +3528,7 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(row.timestampMs);
     }
   }
   for (let i = 0; i < snapshot.fills.length; i += 1) {
@@ -3474,6 +3545,7 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(row.timestampMs);
     }
   }
   for (let i = 0; i < snapshot.leveragedEvents.length; i += 1) {
@@ -3484,6 +3556,7 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(row.timestampMs);
     }
   }
   for (let i = 0; i < snapshot.transfers.length; i += 1) {
@@ -3495,14 +3568,19 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(row.timestampMs);
     }
   }
-  return Array.from(txHashes);
+  return {
+    txHashes: Array.from(txHashes),
+    latestEventTimestampMs,
+  };
 }
 
 async function computeOverallGasForWallet(snapshot, wallet) {
   const walletNorm = normalizeAddress(wallet);
-  const txHashes = collectWalletRelatedTxHashes(snapshot, walletNorm);
+  const context = collectWalletRelatedTxContext(snapshot, walletNorm);
+  const txHashes = context.txHashes;
   const receiptRows = await mapWithConcurrency(txHashes, PORTFOLIO_RPC_CONCURRENCY, async (txHash) => {
     try {
       return await readReceiptGasData(txHash);
@@ -3523,6 +3601,7 @@ async function computeOverallGasForWallet(snapshot, wallet) {
     gasUsedUnits: totalGasUsed,
     gasCostWei: totalCostWei,
     txCount: txHashes.length,
+    latestEventTimestampMs: context.latestEventTimestampMs,
   };
 }
 
@@ -3546,6 +3625,7 @@ function getEmptyPortfolioGasSummary() {
     gasUsedUnits: 0n,
     gasCostWei: 0n,
     txCount: 0,
+    latestEventTimestampMs: 0,
   };
 }
 
@@ -3577,9 +3657,24 @@ async function getPortfolioGasSummary(snapshot, wallet, waitForFresh) {
   if (!key) {
     return getEmptyPortfolioGasSummary();
   }
+  const context = collectWalletRelatedTxContext(snapshot, key);
+  const latestWalletEventTimestampMs = context.latestEventTimestampMs;
   const cached = readPortfolioGasCache(key);
   if (cached) {
-    return cached;
+    const cachedLatestEvent = Number(cached.latestEventTimestampMs || 0);
+    if (latestWalletEventTimestampMs > cachedLatestEvent) {
+      const refreshPromise = startPortfolioGasRefresh(snapshot, key);
+      if (waitForFresh) {
+        try {
+          return await refreshPromise;
+        } catch {
+          return cached;
+        }
+      }
+      refreshPromise.catch(() => {});
+    } else {
+      return cached;
+    }
   }
   if (portfolioGasCache.has(key)) {
     const stale = portfolioGasCache.get(key);
@@ -4541,7 +4636,11 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
   const current = state.tokens[tokenKey] || {};
   let deploymentBlock = Number(current.deploymentBlock);
   if (!Number.isFinite(deploymentBlock) || deploymentBlock < 0 || deploymentBlock > endBlock) {
-    deploymentBlock = await resolveContractDeploymentBlock(normalizedToken, endBlock);
+    if (MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS > 0) {
+      deploymentBlock = Math.max(0, endBlock - MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS + 1);
+    } else {
+      deploymentBlock = await resolveContractDeploymentBlock(normalizedToken, endBlock);
+    }
   }
   let lastScannedBlock = Number(current.lastScannedBlock);
   const hasPriorScan = Number.isFinite(lastScannedBlock);
@@ -6844,6 +6943,10 @@ app.post('/api/admin/wallets/remove', (req, res) => {
   }
 });
 
+app.all('/api/admin/wallets/wipe', (_req, res) => {
+  res.status(404).json({ error: 'not found' });
+});
+
 app.get('/api/live-updates/status', (_req, res) => {
   const state = readLiveUpdatesState();
   const enabled = state && state.enabled !== false;
@@ -6898,6 +7001,14 @@ app.post('/api/ttoken/mint', async (req, res) => {
   }
 
   try {
+    const waitReceiptRaw = req.query.waitReceipt;
+    let waitReceipt = false;
+    if (String(waitReceiptRaw || '').toLowerCase() === '1') {
+      waitReceipt = true;
+    }
+    if (String(waitReceiptRaw || '').toLowerCase() === 'true') {
+      waitReceipt = true;
+    }
     const deployments = loadDeployments();
     const from = deployments.admin;
     const fromValid = isValidAddress(from);
@@ -6920,10 +7031,25 @@ app.post('/api/ttoken/mint', async (req, res) => {
       to: ttokenAddress,
       data,
     }]);
-    const receipt = await waitForReceipt(txHash);
-    const blockNumber = parseRpcInt(receipt.blockNumber);
-    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
-    appendManualMintActivity({
+    if (waitReceipt) {
+      const receipt = await waitForReceipt(txHash);
+      const blockNumber = parseRpcInt(receipt.blockNumber);
+      const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+      appendManualMintActivity({
+        wallet: to,
+        tokenAddress: ttokenAddress,
+        symbol: 'TTOKEN',
+        assetType: 'TTOKEN',
+        amountWei: amountWei.toString(),
+        reason: 'MINT_TTOKEN',
+        txHash,
+        blockNumber,
+        timestampMs,
+      });
+      invalidatePortfolioCachesForWallet(to);
+      return res.json({ txHash, status: 'confirmed' });
+    }
+    appendManualMintActivityAfterReceipt({
       wallet: to,
       tokenAddress: ttokenAddress,
       symbol: 'TTOKEN',
@@ -6931,10 +7057,10 @@ app.post('/api/ttoken/mint', async (req, res) => {
       amountWei: amountWei.toString(),
       reason: 'MINT_TTOKEN',
       txHash,
-      blockNumber,
-      timestampMs,
+      priceCents: 0,
     });
-    res.json({ txHash });
+    invalidatePortfolioCachesForWallet(to);
+    res.json({ txHash, status: 'submitted' });
   } catch (err) {
     res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
@@ -7823,8 +7949,14 @@ app.get('/api/portfolio/positions', async (req, res) => {
       let degraded = false;
       let positions = [];
       try {
-        await withTimeout(waitForIndexerSyncBounded(), 1500, 'indexer sync timeout');
-        const snapshot = readIndexerSnapshot();
+        let snapshot = readIndexerSnapshot();
+        try {
+          await withTimeout(waitForIndexerSyncBounded(), 1500, 'indexer sync timeout');
+          snapshot = readIndexerSnapshot();
+        } catch (syncErr) {
+          warnings.push(`indexer stale snapshot: ${toUserErrorMessage(syncErr.message)}`);
+          source = 'stale_indexer';
+        }
         const deployments = loadDeployments();
         positions = await withTimeout(
           buildPortfolioPositions(snapshot, wallet, deployments, { disableCache }),
@@ -7919,8 +8051,14 @@ app.get('/api/portfolio/summary', async (req, res) => {
       let overallGasUsedUnits = 0n;
       let overallGasCostWei = 0n;
       try {
-        await withTimeout(waitForIndexerSyncBounded(), 3500, 'indexer sync timeout');
-        const snapshot = readIndexerSnapshot();
+        let snapshot = readIndexerSnapshot();
+        try {
+          await withTimeout(waitForIndexerSyncBounded(), 3500, 'indexer sync timeout');
+          snapshot = readIndexerSnapshot();
+        } catch (syncErr) {
+          warnings.push(`indexer stale snapshot: ${toUserErrorMessage(syncErr.message)}`);
+          source = 'stale_indexer';
+        }
         const deployments = loadDeployments();
         const chainIdHex = await withTimeout(hardhatRpc('eth_chainId', []), 1500, 'chainId timeout');
         chainId = parseRpcInt(chainIdHex);
@@ -8599,7 +8737,8 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
     const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
     const nextEpochId = Number(countRaw) + 1;
 
-    const claimRows = await mapWithConcurrency(holders, 4, async (account) => {
+    const holderReadConcurrency = NETWORK_NAME === 'sepolia' ? 8 : 4;
+    const claimRows = await mapWithConcurrency(holders, holderReadConcurrency, async (account) => {
       const balData = equityTokenSnapshotInterface.encodeFunctionData('balanceOfAt', [account, BigInt(snapshotId)]);
       const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
       const [balanceRaw] = equityTokenSnapshotInterface.decodeFunctionResult('balanceOfAt', balResult);
@@ -9146,6 +9285,10 @@ app.get('/api/dividends/claimables', async (req, res) => {
               const [countRaw] = dividendsInterface.decodeFunctionResult('epochCount', countResult);
               const count = Number(countRaw);
               for (let epochId = 1; epochId <= count; epochId += 1) {
+                const epochData = dividendsInterface.encodeFunctionData('epochs', [listing.tokenAddress, epochId]);
+                const epochResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: epochData }, 'latest']);
+                const [, , declaredAtRaw] = dividendsInterface.decodeFunctionResult('epochs', epochResult);
+                const declaredAtMs = Number(declaredAtRaw) * 1000;
                 const previewData = dividendsInterface.encodeFunctionData('previewClaim', [listing.tokenAddress, epochId, wallet]);
                 const previewResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: previewData }, 'latest']);
                 const [claimableWeiRaw] = dividendsInterface.decodeFunctionResult('previewClaim', previewResult);
@@ -9162,6 +9305,7 @@ app.get('/api/dividends/claimables', async (req, res) => {
                   symbol: listing.symbol,
                   tokenAddress: listing.tokenAddress,
                   epochId,
+                  declaredAtMs,
                   claimableWei,
                   claimed,
                   canClaim,
@@ -9210,11 +9354,16 @@ app.get('/api/dividends/claimables', async (req, res) => {
                 if (BigInt(amountWei) > 0n && !claimed) {
                   canClaim = true;
                 }
+                let declaredAtMs = Number(tree.declaredAtMs);
+                if (!Number.isFinite(declaredAtMs) || declaredAtMs <= 0) {
+                  declaredAtMs = Number(tree.declaredAt) * 1000;
+                }
                 claimables.push({
                   claimType: 'MERKLE',
                   symbol: String(tree.symbol || ''),
                   tokenAddress: String(tree.tokenAddress || ''),
                   epochId,
+                  declaredAtMs,
                   claimableWei: amountWei,
                   amountWei,
                   leafIndex,
@@ -10517,7 +10666,8 @@ app.get('/api/leveraged/positions', async (req, res) => {
         const [ttokenOutWeiRaw, navCentsRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', quoteResult);
         const currentValueWei = ttokenOutWeiRaw.toString();
         const navCents = navCentsRaw.toString();
-        const costBasisWei = (BigInt(qtyWei) / BigInt(Number(item.leverage))).toString();
+        const avgEntryPriceCentsBig = BigInt(avgEntryPriceCents);
+        const costBasisWei = ((BigInt(qtyWei) * avgEntryPriceCentsBig) / 100n).toString();
         const unrealizedPnlWei = (BigInt(currentValueWei) - BigInt(costBasisWei)).toString();
         const currentPriceWei = ((BigInt(currentValueWei) * 1000000000000000000n) / BigInt(qtyWei)).toString();
         let basePriceCents = 0;
@@ -10623,6 +10773,7 @@ app.post('/api/admin/symbols/freeze', async (req, res) => {
       return res.status(400).json({ error: 'symbol is required' });
     }
     const entry = setSymbolLifecycleStatus(symbol, 'FROZEN');
+    invalidateListingsCaches();
     res.json({ symbol, status: 'FROZEN', entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -10640,6 +10791,7 @@ app.post('/api/admin/symbols/unfreeze', async (req, res) => {
       return res.status(400).json({ error: 'symbol is required' });
     }
     const entry = setSymbolLifecycleStatus(symbol, 'ACTIVE');
+    invalidateListingsCaches();
     res.json({ symbol, status: 'ACTIVE', entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -10657,6 +10809,7 @@ app.post('/api/admin/symbols/delist', async (req, res) => {
       return res.status(400).json({ error: 'symbol is required' });
     }
     const entry = setSymbolLifecycleStatus(symbol, 'DELISTED');
+    invalidateListingsCaches();
     res.json({ symbol, status: 'DELISTED', entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -10674,6 +10827,7 @@ app.post('/api/admin/symbols/list', async (req, res) => {
       return res.status(400).json({ error: 'symbol is required' });
     }
     const entry = setSymbolLifecycleStatus(symbol, 'ACTIVE');
+    invalidateListingsCaches();
     res.json({ symbol, status: 'ACTIVE', entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -11515,12 +11669,32 @@ app.post('/api/equity/create', async (req, res) => {
   }
 
   try {
+    const waitReceiptRaw = req.query.waitReceipt;
+    let waitReceipt = false;
+    if (String(waitReceiptRaw || '').toLowerCase() === '1') {
+      waitReceipt = true;
+    }
+    if (String(waitReceiptRaw || '').toLowerCase() === 'true') {
+      waitReceipt = true;
+    }
     const deployments = loadDeployments();
     const factoryAddr = deployments.equityTokenFactory;
+    const registryAddr = deployments.listingsRegistry;
     const admin = deployments.admin;
     const factoryDeployed = await ensureContract(factoryAddr);
     if (!factoryDeployed) {
       return res.status(500).json({ error: '' });
+    }
+    const registryDeployed = await ensureContract(registryAddr);
+    if (!registryDeployed) {
+      return res.status(500).json({ error: '' });
+    }
+
+    const lookupData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
+    const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
+    const [listedTokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
+    if (listedTokenAddr !== ethers.ZeroAddress) {
+      return res.status(409).json({ error: 'symbol already listed' });
     }
 
     const data = equityFactoryInterface.encodeFunctionData('createEquityToken', [symbol, name]);
@@ -11529,9 +11703,19 @@ app.post('/api/equity/create', async (req, res) => {
       to: factoryAddr,
       data,
     }]);
-    res.json({ txHash });
+    if (waitReceipt) {
+      await waitForReceipt(txHash);
+      invalidateListingsCaches();
+      return res.json({ txHash, status: 'confirmed' });
+    }
+    invalidateListingsCaches();
+    res.json({ txHash, status: 'submitted' });
   } catch (err) {
-    res.status(502).json({ error: toUserErrorMessage(err.message) });
+    const message = toUserErrorMessage(err.message);
+    if (String(message).toLowerCase().includes('symbol already listed')) {
+      return res.status(409).json({ error: 'symbol already listed' });
+    }
+    res.status(502).json({ error: message });
   }
 });
 // mint equity token
@@ -11560,6 +11744,14 @@ app.post('/api/equity/mint', async (req, res) => {
   }
 
   try {
+    const waitReceiptRaw = req.query.waitReceipt;
+    let waitReceipt = false;
+    if (String(waitReceiptRaw || '').toLowerCase() === '1') {
+      waitReceipt = true;
+    }
+    if (String(waitReceiptRaw || '').toLowerCase() === 'true') {
+      waitReceipt = true;
+    }
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
     let minter = deployments.admin;
@@ -11585,11 +11777,27 @@ app.post('/api/equity/mint', async (req, res) => {
       to: tokenAddr,
       data: mintData,
     }]);
-    const receipt = await waitForReceipt(txHash);
-    const blockNumber = parseRpcInt(receipt.blockNumber);
-    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
     const entryPriceCents = await resolveEntryPriceCentsForSymbol(symbol, deployments);
-    appendManualMintActivity({
+    if (waitReceipt) {
+      const receipt = await waitForReceipt(txHash);
+      const blockNumber = parseRpcInt(receipt.blockNumber);
+      const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+      appendManualMintActivity({
+        wallet: to,
+        tokenAddress: tokenAddr,
+        symbol,
+        assetType: 'EQUITY',
+        amountWei: amountWei.toString(),
+        priceCents: entryPriceCents,
+        reason: 'MINT_EQUITY',
+        txHash,
+        blockNumber,
+        timestampMs,
+      });
+      invalidatePortfolioCachesForWallet(to);
+      return res.json({ txHash, tokenAddress: tokenAddr, status: 'confirmed' });
+    }
+    appendManualMintActivityAfterReceipt({
       wallet: to,
       tokenAddress: tokenAddr,
       symbol,
@@ -11598,10 +11806,9 @@ app.post('/api/equity/mint', async (req, res) => {
       priceCents: entryPriceCents,
       reason: 'MINT_EQUITY',
       txHash,
-      blockNumber,
-      timestampMs,
     });
-    res.json({ txHash, tokenAddress: tokenAddr });
+    invalidatePortfolioCachesForWallet(to);
+    res.json({ txHash, tokenAddress: tokenAddr, status: 'submitted' });
   } catch (err) {
     res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
@@ -11640,6 +11847,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
   }
 
   try {
+    const waitReceiptRaw = req.query.waitReceipt;
+    let waitReceipt = false;
+    if (String(waitReceiptRaw || '').toLowerCase() === '1') {
+      waitReceipt = true;
+    }
+    if (String(waitReceiptRaw || '').toLowerCase() === 'true') {
+      waitReceipt = true;
+    }
     const deployments = loadDeployments();
     const factoryAddr = deployments.equityTokenFactory;
     const registryAddr = deployments.listingsRegistry;
@@ -11681,6 +11896,7 @@ app.post('/api/equity/create-mint', async (req, res) => {
 
       lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
       [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
+      invalidateListingsCaches();
     }
     if (tokenAddr === ethers.ZeroAddress) {
       return res.status(404).json({ error: `` });
@@ -11693,11 +11909,27 @@ app.post('/api/equity/create-mint', async (req, res) => {
       to: tokenAddr,
       data: mintData,
     }]);
-    const receipt = await waitForReceipt(mintTx);
-    const blockNumber = parseRpcInt(receipt.blockNumber);
-    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
     const entryPriceCents = await resolveEntryPriceCentsForSymbol(symbol, deployments);
-    appendManualMintActivity({
+    if (waitReceipt) {
+      const receipt = await waitForReceipt(mintTx);
+      const blockNumber = parseRpcInt(receipt.blockNumber);
+      const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+      appendManualMintActivity({
+        wallet: to,
+        tokenAddress: tokenAddr,
+        symbol,
+        assetType: 'EQUITY',
+        amountWei: amountWei.toString(),
+        priceCents: entryPriceCents,
+        reason: 'MINT_EQUITY',
+        txHash: mintTx,
+        blockNumber,
+        timestampMs,
+      });
+      invalidatePortfolioCachesForWallet(to);
+      return res.json({ createTx, mintTx, tokenAddress: tokenAddr, status: 'confirmed' });
+    }
+    appendManualMintActivityAfterReceipt({
       wallet: to,
       tokenAddress: tokenAddr,
       symbol,
@@ -11706,10 +11938,9 @@ app.post('/api/equity/create-mint', async (req, res) => {
       priceCents: entryPriceCents,
       reason: 'MINT_EQUITY',
       txHash: mintTx,
-      blockNumber,
-      timestampMs,
     });
-    res.json({ createTx, mintTx, tokenAddress: tokenAddr });
+    invalidatePortfolioCachesForWallet(to);
+    res.json({ createTx, mintTx, tokenAddress: tokenAddr, status: 'submitted' });
   } catch (err) {
     res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
