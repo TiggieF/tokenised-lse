@@ -4663,7 +4663,9 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
     lastScannedBlock + 1 - MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS,
   );
   const seen = new Set();
+  const touched = new Set();
   const cachedHolders = normalizeHolderArray(current.holders);
+  const cachedNonZeroHolders = normalizeHolderArray(current.nonZeroHolders);
   for (let i = 0; i < cachedHolders.length; i += 1) {
     seen.add(cachedHolders[i].toLowerCase());
   }
@@ -4682,9 +4684,11 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
       const to = normalizeAddress(parsed.args.to);
       if (from && from !== ethers.ZeroAddress) {
         seen.add(from.toLowerCase());
+        touched.add(from.toLowerCase());
       }
       if (to && to !== ethers.ZeroAddress) {
         seen.add(to.toLowerCase());
+        touched.add(to.toLowerCase());
       }
     } catch {
     }
@@ -4702,10 +4706,24 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
     deploymentBlock,
     lastScannedBlock: endBlock,
     holders: rows,
+    nonZeroHolders: cachedNonZeroHolders,
     updatedAtMs: Date.now(),
   };
   writeMerkleHolderScanState(state);
-  return rows;
+  const touchedRows = [];
+  const touchedValues = Array.from(touched.values());
+  for (let i = 0; i < touchedValues.length; i += 1) {
+    const normalized = normalizeAddress(touchedValues[i]);
+    if (normalized && normalized !== ethers.ZeroAddress) {
+      touchedRows.push(normalized);
+    }
+  }
+  touchedRows.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  return {
+    holders: rows,
+    touchedHolders: touchedRows,
+    cachedNonZeroHolders,
+  };
 }
 
 function getDefaultAutoTradeState() {
@@ -8730,7 +8748,14 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
     }
 
     const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
-    const holders = await collectHolderCandidatesFromChain(tokenAddress, latestBlockHex);
+    const holderScan = await collectHolderCandidatesFromChain(tokenAddress, latestBlockHex);
+    const holders = Array.isArray(holderScan.holders) ? holderScan.holders : [];
+    const touchedHolders = Array.isArray(holderScan.touchedHolders) ? holderScan.touchedHolders : [];
+    const cachedNonZeroHolders = Array.isArray(holderScan.cachedNonZeroHolders) ? holderScan.cachedNonZeroHolders : [];
+    let holdersForBalanceCheck = normalizeHolderArray(cachedNonZeroHolders.concat(touchedHolders));
+    if (holdersForBalanceCheck.length === 0) {
+      holdersForBalanceCheck = holders;
+    }
 
     const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
     const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
@@ -8738,7 +8763,7 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
     const nextEpochId = Number(countRaw) + 1;
 
     const holderReadConcurrency = NETWORK_NAME === 'sepolia' ? 8 : 4;
-    const claimRows = await mapWithConcurrency(holders, holderReadConcurrency, async (account) => {
+    const claimRows = await mapWithConcurrency(holdersForBalanceCheck, holderReadConcurrency, async (account) => {
       const balData = equityTokenSnapshotInterface.encodeFunctionData('balanceOfAt', [account, BigInt(snapshotId)]);
       const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
       const [balanceRaw] = equityTokenSnapshotInterface.decodeFunctionResult('balanceOfAt', balResult);
@@ -8840,6 +8865,7 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       symbol,
       tokenAddress,
       snapshotId,
+      snapshotTxHash,
       merkleRoot: root,
       totalEntitledWei: totalEntitledWei.toString(),
       contentHash,
@@ -8857,6 +8883,25 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       merkleRoot: root,
       claims,
     });
+    const holderScanState = readMerkleHolderScanState();
+    if (!holderScanState.tokens || typeof holderScanState.tokens !== 'object') {
+      holderScanState.tokens = {};
+    }
+    const tokenKey = tokenAddress.toLowerCase();
+    const currentTokenState = holderScanState.tokens[tokenKey] || {};
+    const nonZeroHolders = [];
+    for (let i = 0; i < claims.length; i += 1) {
+      const account = normalizeAddress(claims[i].account);
+      if (account) {
+        nonZeroHolders.push(account);
+      }
+    }
+    holderScanState.tokens[tokenKey] = {
+      ...currentTokenState,
+      nonZeroHolders: normalizeHolderArray(nonZeroHolders),
+      updatedAtMs: Date.now(),
+    };
+    writeMerkleHolderScanState(holderScanState);
 
     res.json({
       txHash: declareTxHash,
@@ -8864,6 +8909,7 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       symbol,
       tokenAddress,
       snapshotId,
+      snapshotTxHash,
       divPerShareWei: divPerShareWei.toString(),
       merkleRoot: root,
       totalEntitledWei: totalEntitledWei.toString(),
