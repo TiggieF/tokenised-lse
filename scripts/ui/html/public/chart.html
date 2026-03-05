@@ -1172,8 +1172,20 @@
 
     async function loadListedSymbols() {
       const fallbackSymbols = ["TSLA", "AAPL", "MSFT"];
+      const useFallback = function () {
+        symbolInput.innerHTML = "";
+        for (const symbol of fallbackSymbols) {
+          const opt = document.createElement("option");
+          opt.value = symbol;
+          opt.textContent = symbol;
+          symbolInput.appendChild(opt);
+        }
+      };
       try {
-        const res = await fetch("/api/registry/listings");
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 4000);
+        const res = await fetch("/api/registry/listings", { signal: controller.signal });
+        clearTimeout(timer);
         const data = await res.json();
         let listings = [];
         if (Array.isArray(data.listings)) {
@@ -1181,12 +1193,7 @@
         }
         symbolInput.innerHTML = "";
         if (!listings.length) {
-          for (const symbol of fallbackSymbols) {
-            const opt = document.createElement("option");
-            opt.value = symbol;
-            opt.textContent = symbol;
-            symbolInput.appendChild(opt);
-          }
+          useFallback();
         } else {
           for (const item of listings) {
             let symbolValue = "";
@@ -1202,13 +1209,7 @@
           }
         }
       } catch {
-        symbolInput.innerHTML = "";
-        for (const symbol of fallbackSymbols) {
-          const opt = document.createElement("option");
-          opt.value = symbol;
-          opt.textContent = symbol;
-          symbolInput.appendChild(opt);
-        }
+        useFallback();
       }
       let selected = fallbackSymbols[0];
       const selectedRaw = symbolInput.value.trim().toUpperCase();
@@ -1448,7 +1449,7 @@
       if (!livePollingEnabled) {
         return;
       }
-      livePoller = setInterval(loadLivePrice, 2000);
+      livePoller = setInterval(loadLivePrice, 10000);
       liveTicker = setInterval(renderLiveUpdated, 1000);
     }
 

@@ -245,7 +245,7 @@
 
     <div class="section-header">
       <h2 class="section-title">Claimable Dividends</h2>
-      <div id="dividends-status" class="status">Ready</div>
+      <div id="dividends-status" class="status">Loading</div>
     </div>
     <table>
       <thead>
@@ -260,7 +260,7 @@
 
     <div class="section-header">
       <h2 class="section-title">Leveraged Tokens</h2>
-      <div id="leveraged-status" class="status">Ready</div>
+      <div id="leveraged-status" class="status">Loading</div>
     </div>
     <table>
       <thead>
@@ -292,8 +292,8 @@
 
     let currentWallet = "";
     let pollingEnabled = false;
-    let fullRefreshPoller;
     let livePricePoller;
+    let walletActivityPoller;
     let refreshInFlight = false;
     let refreshQueued = false;
     let currentSummary = null;
@@ -304,9 +304,11 @@
     let portfolioLoadedOnce = false;
     let lastPortfolioSignal = "";
     let gasRefreshPromise = null;
+    let lastKnownWalletNonce = null;
+    let refreshRequestId = 0;
     const PORTFOLIO_SIGNAL_KEY = "tlse:portfolio:refresh";
-    const FULL_REFRESH_INTERVAL_MS = 60000;
-    const LIVE_PRICE_INTERVAL_MS = 5000;
+    const LIVE_PRICE_INTERVAL_MS = 10000;
+    const WALLET_ACTIVITY_INTERVAL_MS = 10000;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
 
     async function ensureSepoliaNetwork() {
@@ -501,24 +503,35 @@
       return `${num.toFixed(6)} ETH`;
     }
 
+    function toBigIntOrZero(value) {
+      try {
+        if (value === undefined || value === null) {
+          return 0n;
+        }
+        return BigInt(String(value));
+      } catch {
+        return 0n;
+      }
+    }
+
     function renderSummary(summary) {
       if (!summary) {
         return;
       }
-      const totalValueWei = BigInt(String(summary.totalValueWei));
+      const totalValueWei = toBigIntOrZero(summary.totalValueWei);
       let stockValueWei = 0n;
       let totalCostBasisWei = 0n;
       for (let i = 0; i < currentPositions.length; i += 1) {
         const row = currentPositions[i];
         const display = getDisplayPositionValues(row);
         stockValueWei += display.currentValueWei;
-        totalCostBasisWei += BigInt(String(row.costBasisWei || "0"));
+        totalCostBasisWei += toBigIntOrZero(row.costBasisWei);
       }
       if (totalCostBasisWei === 0n) {
-        totalCostBasisWei = BigInt(String(summary.totalCostBasisWei || "0"));
+        totalCostBasisWei = toBigIntOrZero(summary.totalCostBasisWei);
       }
-      const leveragedValueWei = BigInt(String(summary.leveragedValueWei || "0"));
-      const cashValueWei = BigInt(String(summary.cashValueWei || "0"));
+      const leveragedValueWei = toBigIntOrZero(summary.leveragedValueWei);
+      const cashValueWei = toBigIntOrZero(summary.cashValueWei);
       const computedTotalValueWei = cashValueWei + stockValueWei + leveragedValueWei;
       const profitWei = totalValueWei - totalCostBasisWei;
       const nativeSymbol = summary.nativeSymbol ? String(summary.nativeSymbol) : "SepoliaETH";
@@ -540,6 +553,25 @@
         card.innerHTML = `<div class="summary-label">${label}</div><div class="summary-value">${value}</div>`;
         summaryGrid.appendChild(card);
       }
+    }
+
+    function clearPortfolioViewForWalletSwitch() {
+      summaryGrid.innerHTML = "";
+      marketAlert.style.display = "none";
+      marketAlert.textContent = "";
+      currentSummary = null;
+      currentPositions = [];
+      currentClaimables = [];
+      currentLeveragedPositions = [];
+      liveQuoteBySymbol = {};
+      portfolioLoadedOnce = false;
+      positionsBody.innerHTML = '<tr><td colspan="7" class="muted">Loading</td></tr>';
+      dividendsBody.innerHTML = '<tr><td colspan="3" class="muted">Loading</td></tr>';
+      leveragedBody.innerHTML = '<tr><td colspan="6" class="muted">Loading</td></tr>';
+      holdingsStatus.textContent = "Loading";
+      dividendsStatus.textContent = "Loading";
+      leveragedStatus.textContent = "Loading";
+      lastKnownWalletNonce = null;
     }
 
     async function refreshGasSummaryInBackground() {
@@ -921,6 +953,25 @@
       }
     }
 
+    async function fetchJsonWithRetry(url, timeoutMs = 8000, attempts = 3) {
+      let last = null;
+      for (let i = 0; i < attempts; i += 1) {
+        try {
+          const result = await fetchJsonWithTimeout(url, timeoutMs);
+          last = result;
+          if (result.res && result.res.ok && result.data && !result.data.error) {
+            return result;
+          }
+        } catch {
+        }
+        if (i < attempts - 1) {
+          const waitMs = 400 * (i + 1);
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+      }
+      return last;
+    }
+
     async function refreshLiveQuotes() {
       const symbols = new Set();
       for (let i = 0; i < currentPositions.length; i += 1) {
@@ -973,7 +1024,7 @@
       renderSummary(currentSummary);
     }
 
-    async function refreshPortfolio() {
+    async function refreshPortfolio(forceFresh = false) {
       if (!isValidWalletAddress(currentWallet)) {
         holdingsStatus.textContent = "Wallet not connected";
         return;
@@ -992,46 +1043,41 @@
       }
       try {
         holdingsStatus.textContent = portfolioLoadedOnce ? "Refreshing" : "Loading";
-        const results = await Promise.allSettled([
-          fetchJsonWithTimeout(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
-          fetchJsonWithTimeout(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
-          fetchJsonWithTimeout(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
-          fetchJsonWithTimeout(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
-          fetchJsonWithTimeout("/api/admin/symbols/status"),
-        ]);
+        dividendsStatus.textContent = "Loading";
+        leveragedStatus.textContent = "Loading";
+        const requestId = ++refreshRequestId;
+        let freshnessQuery = "";
+        if (forceFresh) {
+          freshnessQuery = "&noCache=1";
+        }
+        const claimablesPromise = fetchJsonWithRetry(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`, 12000, 2);
+        const leveragedPromise = fetchJsonWithRetry(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`, 12000, 2);
+        const summaryResult = await fetchJsonWithRetry(
+          `/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}${freshnessQuery}`,
+          15000,
+          3
+        );
+        if (requestId !== refreshRequestId) {
+          return;
+        }
 
         let summaryData = null;
         let positionsData = null;
-        let claimablesData = null;
-        let leveragedData = null;
-        let lifecycleData = null;
-
-        if (results[0].status === "fulfilled") {
-          summaryData = results[0].value.data;
+        if (summaryResult && summaryResult.data && !summaryResult.data.error) {
+          summaryData = summaryResult.data;
         }
-        if (results[1].status === "fulfilled") {
-          positionsData = results[1].value.data;
+        if (summaryData && Array.isArray(summaryData.positions)) {
+          positionsData = { positions: summaryData.positions };
+        } else {
+          const positionsResult = await fetchJsonWithRetry(
+            `/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}${freshnessQuery}`,
+            12000,
+            2
+          );
+          if (positionsResult && positionsResult.data && !positionsResult.data.error) {
+            positionsData = positionsResult.data;
+          }
         }
-        if (results[2].status === "fulfilled") {
-          claimablesData = results[2].value.data;
-        }
-        if (results[3].status === "fulfilled") {
-          leveragedData = results[3].value.data;
-        }
-        if (results[4].status === "fulfilled") {
-          lifecycleData = results[4].value.data;
-        }
-
-        let lifecycleRows = [];
-        if (lifecycleData && Array.isArray(lifecycleData.symbols)) {
-          lifecycleRows = lifecycleData.symbols;
-        }
-        lifecycleBySymbol = {};
-        for (let i = 0; i < lifecycleRows.length; i += 1) {
-          const row = lifecycleRows[i];
-          lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
-        }
-
         let summaryOk = false;
         if (summaryData && !summaryData.error) {
           summaryOk = true;
@@ -1042,6 +1088,29 @@
         }
         if (summaryOk) {
           currentSummary = summaryData;
+        }
+        if (!summaryOk && !currentSummary) {
+          const cashResult = await fetchJsonWithRetry(
+            `/api/ttoken/balance?address=${encodeURIComponent(currentWallet)}`,
+            8000,
+            2
+          );
+          let cashWei = "0";
+          if (cashResult && cashResult.data && !cashResult.data.error && cashResult.data.balanceWei) {
+            cashWei = String(cashResult.data.balanceWei);
+          }
+          currentSummary = {
+            wallet: currentWallet,
+            nativeSymbol: "SepoliaETH",
+            nativeEthWei: "0",
+            cashValueWei: cashWei,
+            stockValueWei: "0",
+            leveragedValueWei: "0",
+            totalValueWei: "0",
+            totalCostBasisWei: "0",
+            overallGasUsedUnits: "0",
+            overallGasCostWei: "0",
+          };
         }
         if (positionsOk) {
           currentPositions = positionsData.positions;
@@ -1055,12 +1124,18 @@
         refreshGasSummaryInBackground();
         if (summaryOk && positionsOk) {
           holdingsStatus.textContent = "";
-        } else if (portfolioLoadedOnce) {
-          holdingsStatus.textContent = "Showing latest available data";
         } else {
-          holdingsStatus.textContent = "Partial data loaded (RPC/indexer still syncing)";
+          holdingsStatus.textContent = "Loading";
         }
 
+        let claimablesData = null;
+        const claimablesResult = await claimablesPromise;
+        if (requestId !== refreshRequestId) {
+          return;
+        }
+        if (claimablesResult && claimablesResult.data) {
+          claimablesData = claimablesResult.data;
+        }
         let claimablesOk = false;
         if (claimablesData && !claimablesData.error && Array.isArray(claimablesData.claimables)) {
           claimablesOk = true;
@@ -1069,14 +1144,19 @@
           currentClaimables = claimablesData.claimables;
           renderClaimables(currentClaimables);
           dividendsStatus.textContent = "Ready";
-        } else if (currentClaimables.length > 0) {
-          renderClaimables(currentClaimables);
-          dividendsStatus.textContent = "Showing last loaded data";
         } else {
           renderClaimables([]);
-          dividendsStatus.textContent = "Slow / unavailable right now";
+          dividendsStatus.textContent = "Loading";
         }
 
+        let leveragedData = null;
+        const leveragedResult = await leveragedPromise;
+        if (requestId !== refreshRequestId) {
+          return;
+        }
+        if (leveragedResult && leveragedResult.data) {
+          leveragedData = leveragedResult.data;
+        }
         let leveragedOk = false;
         if (leveragedData && !leveragedData.error && Array.isArray(leveragedData.positions)) {
           leveragedOk = true;
@@ -1085,12 +1165,9 @@
           currentLeveragedPositions = leveragedData.positions;
           renderLeveragedPositions(currentLeveragedPositions);
           leveragedStatus.textContent = "Ready";
-        } else if (currentLeveragedPositions.length > 0) {
-          renderLeveragedPositions(currentLeveragedPositions);
-          leveragedStatus.textContent = "Showing last loaded data";
         } else {
           renderLeveragedPositions([]);
-          leveragedStatus.textContent = "Slow / unavailable right now";
+          leveragedStatus.textContent = "Loading";
         }
         await refreshLiveQuotes();
       } finally {
@@ -1104,24 +1181,55 @@
 
     function setPolling(enabled) {
       pollingEnabled = enabled;
-      if (fullRefreshPoller) {
-        clearInterval(fullRefreshPoller);
-      }
       if (livePricePoller) {
         clearInterval(livePricePoller);
       }
       if (enabled) {
-        refreshPortfolio();
-        fullRefreshPoller = setInterval(refreshPortfolio, FULL_REFRESH_INTERVAL_MS);
         livePricePoller = setInterval(refreshLiveQuotes, LIVE_PRICE_INTERVAL_MS);
       }
     }
 
-    refreshBtn.addEventListener("click", refreshPortfolio);
+    async function checkWalletActivityAndRefresh() {
+      if (!isValidWalletAddress(currentWallet) || !window.ethereum) {
+        return;
+      }
+      try {
+        const nonceHex = await window.ethereum.request({
+          method: "eth_getTransactionCount",
+          params: [currentWallet, "latest"],
+        });
+        const nonce = Number(nonceHex);
+        if (!Number.isFinite(nonce)) {
+          return;
+        }
+        if (lastKnownWalletNonce === null) {
+          lastKnownWalletNonce = nonce;
+          return;
+        }
+        if (nonce !== lastKnownWalletNonce) {
+          lastKnownWalletNonce = nonce;
+          refreshPortfolio();
+        }
+      } catch {
+      }
+    }
+
+    function startWalletActivityListener() {
+      if (walletActivityPoller) {
+        clearInterval(walletActivityPoller);
+      }
+      walletActivityPoller = setInterval(checkWalletActivityAndRefresh, WALLET_ACTIVITY_INTERVAL_MS);
+      checkWalletActivityAndRefresh();
+    }
+
+    refreshBtn.addEventListener("click", function () {
+      refreshPortfolio(true);
+    });
 
     window.ethereum.on("accountsChanged", function (accounts) {
       currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
+      clearPortfolioViewForWalletSwitch();
       refreshPortfolio();
     });
     window.ethereum.on("chainChanged", function () {
@@ -1151,6 +1259,7 @@
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
+      clearPortfolioViewForWalletSwitch();
       try {
         const lifecycleRes = await fetch("/api/admin/symbols/status");
         const lifecycleData = await lifecycleRes.json();
@@ -1167,6 +1276,7 @@
         lifecycleBySymbol = {};
       }
       await refreshPortfolio();
+      startWalletActivityListener();
       setPolling(pollingEnabled);
     })();
 

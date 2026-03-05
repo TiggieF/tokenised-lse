@@ -260,6 +260,27 @@
       }
     }
 
+    function signalShellNotification(title, message) {
+      const timestampMs = Date.now();
+      const payload = {
+        id: `mint:${currentAccount || ""}:${timestampMs}:${String(title || "")}`,
+        title: String(title || "Notification"),
+        message: String(message || ""),
+        wallet: currentAccount,
+        timestampMs,
+      };
+      try {
+        localStorage.setItem("tlse:notify", JSON.stringify(payload));
+      } catch {
+      }
+      if (window.parent && window.parent !== window) {
+        try {
+          window.parent.postMessage({ type: "SHELL_NOTIFY", payload }, "*");
+        } catch {
+        }
+      }
+    }
+
     equityMinusBtn.addEventListener("click", function () {
       let nextValue = equityAmount - STEP;
       if (nextValue < 100) {
@@ -306,6 +327,7 @@
         } else {
           setStatus("Airdrop sent: submitted");
         }
+        signalShellNotification("TToken mint completed", `${parsedAmount} TToken minted`);
         signalPortfolioRefresh("ttoken_airdrop");
         importHint.style.display = "block";
         importHint.textContent = `token address: ${ttokenAddress}`;
@@ -350,6 +372,7 @@
         if (!mintHash && data.txHash) {
           mintHash = data.txHash;
         }
+        signalShellNotification("Equity mint completed", `${equitySymbol.value} qty ${equityAmount}`);
         signalPortfolioRefresh("equity_mint");
         setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value} Tx: ${mintHash}`);
         equityImportHint.style.display = "block";

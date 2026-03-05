@@ -396,6 +396,27 @@
       }
     }
 
+    function signalShellNotification(title, message) {
+      const timestampMs = Date.now();
+      const payload = {
+        id: `sell:${currentAccount || ""}:${timestampMs}:${String(title || "")}`,
+        title: String(title || "Notification"),
+        message: String(message || ""),
+        wallet: currentAccount,
+        timestampMs,
+      };
+      try {
+        localStorage.setItem("tlse:notify", JSON.stringify(payload));
+      } catch {
+      }
+      if (window.parent && window.parent !== window) {
+        try {
+          window.parent.postMessage({ type: "SHELL_NOTIFY", payload }, "*");
+        } catch {
+        }
+      }
+    }
+
     async function submitPreparedTxs(txs) {
       if (!Array.isArray(txs) || txs.length === 0) {
         throw new Error("No transactions prepared");
@@ -512,13 +533,42 @@
       }
       try {
         const symbol = String(symbolLabel.textContent).toUpperCase();
-        const res = await fetch(`/api/equity/balances?address=${encodeURIComponent(currentAccount)}`);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        let res;
+        try {
+          res = await fetch(
+            `/api/equity/balances?address=${encodeURIComponent(currentAccount)}`,
+            { signal: controller.signal }
+          );
+        } finally {
+          clearTimeout(timer);
+        }
         const data = await res.json();
         let nextOwned = 0;
         if (res.ok && Array.isArray(data.balances)) {
           for (let i = 0; i < data.balances.length; i += 1) {
             const row = data.balances[i];
             if (String(row.symbol).toUpperCase() === symbol) {
+              const qty = Number(row.balanceWei) / 1e18;
+              if (Number.isFinite(qty) && qty > 0) {
+                nextOwned = qty;
+              }
+              break;
+            }
+          }
+        }
+        if (!(nextOwned > 0)) {
+          const fallbackRes = await fetch(
+            `/api/portfolio/positions?wallet=${encodeURIComponent(currentAccount)}&noCache=1`
+          );
+          const fallbackData = await fallbackRes.json();
+          if (fallbackRes.ok && Array.isArray(fallbackData.positions)) {
+            for (let i = 0; i < fallbackData.positions.length; i += 1) {
+              const row = fallbackData.positions[i];
+              if (String(row.symbol).toUpperCase() !== symbol) {
+                continue;
+              }
               const qty = Number(row.balanceWei) / 1e18;
               if (Number.isFinite(qty) && qty > 0) {
                 nextOwned = qty;
@@ -826,9 +876,10 @@
           return;
         }
         sellStatus.textContent = "Submitting";
-        const hash = await placeLimitOrder("SELL", priceCents, qty);
+        await placeLimitOrder("SELL", priceCents, qty);
         signalPortfolioRefresh("sell_order_placed");
-        sellStatus.textContent = `Order placed: ${String(hash)}`;
+        signalShellNotification("Sell order submitted", `${String(symbolLabel.textContent)} qty ${qty} at $${(priceCents / 100).toFixed(2)}`);
+        sellStatus.textContent = "Order placed";
       } catch (err) {
         if (err && err.message) {
           sellStatus.textContent = err.message;
@@ -887,8 +938,8 @@
     });
 
     loadLifecycleForCurrentSymbol();
-    setInterval(loadLifecycleForCurrentSymbol, 5000);
-    setInterval(loadSellLivePrice, 1000);
+    setInterval(loadLifecycleForCurrentSymbol, 10000);
+    setInterval(loadSellLivePrice, 10000);
 
   </script>
 </body>

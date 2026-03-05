@@ -463,6 +463,27 @@
       }
     }
 
+    function signalShellNotification(title, message) {
+      const timestampMs = Date.now();
+      const payload = {
+        id: `trade:${currentAccount || ""}:${timestampMs}:${String(title || "")}`,
+        title: String(title || "Notification"),
+        message: String(message || ""),
+        wallet: currentAccount,
+        timestampMs,
+      };
+      try {
+        localStorage.setItem("tlse:notify", JSON.stringify(payload));
+      } catch {
+      }
+      if (window.parent && window.parent !== window) {
+        try {
+          window.parent.postMessage({ type: "SHELL_NOTIFY", payload }, "*");
+        } catch {
+        }
+      }
+    }
+
     async function submitPreparedTxs(txs) {
       if (!Array.isArray(txs) || txs.length === 0) {
         throw new Error("No transactions prepared");
@@ -1034,9 +1055,10 @@
         return;
       }
       showStatus(buyStatus, "Submitting");
-      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      await placeLimitOrder(symbol, "BUY", priceCents, qty);
       signalPortfolioRefresh("buy_order_placed");
-      showStatus(buyStatus, `Order placed: ${String(hash)}`);
+      signalShellNotification("Buy order submitted", `${symbol} qty ${qty} at $${(priceCents / 100).toFixed(2)}`);
+      showStatus(buyStatus, "Order placed");
       await loadTTokenBalance();
     });
 
@@ -1145,6 +1167,7 @@
           txHash = await submitPreparedTxs(data.txs);
         }
         signalPortfolioRefresh("leveraged_buy");
+        signalShellNotification("Leveraged buy completed", `${productSymbol} using ${levTtokenIn.value} TToken`);
         showStatus(levStatus, `Bought leveraged tx ${txHash}`);
         if (data.productToken) {
           levTokenAddress.style.display = "block";
@@ -1187,8 +1210,8 @@
       loadAutoRules();
       loadLeveragedBaseQuote();
     });
-    setInterval(loadLifecycleStatuses, 5000);
-    setInterval(loadTradeLivePrice, 1000);
+    setInterval(loadLifecycleStatuses, 10000);
+    setInterval(loadTradeLivePrice, 10000);
   </script>
 </body>
 </html>

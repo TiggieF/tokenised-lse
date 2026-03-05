@@ -24,6 +24,7 @@ const fmpDetailsCache = new Map();
 const FMP_DETAILS_TTL_MS = 30000;
 const fmpIndexTickerCache = new Map();
 const FMP_INDEX_TTL_MS = 2000;
+const FMP_INDEX_SNAPSHOT_TTL_MS = 10000;
 const INDEXER_SYNC_INTERVAL_MS = 5000;
 // fmp caches
 let FMP_API_KEY = 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
@@ -299,7 +300,18 @@ const leveragedRouterInterface = new ethers.Interface([
   'event LeveragedUnwound(address indexed user,address indexed productToken,string baseSymbol,uint8 leverage,uint256 productInWei,uint256 ttokenOutWei,uint256 navCents)',
 ]);
 
-const INDEXER_DIR = path.join(__dirname, '../../..', 'cache', 'indexer');
+const DEFAULT_CACHE_ROOT_DIR = path.join(__dirname, '../../..', 'cache');
+const PERSISTENT_DATA_ROOT_DIR = (() => {
+  let configured = '';
+  if (process.env.PERSISTENT_DATA_DIR) {
+    configured = String(process.env.PERSISTENT_DATA_DIR).trim();
+  }
+  if (!configured) {
+    return DEFAULT_CACHE_ROOT_DIR;
+  }
+  return path.resolve(configured);
+})();
+const INDEXER_DIR = path.join(PERSISTENT_DATA_ROOT_DIR, 'indexer');
 const INDEXER_STATE_FILE = path.join(INDEXER_DIR, 'state.json');
 const INDEXER_ORDERS_FILE = path.join(INDEXER_DIR, 'orders.json');
 const INDEXER_FILLS_FILE = path.join(INDEXER_DIR, 'fills.json');
@@ -307,14 +319,15 @@ const INDEXER_CANCELLATIONS_FILE = path.join(INDEXER_DIR, 'cancellations.json');
 const INDEXER_CASHFLOWS_FILE = path.join(INDEXER_DIR, 'cashflows.json');
 const INDEXER_TRANSFERS_FILE = path.join(INDEXER_DIR, 'transfers.json');
 const INDEXER_LEVERAGED_FILE = path.join(INDEXER_DIR, 'leveraged.json');
-const AUTOTRADE_DIR = path.join(__dirname, '../../..', 'cache', 'autotrade');
+const GET_LOGS_CHUNK_STATE_FILE = path.join(INDEXER_DIR, 'get-logs-chunk.json');
+const AUTOTRADE_DIR = path.join(PERSISTENT_DATA_ROOT_DIR, 'autotrade');
 const AUTOTRADE_STATE_FILE = path.join(AUTOTRADE_DIR, 'state.json');
 const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
-const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
+const ADMIN_DIR = path.join(PERSISTENT_DATA_ROOT_DIR, 'admin');
 const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
 const LIVE_UPDATES_STATE_FILE = path.join(ADMIN_DIR, 'liveUpdates.json');
 const ADMIN_WALLETS_STATE_FILE = path.join(ADMIN_DIR, 'adminWallets.json');
-const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
+const DIVIDENDS_MERKLE_DIR = path.join(PERSISTENT_DATA_ROOT_DIR, 'dividends-merkle');
 const MERKLE_HOLDER_SCAN_STATE_FILE = path.join(DIVIDENDS_MERKLE_DIR, 'holder-scan-state.json');
 const MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS = (() => {
   const raw = Number(process.env.MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS || '');
@@ -402,6 +415,9 @@ const PORTFOLIO_HOLDINGS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 5000 : 2000
 const PORTFOLIO_RPC_CONCURRENCY = NETWORK_NAME === 'sepolia' ? 4 : 8;
 const ORDERBOOK_CHAIN_FILLS_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
 const PORTFOLIO_GAS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 60000 : 15000;
+const PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY = process.env.PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY
+  ? String(process.env.PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY).toLowerCase() === 'true'
+  : false;
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
@@ -436,6 +452,113 @@ const contractDeploymentBlockCache = new Map();
 const orderbookChainFillsCache = new Map();
 const portfolioGasCache = new Map();
 const portfolioGasInflight = new Map();
+let fmpIndexTickerSnapshot = {
+  timestampMs: 0,
+  rows: [],
+  degraded: false,
+  warnings: [],
+};
+let fmpIndexTickerInflight = null;
+const uiReadCache = new Map();
+const uiReadInflight = new Map();
+const lastKnownPortfolioSummaryByWallet = new Map();
+const lastKnownPortfolioPositionsByWallet = new Map();
+const lastKnownClaimablesByWallet = new Map();
+let persistedGetLogsChunkSize = 0;
+
+const UI_SUMMARY_TTL_MS = 5000;
+const UI_POSITIONS_TTL_MS = 5000;
+const UI_CLAIMABLES_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 10000;
+const UI_FILLS_FAST_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 10000;
+const UI_LISTINGS_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 10000;
+
+function makeUiReadCacheKey(prefix, parts) {
+  const rows = [];
+  if (parts && typeof parts === 'object') {
+    const entries = Object.entries(parts);
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+    for (let i = 0; i < entries.length; i += 1) {
+      const entry = entries[i];
+      rows.push(`${entry[0]}=${String(entry[1])}`);
+    }
+  }
+  return `${prefix}|${rows.join('&')}`;
+}
+
+function readUiReadCache(cacheKey, ttlMs) {
+  const row = uiReadCache.get(cacheKey);
+  if (!row) {
+    return null;
+  }
+  if ((Date.now() - Number(row.timestampMs || 0)) > ttlMs) {
+    uiReadCache.delete(cacheKey);
+    return null;
+  }
+  return row.value;
+}
+
+function writeUiReadCache(cacheKey, value) {
+  uiReadCache.set(cacheKey, {
+    timestampMs: Date.now(),
+    value,
+  });
+}
+
+async function runUiCoalesced(cacheKey, loader) {
+  const existing = uiReadInflight.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+  const task = Promise.resolve().then(loader).finally(() => {
+    if (uiReadInflight.get(cacheKey) === task) {
+      uiReadInflight.delete(cacheKey);
+    }
+  });
+  uiReadInflight.set(cacheKey, task);
+  return task;
+}
+
+async function withTimeout(promise, timeoutMs, timeoutMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
+    }),
+  ]);
+}
+
+function readPersistedGetLogsChunkSize() {
+  try {
+    const payload = readJsonFile(GET_LOGS_CHUNK_STATE_FILE, null);
+    if (!payload || typeof payload !== 'object') {
+      return 0;
+    }
+    const value = Number(payload.chunkSize || 0);
+    if (Number.isFinite(value) && value >= 1) {
+      return Math.floor(value);
+    }
+  } catch {
+  }
+  return 0;
+}
+
+function persistGetLogsChunkSize(chunkSizeRaw) {
+  const chunkSize = Number(chunkSizeRaw);
+  if (!Number.isFinite(chunkSize) || chunkSize < 1) {
+    return;
+  }
+  persistedGetLogsChunkSize = Math.floor(chunkSize);
+  try {
+    ensureIndexerDir();
+    writeJsonFile(GET_LOGS_CHUNK_STATE_FILE, {
+      chunkSize: persistedGetLogsChunkSize,
+      updatedAtMs: Date.now(),
+    });
+  } catch {
+  }
+}
 
 async function enqueueSignerSend(address, job) {
   const key = String(address || '').toLowerCase();
@@ -468,6 +591,19 @@ function getBaseAdminWalletAllowlist() {
   if (IMMUTABLE_ADMIN_WALLET) {
     wallets.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
   }
+  try {
+    const deployments = loadDeployments();
+    const deployedAdmin = normalizeAddress(deployments.admin);
+    if (deployedAdmin) {
+      wallets.add(deployedAdmin.toLowerCase());
+    }
+  } catch {
+  }
+  return wallets;
+}
+
+function getSeedAdminWalletAllowlist() {
+  const wallets = getBaseAdminWalletAllowlist();
   if (process.env.ADMIN_WALLETS) {
     const rawValues = String(process.env.ADMIN_WALLETS)
       .split(',')
@@ -480,31 +616,32 @@ function getBaseAdminWalletAllowlist() {
       }
     }
   }
-  try {
-    const deployments = loadDeployments();
-    const deployedAdmin = normalizeAddress(deployments.admin);
-    if (deployedAdmin) {
-      wallets.add(deployedAdmin.toLowerCase());
-    }
-  } catch {
-  }
   return wallets;
 }
 
 function getDefaultAdminWalletState() {
-  const base = Array.from(getBaseAdminWalletAllowlist())
+  const base = Array.from(getSeedAdminWalletAllowlist())
     .map((item) => normalizeAddress(item))
     .filter(Boolean);
   base.sort((a, b) => a.localeCompare(b));
   return {
     wallets: base,
+    removedWallets: [],
     updatedAtMs: 0,
   };
 }
 
 function readAdminWalletState() {
   ensureAdminDir();
-  return readJsonFile(ADMIN_WALLETS_STATE_FILE, getDefaultAdminWalletState());
+  const fallbackWallets = Array.from(getBaseAdminWalletAllowlist())
+    .map((item) => normalizeAddress(item))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+  return readJsonFile(ADMIN_WALLETS_STATE_FILE, {
+    wallets: fallbackWallets,
+    removedWallets: [],
+    updatedAtMs: 0,
+  });
 }
 
 function writeAdminWalletState(state) {
@@ -515,12 +652,23 @@ function writeAdminWalletState(state) {
 function getAdminWalletAllowlist() {
   const wallets = getBaseAdminWalletAllowlist();
   const state = readAdminWalletState();
+  const removedRowsRaw = Array.isArray(state.removedWallets) ? state.removedWallets : [];
+  const removedSet = new Set();
+  for (let i = 0; i < removedRowsRaw.length; i += 1) {
+    const normalized = normalizeAddress(removedRowsRaw[i]);
+    if (normalized) {
+      removedSet.add(normalized.toLowerCase());
+    }
+  }
   const rows = Array.isArray(state.wallets) ? state.wallets : [];
   for (let i = 0; i < rows.length; i += 1) {
     const normalized = normalizeAddress(rows[i]);
     if (normalized) {
       wallets.add(normalized.toLowerCase());
     }
+  }
+  for (const row of removedSet) {
+    wallets.delete(row);
   }
   return wallets;
 }
@@ -759,11 +907,29 @@ async function sendSignedRpcTransaction(txRequest) {
     tx.chainId = toOptionalNumber(txRequest.chainId);
   }
 
-  const txHash = await enqueueSignerSend(signer.address, async () => {
-    const txResponse = await signer.sendTransaction(tx);
-    return txResponse.hash;
-  });
-  return txHash;
+  let lastError = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const txHash = await enqueueSignerSend(signer.address, async () => {
+        const txResponse = await signer.sendTransaction(tx);
+        return txResponse.hash;
+      });
+      return txHash;
+    } catch (error) {
+      lastError = error;
+      const message = String(error && error.message ? error.message : error);
+      const retryable = isRpcRateLimitError(message);
+      if (!retryable || attempt >= 5) {
+        throw error;
+      }
+      const waitMs = Math.min(10000, 700 * (attempt + 1));
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error('signed tx submit failed');
 }
 
 // connect to rpc and contracts
@@ -874,7 +1040,15 @@ async function getLogsChunked(baseFilter, startBlock, endBlock, preferredChunkSi
   const allLogs = [];
   let from = Number(startBlock);
   const end = Number(endBlock);
-  let chunkSize = Math.max(1, Number(preferredChunkSize) || GET_LOGS_BLOCK_RANGE);
+  let startingChunkSize = Number(preferredChunkSize) || 0;
+  if (!Number.isFinite(startingChunkSize) || startingChunkSize < 1) {
+    if (persistedGetLogsChunkSize >= 1) {
+      startingChunkSize = persistedGetLogsChunkSize;
+    } else {
+      startingChunkSize = GET_LOGS_BLOCK_RANGE;
+    }
+  }
+  let chunkSize = Math.max(1, Math.floor(startingChunkSize));
   let rateRetryCount = 0;
   while (from <= end) {
     const to = Math.min(end, from + chunkSize - 1);
@@ -887,6 +1061,9 @@ async function getLogsChunked(baseFilter, startBlock, endBlock, preferredChunkSi
       allLogs.push(...part);
       from = to + 1;
       rateRetryCount = 0;
+      if (chunkSize > persistedGetLogsChunkSize) {
+        persistGetLogsChunkSize(chunkSize);
+      }
     } catch (err) {
       if (isRpcRateLimitError(err.message)) {
         rateRetryCount += 1;
@@ -906,8 +1083,10 @@ async function getLogsChunked(baseFilter, startBlock, endBlock, preferredChunkSi
       } else {
         chunkSize = Math.max(1, Math.floor(chunkSize / 2));
       }
+      persistGetLogsChunkSize(chunkSize);
     }
   }
+  persistGetLogsChunkSize(chunkSize);
   return allLogs;
 }
 
@@ -1360,6 +1539,47 @@ function collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount) {
   return rowsOut;
 }
 
+function buildOrderbookFillsFallbackFromSnapshot(snapshot) {
+  const rows = Array.isArray(snapshot && snapshot.fills) ? snapshot.fills : [];
+  const out = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (!row) {
+      continue;
+    }
+    const makerId = Number(row.makerId || 0);
+    const takerId = Number(row.takerId || 0);
+    const syntheticManualFill = makerId <= 0 && takerId <= 0;
+    if (syntheticManualFill) {
+      continue;
+    }
+    out.push({
+      makerId,
+      takerId,
+      makerTrader: normalizeAddress(row.makerTrader),
+      takerTrader: normalizeAddress(row.takerTrader),
+      symbol: String(row.symbol || ''),
+      priceCents: Number(row.priceCents || 0),
+      qty: String(row.qtyWei || row.qty || '0'),
+      blockNumber: Number(row.blockNumber || 0),
+      txHash: String(row.txHash || ''),
+      logIndex: Number(row.logIndex || 0),
+      timestampMs: Number(row.timestampMs || 0),
+    });
+  }
+  out.sort((a, b) => {
+    const timestampDiff = b.timestampMs - a.timestampMs;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+    if (b.blockNumber !== a.blockNumber) {
+      return b.blockNumber - a.blockNumber;
+    }
+    return b.logIndex - a.logIndex;
+  });
+  return out;
+}
+
 async function buildWalletGasRowsFromIndexer(wallet, maxCount) {
   await Promise.race([
     ensureIndexerSynced(),
@@ -1407,6 +1627,15 @@ function ensureIndexerDir() {
   if (!fs.existsSync(INDEXER_DIR)) {
     fs.mkdirSync(INDEXER_DIR, { recursive: true });
   }
+}
+
+function ensurePersistentDataRoot() {
+  if (!fs.existsSync(PERSISTENT_DATA_ROOT_DIR)) {
+    fs.mkdirSync(PERSISTENT_DATA_ROOT_DIR, { recursive: true });
+  }
+  const probePath = path.join(PERSISTENT_DATA_ROOT_DIR, '.write-test');
+  fs.writeFileSync(probePath, String(Date.now()));
+  fs.unlinkSync(probePath);
 }
 
 function readJsonFile(filePath, fallbackValue) {
@@ -1662,6 +1891,12 @@ function toUserErrorMessage(messageRaw) {
   }
   if (message.includes('product not found')) {
     return 'Selected leveraged product does not exist';
+  }
+  if (message.includes('compute units per second capacity')) {
+    return 'RPC is rate-limited right now. Please retry in a few seconds.';
+  }
+  if (message.includes('429')) {
+    return 'RPC is rate-limited right now. Please retry in a few seconds.';
   }
   return message;
 }
@@ -3511,15 +3746,18 @@ async function getLeveragedProducts(factoryAddr) {
   return resolved;
 }
 
-async function getPortfolioHoldings(wallet, deployments) {
+async function getPortfolioHoldings(wallet, deployments, options) {
   const aggregatorAddress = normalizeAddress(deployments && deployments.portfolioAggregator);
   if (!aggregatorAddress) {
     return null;
   }
+  const disableCache = Boolean(options && options.disableCache);
   const cacheKey = `${aggregatorAddress}:${normalizeAddress(wallet)}`;
-  const cached = portfolioHoldingsCache.get(cacheKey);
-  if (cached && (Date.now() - cached.timestampMs) < PORTFOLIO_HOLDINGS_CACHE_TTL_MS) {
-    return cached.items;
+  if (!disableCache) {
+    const cached = portfolioHoldingsCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestampMs) < PORTFOLIO_HOLDINGS_CACHE_TTL_MS) {
+      return cached.items;
+    }
   }
   const data = aggregatorInterface.encodeFunctionData('getHoldings', [wallet]);
   const result = await hardhatRpc('eth_call', [{ to: aggregatorAddress, data }, 'latest']);
@@ -3535,10 +3773,12 @@ async function getPortfolioHoldings(wallet, deployments) {
       valueWei: BigInt(row.valueWei.toString()),
     });
   }
-  portfolioHoldingsCache.set(cacheKey, {
-    timestampMs: Date.now(),
-    items,
-  });
+  if (!disableCache) {
+    portfolioHoldingsCache.set(cacheKey, {
+      timestampMs: Date.now(),
+      items,
+    });
+  }
   return items;
 }
 
@@ -3805,10 +4045,10 @@ function formatQtyNumber(balanceWei) {
   return qtyNumber;
 }
 
-async function buildPortfolioPositions(snapshot, wallet, deployments) {
+async function buildPortfolioPositions(snapshot, wallet, deployments, options) {
   const fillRows = buildWalletFillRows(snapshot, wallet);
   const { lotsBySymbol, realizedBySymbol } = buildLotsAndRealized(fillRows);
-  if (!INDEXER_ENABLE_TRANSFERS && fillRows.length > 0) {
+  if (PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY && !INDEXER_ENABLE_TRANSFERS && fillRows.length > 0) {
     const symbolTokenMap = new Map();
     const orderValues = Object.values(snapshot.orders || {});
     for (let i = 0; i < orderValues.length; i += 1) {
@@ -3885,7 +4125,7 @@ async function buildPortfolioPositions(snapshot, wallet, deployments) {
   let listingRows = [];
   let holdingsBySymbol = new Map();
   try {
-    const holdings = await getPortfolioHoldings(wallet, deployments);
+    const holdings = await getPortfolioHoldings(wallet, deployments, options);
     if (holdings && holdings.length > 0) {
       for (let i = 0; i < holdings.length; i += 1) {
         const holding = holdings[i];
@@ -5218,92 +5458,140 @@ app.get('/api/fmp/quote-short', async (req, res) => {
 
 app.get('/api/fmp/index-ticker', async (_req, res) => {
   const now = Date.now();
-  const rows = [];
-
-  for (let i = 0; i < FMP_US_TOP_SYMBOLS.length; i += 1) {
-    const symbol = String(FMP_US_TOP_SYMBOLS[i]).toUpperCase();
-    const cached = fmpIndexTickerCache.get(symbol);
-    let shouldUseCache = false;
-    if (cached) {
-      const ageMs = now - cached.timestamp;
-      if (ageMs < FMP_INDEX_TTL_MS) {
-        shouldUseCache = true;
-      }
-    }
-    if (shouldUseCache) {
-      rows.push(cached.data);
-    } else {
-      try {
-        const payload = await fetchFmpJson(getFmpUrl('quote', { symbol }));
-        let quote = payload;
-        if (Array.isArray(payload)) {
-          quote = payload[0];
-        }
-        const price = Number(pick(quote, ['price', 'regularMarketPrice']));
-        const previousClose = Number(quote.previousClose);
-        const change = Number(quote.change);
-
-        let changePercentRaw = quote.changePercentage;
-        if (!Number.isFinite(Number(changePercentRaw))) {
-          changePercentRaw = quote.changesPercentage;
-        }
-        if (!Number.isFinite(Number(changePercentRaw))) {
-          changePercentRaw = quote.changePercent;
-        }
-
-        let changePercent = NaN;
-        if (typeof changePercentRaw === 'string') {
-          const cleaned = changePercentRaw.replace('%', '').trim();
-          changePercent = Number(cleaned);
-        } else {
-          changePercent = Number(changePercentRaw);
-        }
-
-        // FMP returns percent units (0.53 = 0.53%), UI expects ratio (0.0053)
-        if (Number.isFinite(changePercent)) {
-          changePercent = changePercent / 100;
-        } else if (Number.isFinite(change) && Number.isFinite(previousClose) && previousClose > 0) {
-          changePercent = change / previousClose;
-        }
-        let label = '';
-        if (quote.name) {
-          label = String(quote.name);
-        }
-        if (!label && quote.symbol) {
-          label = String(quote.symbol);
-        }
-        if (!label) {
-          label = symbol;
-        }
-
-        let outputSymbol = symbol;
-        if (quote.symbol) {
-          outputSymbol = String(quote.symbol);
-        }
-        const next = {
-          symbol: outputSymbol,
-          label,
-          price,
-          changePercent,
-        };
-        fmpIndexTickerCache.set(symbol, { data: next, timestamp: now });
-        rows.push(next);
-      } catch (err) {
-        if (cached) {
-          rows.push(cached.data);
-        }
-      }
-    }
+  if ((now - Number(fmpIndexTickerSnapshot.timestampMs || 0)) < FMP_INDEX_SNAPSHOT_TTL_MS) {
+    return res.json({
+      ok: true,
+      updatedAtMs: Number(fmpIndexTickerSnapshot.timestampMs || now),
+      rows: fmpIndexTickerSnapshot.rows,
+      degraded: Boolean(fmpIndexTickerSnapshot.degraded),
+      warnings: fmpIndexTickerSnapshot.warnings,
+    });
   }
 
-  if (rows.length === 0) {
-    return res.status(502).json({ error: 'failed to load stock ticker' });
+  if (!fmpIndexTickerInflight) {
+    fmpIndexTickerInflight = (async () => {
+      const fetchStartedAtMs = Date.now();
+      const warnings = [];
+      const resolved = await mapWithConcurrency(
+        FMP_US_TOP_SYMBOLS,
+        4,
+        async (symbolRaw) => {
+          const symbol = String(symbolRaw).toUpperCase();
+          const cached = fmpIndexTickerCache.get(symbol);
+          let shouldUseCache = false;
+          if (cached) {
+            const ageMs = fetchStartedAtMs - Number(cached.timestamp || 0);
+            if (ageMs < FMP_INDEX_TTL_MS) {
+              shouldUseCache = true;
+            }
+          }
+          if (shouldUseCache) {
+            return cached.data;
+          }
+          try {
+            const payload = await withTimeout(
+              fetchFmpJson(getFmpUrl('quote', { symbol })),
+              1800,
+              `index ticker timeout ${symbol}`
+            );
+            let quote = payload;
+            if (Array.isArray(payload)) {
+              quote = payload[0];
+            }
+            const price = Number(pick(quote, ['price', 'regularMarketPrice']));
+            const previousClose = Number(quote.previousClose);
+            const change = Number(quote.change);
+
+            let changePercentRaw = quote.changePercentage;
+            if (!Number.isFinite(Number(changePercentRaw))) {
+              changePercentRaw = quote.changesPercentage;
+            }
+            if (!Number.isFinite(Number(changePercentRaw))) {
+              changePercentRaw = quote.changePercent;
+            }
+
+            let changePercent = NaN;
+            if (typeof changePercentRaw === 'string') {
+              const cleaned = changePercentRaw.replace('%', '').trim();
+              changePercent = Number(cleaned);
+            } else {
+              changePercent = Number(changePercentRaw);
+            }
+            if (Number.isFinite(changePercent)) {
+              changePercent = changePercent / 100;
+            } else if (Number.isFinite(change) && Number.isFinite(previousClose) && previousClose > 0) {
+              changePercent = change / previousClose;
+            }
+            let label = '';
+            if (quote.name) {
+              label = String(quote.name);
+            }
+            if (!label && quote.symbol) {
+              label = String(quote.symbol);
+            }
+            if (!label) {
+              label = symbol;
+            }
+            let outputSymbol = symbol;
+            if (quote.symbol) {
+              outputSymbol = String(quote.symbol);
+            }
+            const row = {
+              symbol: outputSymbol,
+              label,
+              price,
+              changePercent,
+            };
+            fmpIndexTickerCache.set(symbol, { data: row, timestamp: fetchStartedAtMs });
+            return row;
+          } catch (err) {
+            if (cached && cached.data) {
+              warnings.push(`ticker stale for ${symbol}`);
+              return {
+                ...cached.data,
+                stale: true,
+              };
+            }
+            warnings.push(`ticker unavailable for ${symbol}`);
+            return {
+              symbol,
+              label: symbol,
+              price: 0,
+              changePercent: 0,
+              stale: true,
+            };
+          }
+        }
+      );
+      const rows = [];
+      for (let i = 0; i < resolved.length; i += 1) {
+        if (resolved[i]) {
+          rows.push(resolved[i]);
+        }
+      }
+      let degraded = false;
+      if (warnings.length > 0) {
+        degraded = true;
+      }
+      fmpIndexTickerSnapshot = {
+        timestampMs: Date.now(),
+        rows,
+        degraded,
+        warnings,
+      };
+      return fmpIndexTickerSnapshot;
+    })().finally(() => {
+      fmpIndexTickerInflight = null;
+    });
   }
 
+  const snapshot = await fmpIndexTickerInflight;
   res.json({
     ok: true,
-    updatedAtMs: now,
-    rows,
+    updatedAtMs: Number(snapshot.timestampMs || now),
+    rows: snapshot.rows,
+    degraded: Boolean(snapshot.degraded),
+    warnings: snapshot.warnings,
   });
 });
 
@@ -6380,7 +6668,7 @@ app.get('/api/hardhat/accounts', async (_req, res) => {
     }
     res.json({ accounts });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 // rest api to get token address
@@ -6424,18 +6712,8 @@ app.get('/api/admin/wallets', (req, res) => {
       return res.status(403).json({ error: 'admin wallet required' });
     }
     const state = readAdminWalletState();
-    const rows = Array.isArray(state.wallets) ? state.wallets : [];
-    const set = new Set();
-    if (IMMUTABLE_ADMIN_WALLET) {
-      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
-    }
-    for (let i = 0; i < rows.length; i += 1) {
-      const normalized = normalizeAddress(rows[i]);
-      if (normalized) {
-        set.add(normalized.toLowerCase());
-      }
-    }
-    const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
+    const allowlist = getAdminWalletAllowlist();
+    const wallets = Array.from(allowlist).map((item) => normalizeAddress(item)).filter(Boolean);
     wallets.sort((a, b) => a.localeCompare(b));
     res.json({
       wallets,
@@ -6463,21 +6741,34 @@ app.post('/api/admin/wallets/add', (req, res) => {
     }
     const state = readAdminWalletState();
     const set = new Set();
-    if (IMMUTABLE_ADMIN_WALLET) {
-      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
+    const base = getBaseAdminWalletAllowlist();
+    for (const row of base) {
+      set.add(String(row).toLowerCase());
     }
     const rows = Array.isArray(state.wallets) ? state.wallets : [];
+    const removedRows = Array.isArray(state.removedWallets) ? state.removedWallets : [];
     for (let i = 0; i < rows.length; i += 1) {
       const normalized = normalizeAddress(rows[i]);
       if (normalized) {
         set.add(normalized.toLowerCase());
       }
     }
+    const removedSet = new Set();
+    for (let i = 0; i < removedRows.length; i += 1) {
+      const normalized = normalizeAddress(removedRows[i]);
+      if (normalized) {
+        removedSet.add(normalized.toLowerCase());
+      }
+    }
     set.add(targetWallet.toLowerCase());
+    removedSet.delete(targetWallet.toLowerCase());
     const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
     wallets.sort((a, b) => a.localeCompare(b));
+    const removedWallets = Array.from(removedSet).map((item) => normalizeAddress(item)).filter(Boolean);
+    removedWallets.sort((a, b) => a.localeCompare(b));
     const next = {
       wallets,
+      removedWallets,
       updatedAtMs: Date.now(),
     };
     writeAdminWalletState(next);
@@ -6505,15 +6796,17 @@ app.post('/api/admin/wallets/remove', (req, res) => {
     if (!targetWallet) {
       return res.status(400).json({ error: 'targetWallet must be a valid address' });
     }
-    if (IMMUTABLE_ADMIN_WALLET && targetWallet.toLowerCase() === IMMUTABLE_ADMIN_WALLET.toLowerCase()) {
-      return res.status(400).json({ error: 'cannot remove immutable admin wallet' });
+    const base = getBaseAdminWalletAllowlist();
+    if (base.has(targetWallet.toLowerCase())) {
+      return res.status(400).json({ error: 'cannot remove core admin wallet' });
     }
     const state = readAdminWalletState();
     const set = new Set();
-    if (IMMUTABLE_ADMIN_WALLET) {
-      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
+    for (const row of base) {
+      set.add(String(row).toLowerCase());
     }
     const rows = Array.isArray(state.wallets) ? state.wallets : [];
+    const removedRows = Array.isArray(state.removedWallets) ? state.removedWallets : [];
     for (let i = 0; i < rows.length; i += 1) {
       const normalized = normalizeAddress(rows[i]);
       if (normalized) {
@@ -6523,10 +6816,21 @@ app.post('/api/admin/wallets/remove', (req, res) => {
         }
       }
     }
+    const removedSet = new Set();
+    for (let i = 0; i < removedRows.length; i += 1) {
+      const normalized = normalizeAddress(removedRows[i]);
+      if (normalized) {
+        removedSet.add(normalized.toLowerCase());
+      }
+    }
+    removedSet.add(targetWallet.toLowerCase());
     const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
     wallets.sort((a, b) => a.localeCompare(b));
+    const removedWallets = Array.from(removedSet).map((item) => normalizeAddress(item)).filter(Boolean);
+    removedWallets.sort((a, b) => a.localeCompare(b));
     const next = {
       wallets,
+      removedWallets,
       updatedAtMs: Date.now(),
     };
     writeAdminWalletState(next);
@@ -6562,7 +6866,7 @@ app.get('/api/ttoken/balance', async (req, res) => {
     const [balanceWei] = equityTokenInterface.decodeFunctionResult('balanceOf', result);
     res.json({ address, ttokenAddress, balanceWei: balanceWei.toString() });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -6632,7 +6936,7 @@ app.post('/api/ttoken/mint', async (req, res) => {
     });
     res.json({ txHash });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -6789,16 +7093,113 @@ app.get('/api/orderbook/open', async (_req, res) => {
 });
 
 // rest api to get all the filled orders
-app.get('/api/orderbook/fills', async (_req, res) => {
+app.get('/api/orderbook/fills', async (req, res) => {
   try {
     const deployments = loadDeployments();
-    const fills = await fetchOrderbookFillsFromChain(
-      deployments.orderBookDex,
-      deployments.listingsRegistry
-    );
-    res.json({ fills });
+    const chainCacheKey = `${deployments.orderBookDex}:${deployments.listingsRegistry}`;
+    const chainCached = orderbookChainFillsCache.get(chainCacheKey);
+    const chainCachedRows = chainCached && Array.isArray(chainCached.rows) ? chainCached.rows : [];
+    const chainCacheAgeMs = chainCached ? (Date.now() - Number(chainCached.timestampMs || 0)) : Number.MAX_SAFE_INTEGER;
+    const chainCacheFresh = chainCached && chainCachedRows.length > 0 && chainCacheAgeMs < ORDERBOOK_CHAIN_FILLS_TTL_MS;
+    const fastFlag = String(req.query.fast || '').toLowerCase() === '1'
+      || String(req.query.fast || '').toLowerCase() === 'true';
+    let mode = String(req.query.mode || '').toLowerCase();
+    if (!mode) {
+      mode = fastFlag ? 'fast' : 'fast';
+    }
+    if (mode !== 'chain') {
+      mode = 'fast';
+    }
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const snapshot = readIndexerSnapshot();
+    const fallbackRows = buildOrderbookFillsFallbackFromSnapshot(snapshot);
+    const cacheKey = makeUiReadCacheKey('orderbook-fills', {
+      mode,
+      orderBook: deployments.orderBookDex,
+      registry: deployments.listingsRegistry,
+    });
+    let allowUiRouteCache = false;
+    if (!disableCache && mode === 'fast') {
+      allowUiRouteCache = true;
+    }
+    if (allowUiRouteCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_FILLS_FAST_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
+      }
+    }
+
+    if (mode === 'fast') {
+      const payload = await runUiCoalesced(cacheKey, async () => {
+        const nextPayload = {
+          fills: fallbackRows,
+          source: 'indexer_fast',
+          degraded: false,
+          warnings: [],
+        };
+        if (allowUiRouteCache) {
+          writeUiReadCache(cacheKey, nextPayload);
+        }
+        return nextPayload;
+      });
+      return res.json(payload);
+    }
+
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      let warnings = [];
+      let fills = fallbackRows;
+      let source = 'indexer_fallback';
+      let degraded = false;
+      if (chainCacheFresh) {
+        fetchOrderbookFillsFromChain(
+          deployments.orderBookDex,
+          deployments.listingsRegistry
+        ).catch(() => {});
+        fills = chainCachedRows;
+        source = 'chain_cache';
+      }
+      try {
+        const chainRows = await withTimeout(
+          fetchOrderbookFillsFromChain(
+            deployments.orderBookDex,
+            deployments.listingsRegistry
+          ),
+          8000,
+          'orderbook chain timeout'
+        );
+        if (Array.isArray(chainRows)) {
+          fills = chainRows;
+          source = 'chain';
+          degraded = false;
+        }
+      } catch (err) {
+        if (chainCachedRows.length > 0) {
+          fills = chainCachedRows;
+          source = 'chain_cache_stale';
+          degraded = true;
+          warnings.push(`chain verify timed out, using cached on-chain rows (${Math.floor(chainCacheAgeMs / 1000)}s old)`);
+        } else {
+          degraded = true;
+          warnings.push(`chain fills unavailable: ${toUserErrorMessage(err.message)}`);
+        }
+      }
+      const nextPayload = { fills, source, degraded, warnings };
+      if (allowUiRouteCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: toUserErrorMessage(err.message) });
+    const fallback = readIndexerSnapshot();
+    const fills = buildOrderbookFillsFallbackFromSnapshot(fallback);
+    res.json({
+      fills,
+      source: 'indexer_fallback',
+      degraded: true,
+      warnings: [`fills unavailable: ${toUserErrorMessage(err.message)}`],
+    });
   }
 });
 
@@ -6927,7 +7328,7 @@ app.get('/api/orders/open', async (req, res) => {
     return res.status(400).json({ error: 'wallet is required' });
   }
   try {
-    await ensureIndexerSynced();
+    await waitForIndexerSyncBounded();
     const { orders } = readIndexerSnapshot();
     const items = [];
     const orderValues = Object.values(orders);
@@ -6982,7 +7383,7 @@ app.get('/api/orders/:orderId', async (req, res) => {
   }
 
   try {
-    await ensureIndexerSynced();
+    await waitForIndexerSyncBounded();
     const { orders } = readIndexerSnapshot();
     const order = orders[String(orderId)];
     let missingOrder = false;
@@ -7407,13 +7808,70 @@ app.get('/api/portfolio/positions', async (req, res) => {
   }
 
   try {
-    await waitForIndexerSyncBounded();
-    const snapshot = readIndexerSnapshot();
-    const deployments = loadDeployments();
-    const positions = await buildPortfolioPositions(snapshot, wallet, deployments);
-    res.json({ wallet, positions });
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const cacheKey = makeUiReadCacheKey('portfolio-positions', { wallet });
+    if (!disableCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_POSITIONS_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
+      }
+    }
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      let warnings = [];
+      let source = 'chain';
+      let degraded = false;
+      let positions = [];
+      try {
+        await withTimeout(waitForIndexerSyncBounded(), 1500, 'indexer sync timeout');
+        const snapshot = readIndexerSnapshot();
+        const deployments = loadDeployments();
+        positions = await withTimeout(
+          buildPortfolioPositions(snapshot, wallet, deployments, { disableCache }),
+          6000,
+          'portfolio positions timeout'
+        );
+        lastKnownPortfolioPositionsByWallet.set(wallet.toLowerCase(), positions);
+      } catch (err) {
+        degraded = true;
+        warnings.push(`positions degraded: ${toUserErrorMessage(err.message)}`);
+        const lastKnown = lastKnownPortfolioPositionsByWallet.get(wallet.toLowerCase());
+        if (Array.isArray(lastKnown)) {
+          positions = lastKnown;
+          source = 'last_known';
+        } else {
+          positions = [];
+          source = 'empty_fallback';
+        }
+      }
+      const nextPayload = {
+        wallet,
+        positions,
+        source,
+        degraded,
+        warnings,
+      };
+      if (!disableCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const lastKnown = lastKnownPortfolioPositionsByWallet.get(wallet.toLowerCase());
+    let positions = [];
+    let source = 'empty_fallback';
+    if (Array.isArray(lastKnown)) {
+      positions = lastKnown;
+      source = 'last_known';
+    }
+    res.json({
+      wallet,
+      positions,
+      source,
+      degraded: true,
+      warnings: [`positions unavailable: ${toUserErrorMessage(err.message)}`],
+    });
   }
 });
 
@@ -7430,102 +7888,247 @@ app.get('/api/portfolio/summary', async (req, res) => {
   }
 
   try {
-    await waitForIndexerSyncBounded();
-    const snapshot = readIndexerSnapshot();
-    const deployments = loadDeployments();
     const includeGas = String(req.query.includeGas || '').toLowerCase() === 'true';
-    const chainIdHex = await hardhatRpc('eth_chainId', []);
-    const chainId = parseRpcInt(chainIdHex);
-    const nativeEthWeiHex = await hardhatRpc('eth_getBalance', [wallet, 'latest']);
-    const nativeEthWei = BigInt(nativeEthWeiHex).toString();
-    let nativeSymbol = 'ETH';
-    if (chainId === 11155111) {
-      nativeSymbol = 'SepoliaETH';
-    }
-    const ttokenAddr = deployments.ttoken;
-    const ttokenData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
-    const ttokenResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: ttokenData }, 'latest']);
-    const [cashWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', ttokenResult);
-    const cashWei = BigInt(cashWeiRaw.toString());
-    const positions = await buildPortfolioPositions(snapshot, wallet, deployments);
-
-    let stockValueWei = 0n;
-    let totalCostBasisWei = 0n;
-    let realizedPnlWei = 0n;
-    let unrealizedPnlWei = 0n;
-    for (const p of positions) {
-      stockValueWei += BigInt(p.currentValueWei);
-      totalCostBasisWei += BigInt(p.costBasisWei);
-      realizedPnlWei += BigInt(p.realizedPnlWei);
-      unrealizedPnlWei += BigInt(p.unrealizedPnlWei);
-    }
-    const leveragedValueWei = await computeLeveragedValueWei(snapshot, wallet, deployments);
-    const totalValueWei = cashWei + stockValueWei + leveragedValueWei;
-    const gasSummary = await getPortfolioGasSummary(snapshot, wallet, includeGas);
-
-    let aggregator = null;
-    let drift = null;
-    if (String(req.query.includeAggregator || '').toLowerCase() === 'true' && deployments.portfolioAggregator) {
-      try {
-        const aggData = aggregatorInterface.encodeFunctionData('getPortfolioSummary', [wallet]);
-        const aggResult = await hardhatRpc('eth_call', [{ to: deployments.portfolioAggregator, data: aggData }, 'latest']);
-        const [cashValueWei, stockValueWeiOnchain, totalValueWeiOnchain] = aggregatorInterface.decodeFunctionResult('getPortfolioSummary', aggResult);
-        aggregator = {
-          cashValueWei: cashValueWei.toString(),
-          stockValueWei: stockValueWeiOnchain.toString(),
-          totalValueWei: totalValueWeiOnchain.toString(),
-        };
-        const cashDeltaWei = BigInt(aggregator.cashValueWei) - cashWei;
-        const stockDeltaWei = BigInt(aggregator.stockValueWei) - stockValueWei;
-        const totalDeltaWei = BigInt(aggregator.totalValueWei) - totalValueWei;
-        const toleranceWei = 1n;
-        let cashAbs = cashDeltaWei;
-        if (cashDeltaWei < 0n) {
-          cashAbs = -cashDeltaWei;
-        }
-        let stockAbs = stockDeltaWei;
-        if (stockDeltaWei < 0n) {
-          stockAbs = -stockDeltaWei;
-        }
-        let totalAbs = totalDeltaWei;
-        if (totalDeltaWei < 0n) {
-          totalAbs = -totalDeltaWei;
-        }
-        const cashWithin = cashAbs <= toleranceWei;
-        const stockWithin = stockAbs <= toleranceWei;
-        const totalWithin = totalAbs <= toleranceWei;
-        drift = {
-          cashDeltaWei: cashDeltaWei.toString(),
-          stockDeltaWei: stockDeltaWei.toString(),
-          totalDeltaWei: totalDeltaWei.toString(),
-          toleranceWei: toleranceWei.toString(),
-          withinTolerance: cashWithin && stockWithin && totalWithin,
-        };
-      } catch {
-        aggregator = null;
-        drift = null;
+    const includeAggregator = String(req.query.includeAggregator || '').toLowerCase() === 'true';
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const cacheKey = makeUiReadCacheKey('portfolio-summary', { wallet, includeGas, includeAggregator });
+    if (!disableCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_SUMMARY_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
       }
     }
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      let warnings = [];
+      let source = 'chain';
+      let degraded = false;
+      let aggregator = null;
+      let drift = null;
+      let chainId = 0;
+      let nativeSymbol = 'ETH';
+      let nativeEthWei = '0';
+      let positions = [];
+      let cashWei = 0n;
+      let stockValueWei = 0n;
+      let leveragedValueWei = 0n;
+      let totalValueWei = 0n;
+      let totalCostBasisWei = 0n;
+      let realizedPnlWei = 0n;
+      let unrealizedPnlWei = 0n;
+      let overallGasUsedUnits = 0n;
+      let overallGasCostWei = 0n;
+      try {
+        await withTimeout(waitForIndexerSyncBounded(), 3500, 'indexer sync timeout');
+        const snapshot = readIndexerSnapshot();
+        const deployments = loadDeployments();
+        const chainIdHex = await withTimeout(hardhatRpc('eth_chainId', []), 1500, 'chainId timeout');
+        chainId = parseRpcInt(chainIdHex);
+        if (chainId === 11155111) {
+          nativeSymbol = 'SepoliaETH';
+        }
 
+        const nativeEthWeiHex = await withTimeout(
+          hardhatRpc('eth_getBalance', [wallet, 'latest']),
+          1500,
+          'native balance timeout'
+        );
+        nativeEthWei = BigInt(nativeEthWeiHex).toString();
+
+        const ttokenAddr = deployments.ttoken;
+        const ttokenData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+        const ttokenResult = await withTimeout(
+          hardhatRpc('eth_call', [{ to: ttokenAddr, data: ttokenData }, 'latest']),
+          1500,
+          'ttoken balance timeout'
+        );
+        const [cashWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', ttokenResult);
+        cashWei = BigInt(cashWeiRaw.toString());
+
+        positions = await withTimeout(
+          buildPortfolioPositions(snapshot, wallet, deployments, { disableCache }),
+          3000,
+          'portfolio positions timeout'
+        );
+        lastKnownPortfolioPositionsByWallet.set(wallet.toLowerCase(), positions);
+        for (let i = 0; i < positions.length; i += 1) {
+          const position = positions[i];
+          stockValueWei += BigInt(position.currentValueWei);
+          totalCostBasisWei += BigInt(position.costBasisWei);
+          realizedPnlWei += BigInt(position.realizedPnlWei);
+          unrealizedPnlWei += BigInt(position.unrealizedPnlWei);
+        }
+
+        leveragedValueWei = await withTimeout(
+          computeLeveragedValueWei(snapshot, wallet, deployments),
+          2000,
+          'leveraged value timeout'
+        );
+        totalValueWei = cashWei + stockValueWei + leveragedValueWei;
+
+        const gasSummary = await withTimeout(
+          getPortfolioGasSummary(snapshot, wallet, includeGas),
+          2000,
+          'gas summary timeout'
+        );
+        overallGasUsedUnits = gasSummary.gasUsedUnits;
+        overallGasCostWei = gasSummary.gasCostWei;
+
+        if (includeAggregator && deployments.portfolioAggregator) {
+          try {
+            const aggData = aggregatorInterface.encodeFunctionData('getPortfolioSummary', [wallet]);
+            const aggResult = await withTimeout(
+              hardhatRpc('eth_call', [{ to: deployments.portfolioAggregator, data: aggData }, 'latest']),
+              1500,
+              'aggregator timeout'
+            );
+            const [cashValueWei, stockValueWeiOnchain, totalValueWeiOnchain] = aggregatorInterface.decodeFunctionResult('getPortfolioSummary', aggResult);
+            aggregator = {
+              cashValueWei: cashValueWei.toString(),
+              stockValueWei: stockValueWeiOnchain.toString(),
+              totalValueWei: totalValueWeiOnchain.toString(),
+            };
+            const cashDeltaWei = BigInt(aggregator.cashValueWei) - cashWei;
+            const stockDeltaWei = BigInt(aggregator.stockValueWei) - stockValueWei;
+            const totalDeltaWei = BigInt(aggregator.totalValueWei) - totalValueWei;
+            const toleranceWei = 1n;
+            let cashAbs = cashDeltaWei;
+            if (cashAbs < 0n) {
+              cashAbs = -cashAbs;
+            }
+            let stockAbs = stockDeltaWei;
+            if (stockAbs < 0n) {
+              stockAbs = -stockAbs;
+            }
+            let totalAbs = totalDeltaWei;
+            if (totalAbs < 0n) {
+              totalAbs = -totalAbs;
+            }
+            drift = {
+              cashDeltaWei: cashDeltaWei.toString(),
+              stockDeltaWei: stockDeltaWei.toString(),
+              totalDeltaWei: totalDeltaWei.toString(),
+              toleranceWei: toleranceWei.toString(),
+              withinTolerance: cashAbs <= toleranceWei && stockAbs <= toleranceWei && totalAbs <= toleranceWei,
+            };
+          } catch (err) {
+            warnings.push(`aggregator unavailable: ${toUserErrorMessage(err.message)}`);
+          }
+        }
+      } catch (err) {
+        degraded = true;
+        warnings.push(`summary degraded: ${toUserErrorMessage(err.message)}`);
+      }
+
+      if (degraded) {
+        stockValueWei = 0n;
+        totalCostBasisWei = 0n;
+        realizedPnlWei = 0n;
+        unrealizedPnlWei = 0n;
+        const fallbackPositions = lastKnownPortfolioPositionsByWallet.get(wallet.toLowerCase());
+        if (Array.isArray(fallbackPositions)) {
+          positions = fallbackPositions;
+        }
+        let hasCashFallback = false;
+        try {
+          const deployments = loadDeployments();
+          if (deployments.ttoken) {
+            const ttokenData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+            const ttokenResult = await withTimeout(
+              hardhatRpc('eth_call', [{ to: deployments.ttoken, data: ttokenData }, 'latest']),
+              1200,
+              'ttoken fallback timeout'
+            );
+            const [cashWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', ttokenResult);
+            cashWei = BigInt(cashWeiRaw.toString());
+            source = 'ttoken_fallback';
+            hasCashFallback = true;
+          }
+        } catch {
+        }
+        if (!hasCashFallback) {
+          const lastKnown = lastKnownPortfolioSummaryByWallet.get(wallet.toLowerCase());
+          if (lastKnown && typeof lastKnown === 'object') {
+            source = 'last_known';
+            const lastKnownWarnings = Array.isArray(lastKnown.warnings) ? lastKnown.warnings : [];
+            return {
+              ...lastKnown,
+              degraded: true,
+              source,
+              warnings: lastKnownWarnings.concat(warnings),
+            };
+          }
+        }
+        for (let i = 0; i < positions.length; i += 1) {
+          const position = positions[i];
+          stockValueWei += BigInt(position.currentValueWei);
+          totalCostBasisWei += BigInt(position.costBasisWei);
+          realizedPnlWei += BigInt(position.realizedPnlWei);
+          unrealizedPnlWei += BigInt(position.unrealizedPnlWei);
+        }
+        totalValueWei = cashWei + stockValueWei + leveragedValueWei;
+      }
+
+      const nextPayload = {
+        wallet,
+        chainId,
+        nativeSymbol,
+        nativeEthWei,
+        positions,
+        cashValueWei: cashWei.toString(),
+        stockValueWei: stockValueWei.toString(),
+        leveragedValueWei: leveragedValueWei.toString(),
+        totalValueWei: totalValueWei.toString(),
+        totalCostBasisWei: totalCostBasisWei.toString(),
+        realizedPnlWei: realizedPnlWei.toString(),
+        unrealizedPnlWei: unrealizedPnlWei.toString(),
+        overallGasUsedUnits: overallGasUsedUnits.toString(),
+        overallGasCostWei: overallGasCostWei.toString(),
+        aggregator,
+        drift,
+        source,
+        degraded,
+        warnings,
+      };
+      lastKnownPortfolioSummaryByWallet.set(wallet.toLowerCase(), nextPayload);
+      if (!disableCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
+  } catch (err) {
+    const lastKnown = lastKnownPortfolioSummaryByWallet.get(wallet.toLowerCase());
+    if (lastKnown) {
+      const lastKnownWarnings = Array.isArray(lastKnown.warnings) ? lastKnown.warnings : [];
+      return res.json({
+        ...lastKnown,
+        degraded: true,
+        source: 'last_known',
+        warnings: lastKnownWarnings.concat([`summary unavailable: ${toUserErrorMessage(err.message)}`]),
+      });
+    }
     res.json({
       wallet,
-      chainId,
-      nativeSymbol,
-      nativeEthWei,
-      cashValueWei: cashWei.toString(),
-      stockValueWei: stockValueWei.toString(),
-      leveragedValueWei: leveragedValueWei.toString(),
-      totalValueWei: totalValueWei.toString(),
-      totalCostBasisWei: totalCostBasisWei.toString(),
-      realizedPnlWei: realizedPnlWei.toString(),
-      unrealizedPnlWei: unrealizedPnlWei.toString(),
-      overallGasUsedUnits: gasSummary.gasUsedUnits.toString(),
-      overallGasCostWei: gasSummary.gasCostWei.toString(),
-      aggregator,
-      drift,
+      chainId: 0,
+      nativeSymbol: 'ETH',
+      nativeEthWei: '0',
+      positions: [],
+      cashValueWei: '0',
+      stockValueWei: '0',
+      leveragedValueWei: '0',
+      totalValueWei: '0',
+      totalCostBasisWei: '0',
+      realizedPnlWei: '0',
+      unrealizedPnlWei: '0',
+      overallGasUsedUnits: '0',
+      overallGasCostWei: '0',
+      aggregator: null,
+      drift: null,
+      source: 'empty_fallback',
+      degraded: true,
+      warnings: [`summary unavailable: ${toUserErrorMessage(err.message)}`],
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
 });
 
@@ -8499,140 +9102,174 @@ app.get('/api/dividends/claimables', async (req, res) => {
     return res.status(400).json({ error: 'wallet is required' });
   }
   try {
-    const deployments = loadDeployments();
-    if (!deployments.dividends) {
-      return res.json({ wallet, claimables: [] });
-    }
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: deployments.listingsRegistry, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-    const listings = [];
-    for (const symbol of symbols) {
-      const token = await getListingBySymbol(deployments.listingsRegistry, symbol);
-      const hasToken = Boolean(token);
-      const isNonZero = token !== ethers.ZeroAddress;
-      if (hasToken && isNonZero) {
-        listings.push({ symbol, tokenAddress: token });
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const cacheKey = makeUiReadCacheKey('dividends-claimables', { wallet });
+    if (!disableCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_CLAIMABLES_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
       }
     }
-    const claimables = [];
 
-    for (const listing of listings) {
-      const countData = dividendsInterface.encodeFunctionData('epochCount', [listing.tokenAddress]);
-      const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: countData }, 'latest']);
-      const [countRaw] = dividendsInterface.decodeFunctionResult('epochCount', countResult);
-      const count = Number(countRaw);
-      for (let epochId = 1; epochId <= count; epochId++) {
-        const previewData = dividendsInterface.encodeFunctionData('previewClaim', [listing.tokenAddress, epochId, wallet]);
-        const previewResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: previewData }, 'latest']);
-        const [claimableWeiRaw] = dividendsInterface.decodeFunctionResult('previewClaim', previewResult);
-        const claimableWei = claimableWeiRaw.toString();
-        const claimedData = dividendsInterface.encodeFunctionData('isClaimed', [listing.tokenAddress, epochId, wallet]);
-        const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: claimedData }, 'latest']);
-        const [claimed] = dividendsInterface.decodeFunctionResult('isClaimed', claimedResult);
-        claimables.push({
-          claimType: 'SNAPSHOT',
-          symbol: listing.symbol,
-          tokenAddress: listing.tokenAddress,
-          epochId,
-          claimableWei,
-          claimed,
-          canClaim: (() => {
-            let canClaim = false;
-            if (BigInt(claimableWei) > 0n) {
-              if (!claimed) {
-                canClaim = true;
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      const warnings = [];
+      let source = 'chain';
+      let degraded = false;
+      let claimables = [];
+      try {
+        const deployments = loadDeployments();
+        if (!deployments.dividends) {
+          source = 'no_contract';
+        } else {
+          const listings = [];
+          const indexedListings = await withTimeout(
+            getIndexedListings(deployments.listingsRegistry),
+            5000,
+            'listings for claimables timeout'
+          );
+          for (let i = 0; i < indexedListings.length; i += 1) {
+            const row = indexedListings[i];
+            const symbol = String(row.symbol || '').toUpperCase();
+            const tokenAddress = normalizeAddress(row.tokenAddress);
+            if (symbol && tokenAddress && tokenAddress !== ethers.ZeroAddress) {
+              listings.push({ symbol, tokenAddress });
+            }
+          }
+          const snapshotRows = await mapWithConcurrency(
+            listings,
+            3,
+            async (listing) => {
+              const oneListingRows = [];
+              const countData = dividendsInterface.encodeFunctionData('epochCount', [listing.tokenAddress]);
+              const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: countData }, 'latest']);
+              const [countRaw] = dividendsInterface.decodeFunctionResult('epochCount', countResult);
+              const count = Number(countRaw);
+              for (let epochId = 1; epochId <= count; epochId += 1) {
+                const previewData = dividendsInterface.encodeFunctionData('previewClaim', [listing.tokenAddress, epochId, wallet]);
+                const previewResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: previewData }, 'latest']);
+                const [claimableWeiRaw] = dividendsInterface.decodeFunctionResult('previewClaim', previewResult);
+                const claimableWei = claimableWeiRaw.toString();
+                const claimedData = dividendsInterface.encodeFunctionData('isClaimed', [listing.tokenAddress, epochId, wallet]);
+                const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: claimedData }, 'latest']);
+                const [claimed] = dividendsInterface.decodeFunctionResult('isClaimed', claimedResult);
+                let canClaim = false;
+                if (BigInt(claimableWei) > 0n && !claimed) {
+                  canClaim = true;
+                }
+                oneListingRows.push({
+                  claimType: 'SNAPSHOT',
+                  symbol: listing.symbol,
+                  tokenAddress: listing.tokenAddress,
+                  epochId,
+                  claimableWei,
+                  claimed,
+                  canClaim,
+                });
+              }
+              return oneListingRows;
+            }
+          );
+          for (let i = 0; i < snapshotRows.length; i += 1) {
+            const rows = snapshotRows[i];
+            if (Array.isArray(rows) && rows.length > 0) {
+              for (let j = 0; j < rows.length; j += 1) {
+                claimables.push(rows[j]);
               }
             }
-            return canClaim;
-          })(),
-        });
-      }
-    }
-
-    if (deployments.dividendsMerkle) {
-      const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
-      const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
-      const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
-      const count = Number(countRaw);
-      for (let epochId = 1; epochId <= count; epochId += 1) {
-        const tree = readMerkleTree(epochId);
-        const claimsPayload = readMerkleClaims(epochId);
-        let rows = [];
-        if (Array.isArray(claimsPayload.claims)) {
-          rows = claimsPayload.claims;
-        }
-        for (let i = 0; i < rows.length; i += 1) {
-          const row = rows[i];
-          let accountText = '';
-          if (row.account) {
-            accountText = String(row.account);
           }
-          const account = normalizeAddress(accountText);
-          if (account === wallet) {
-            let amountWei = '0';
-            if (row.amountWei) {
-              amountWei = String(row.amountWei);
-            }
-            const leafIndex = Number(row.leafIndex);
-            let proof = [];
-            if (Array.isArray(row.proof)) {
-              proof = row.proof;
-            }
-            const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
-            const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
-            const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
-            let treeSymbol = '';
-            if (tree.symbol) {
-              treeSymbol = String(tree.symbol);
-            }
-            let treeTokenAddress = '';
-            if (tree.tokenAddress) {
-              treeTokenAddress = String(tree.tokenAddress);
-            }
-            let treeMerkleRoot = '';
-            if (tree.merkleRoot) {
-              treeMerkleRoot = String(tree.merkleRoot);
-            }
-            let treeContentHash = ethers.ZeroHash;
-            if (tree.contentHash) {
-              treeContentHash = String(tree.contentHash);
-            }
-            let treeClaimsUri = '';
-            if (tree.claimsUri) {
-              treeClaimsUri = String(tree.claimsUri);
-            }
-            claimables.push({
-              claimType: 'MERKLE',
-              symbol: treeSymbol,
-              tokenAddress: treeTokenAddress,
-              epochId,
-              claimableWei: amountWei,
-              amountWei,
-              leafIndex,
-              proof,
-              claimed,
-              canClaim: (() => {
-                let canClaim = false;
-                if (BigInt(amountWei) > 0n) {
-                  if (!claimed) {
-                    canClaim = true;
-                  }
+
+          if (deployments.dividendsMerkle) {
+            const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+            const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+            const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+            const count = Number(countRaw);
+            for (let epochId = 1; epochId <= count; epochId += 1) {
+              const tree = readMerkleTree(epochId);
+              const claimsPayload = readMerkleClaims(epochId);
+              let rows = [];
+              if (Array.isArray(claimsPayload.claims)) {
+                rows = claimsPayload.claims;
+              }
+              for (let i = 0; i < rows.length; i += 1) {
+                const row = rows[i];
+                const account = normalizeAddress(String(row.account || ''));
+                if (account !== wallet) {
+                  continue;
                 }
-                return canClaim;
-              })(),
-              merkleRoot: treeMerkleRoot,
-              contentHash: treeContentHash,
-              claimsUri: treeClaimsUri,
-            });
+                const amountWei = String(row.amountWei || '0');
+                const leafIndex = Number(row.leafIndex);
+                let proof = [];
+                if (Array.isArray(row.proof)) {
+                  proof = row.proof;
+                }
+                const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
+                const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
+                const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
+                let canClaim = false;
+                if (BigInt(amountWei) > 0n && !claimed) {
+                  canClaim = true;
+                }
+                claimables.push({
+                  claimType: 'MERKLE',
+                  symbol: String(tree.symbol || ''),
+                  tokenAddress: String(tree.tokenAddress || ''),
+                  epochId,
+                  claimableWei: amountWei,
+                  amountWei,
+                  leafIndex,
+                  proof,
+                  claimed,
+                  canClaim,
+                  merkleRoot: String(tree.merkleRoot || ''),
+                  contentHash: String(tree.contentHash || ethers.ZeroHash),
+                  claimsUri: String(tree.claimsUri || ''),
+                });
+              }
+            }
           }
         }
+        lastKnownClaimablesByWallet.set(wallet.toLowerCase(), claimables);
+      } catch (err) {
+        degraded = true;
+        warnings.push(`claimables degraded: ${toUserErrorMessage(err.message)}`);
+        source = 'last_known';
+        const lastKnown = lastKnownClaimablesByWallet.get(wallet.toLowerCase());
+        if (Array.isArray(lastKnown)) {
+          claimables = lastKnown;
+        } else {
+          claimables = [];
+          source = 'empty_fallback';
+        }
       }
-    }
-
-    res.json({ wallet, claimables });
+      const nextPayload = {
+        wallet,
+        claimables,
+        source,
+        degraded,
+        warnings,
+      };
+      if (!disableCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const lastKnown = lastKnownClaimablesByWallet.get(wallet.toLowerCase());
+    let claimables = [];
+    let source = 'empty_fallback';
+    if (Array.isArray(lastKnown)) {
+      claimables = lastKnown;
+      source = 'last_known';
+    }
+    res.json({
+      wallet,
+      claimables,
+      source,
+      degraded: true,
+      warnings: [`claimables unavailable: ${toUserErrorMessage(err.message)}`],
+    });
   }
 });
 
@@ -10045,7 +10682,35 @@ app.post('/api/admin/symbols/list', async (req, res) => {
 
 app.get('/api/admin/symbols/status', async (_req, res) => {
   try {
-    const symbols = await listAllSymbolsFromRegistry();
+    const symbols = [];
+    const seen = new Set();
+    try {
+      const deployments = loadDeployments();
+      const registryAddr = normalizeAddress(deployments.listingsRegistry);
+      const registryDeployed = await ensureContract(registryAddr);
+      if (registryDeployed) {
+        const indexedListings = await getIndexedListings(registryAddr);
+        for (let i = 0; i < indexedListings.length; i += 1) {
+          const symbol = String(indexedListings[i].symbol || '').toUpperCase();
+          if (!symbol || seen.has(symbol)) {
+            continue;
+          }
+          seen.add(symbol);
+          symbols.push(symbol);
+        }
+      }
+    } catch {
+    }
+    const state = readSymbolStatusState();
+    const stateRows = state && state.symbols ? Object.keys(state.symbols) : [];
+    for (let i = 0; i < stateRows.length; i += 1) {
+      const symbol = String(stateRows[i] || '').toUpperCase();
+      if (!symbol || seen.has(symbol)) {
+        continue;
+      }
+      seen.add(symbol);
+      symbols.push(symbol);
+    }
     const rows = [];
     for (let i = 0; i < symbols.length; i += 1) {
       const symbol = symbols[i];
@@ -10062,7 +10727,7 @@ app.get('/api/admin/symbols/status', async (_req, res) => {
     rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
     res.json({ symbols: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json({ symbols: [] });
   }
 });
 
@@ -10866,7 +11531,7 @@ app.post('/api/equity/create', async (req, res) => {
     }]);
     res.json({ txHash });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 // mint equity token
@@ -10938,7 +11603,7 @@ app.post('/api/equity/mint', async (req, res) => {
     });
     res.json({ txHash, tokenAddress: tokenAddr });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 // create and mint for equity tokens that was not deployed
@@ -11008,15 +11673,10 @@ app.post('/api/equity/create-mint', async (req, res) => {
         to: factoryAddr,
         data: createData,
       }]);
-
-      for (let i = 0; i < 10; i++) {
-        const receipt = await hardhatRpc('eth_getTransactionReceipt', [createTx]);
-        if (receipt) {
-          break;
-        }
-        await new Promise((resolve) => {
-          setTimeout(resolve, 300);
-        });
+      const createReceipt = await waitForReceipt(createTx);
+      const createStatus = parseRpcInt(createReceipt.status);
+      if (createStatus === 0) {
+        return res.status(502).json({ error: 'create equity transaction reverted' });
       }
 
       lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
@@ -11051,23 +11711,17 @@ app.post('/api/equity/create-mint', async (req, res) => {
     });
     res.json({ createTx, mintTx, tokenAddress: tokenAddr });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
 // rest api to get all the listings and addresses
 app.get('/api/registry/listings', async (req, res) => {
   try {
-    const deployments = loadDeployments();
-    const registryAddr = deployments.listingsRegistry;
-    const registryDeployed = await ensureContract(registryAddr);
-    if (!registryDeployed) {
-      return res.json({ listings: [] });
+    let mode = String(req.query.mode || '').toLowerCase();
+    if (mode !== 'chain') {
+      mode = 'fast';
     }
-    const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
-
     let includeDelisted = false;
     let includeDelistedRaw = '';
     if (req.query.includeDelisted) {
@@ -11076,23 +11730,95 @@ app.get('/api/registry/listings', async (req, res) => {
     if (includeDelistedRaw === '1') {
       includeDelisted = true;
     }
-
-    const listings = [];
-    for (const symbol of symbols) {
-      const lookup = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
-      const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookup }, 'latest']);
-      const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
-      if (tokenAddr !== ethers.ZeroAddress) {
-        const lifecycle = getSymbolLifecycleStatus(symbol);
-        const shouldHide = lifecycle === 'DELISTED' && !includeDelisted;
-        if (!shouldHide) {
-          listings.push({ symbol, tokenAddress: tokenAddr, lifecycleStatus: lifecycle });
-        }
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const deployments = loadDeployments();
+    const registryAddr = deployments.listingsRegistry;
+    const cacheKey = makeUiReadCacheKey('registry-listings', { mode, includeDelisted, registryAddr });
+    if (!disableCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_LISTINGS_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
       }
     }
-    res.json({ listings });
+
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      const warnings = [];
+      let degraded = false;
+      let source = mode === 'chain' ? 'chain' : 'indexer_fast';
+      let listings = [];
+      try {
+        const registryDeployed = await withTimeout(ensureContract(registryAddr), 4000, 'registry contract check timeout');
+        if (!registryDeployed) {
+          source = 'empty_fallback';
+        } else {
+          let indexedListings = [];
+          if (mode === 'chain') {
+            const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
+            const listResult = await withTimeout(
+              hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']),
+              5000,
+              'registry list timeout'
+            );
+            const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
+            const resolved = await mapWithConcurrency(
+              symbols,
+              PORTFOLIO_RPC_CONCURRENCY,
+              async (symbol) => {
+                const tokenAddress = await getListingBySymbol(registryAddr, symbol);
+                if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+                  return null;
+                }
+                return {
+                  symbol: String(symbol),
+                  tokenAddress,
+                };
+              }
+            );
+            for (let i = 0; i < resolved.length; i += 1) {
+              if (resolved[i]) {
+                indexedListings.push(resolved[i]);
+              }
+            }
+          } else {
+            indexedListings = await getIndexedListings(registryAddr);
+          }
+
+          for (let i = 0; i < indexedListings.length; i += 1) {
+            const row = indexedListings[i];
+            const symbol = String(row.symbol || '').toUpperCase();
+            const tokenAddress = normalizeAddress(row.tokenAddress);
+            if (!symbol || !tokenAddress || tokenAddress === ethers.ZeroAddress) {
+              continue;
+            }
+            const lifecycle = getSymbolLifecycleStatus(symbol);
+            const shouldHide = lifecycle === 'DELISTED' && !includeDelisted;
+            if (!shouldHide) {
+              listings.push({ symbol, tokenAddress, lifecycleStatus: lifecycle });
+            }
+          }
+          listings.sort((a, b) => a.symbol.localeCompare(b.symbol));
+        }
+      } catch (err) {
+        degraded = true;
+        warnings.push(`listings degraded: ${toUserErrorMessage(err.message)}`);
+        listings = [];
+        source = 'empty_fallback';
+      }
+      const nextPayload = { listings, source, degraded, warnings };
+      if (!disableCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.json({
+      listings: [],
+      source: 'empty_fallback',
+      degraded: true,
+      warnings: [`listings unavailable: ${toUserErrorMessage(err.message)}`],
+    });
   }
 });
 
@@ -11107,25 +11833,32 @@ app.get('/api/equity/balances', async (req, res) => {
       return res.status(500).json({ error: '' });
     }
 
-    const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
-
-    const balances = [];
-    for (const symbol of symbols) {
-      const lookup = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
-      const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookup }, 'latest']);
-      const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
-      if (tokenAddr !== ethers.ZeroAddress) {
+    const indexedListings = await getIndexedListings(registryAddr);
+    const balancesResolved = await mapWithConcurrency(
+      indexedListings,
+      PORTFOLIO_RPC_CONCURRENCY,
+      async (listing) => {
+        const tokenAddress = normalizeAddress(listing.tokenAddress);
+        const symbol = String(listing.symbol || '').toUpperCase();
+        if (!symbol || !tokenAddress || tokenAddress === ethers.ZeroAddress) {
+          return null;
+        }
         const balData = equityTokenInterface.encodeFunctionData('balanceOf', [address]);
-        const balResult = await hardhatRpc('eth_call', [{ to: tokenAddr, data: balData }, 'latest']);
+        const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
         const [balanceWei] = equityTokenInterface.decodeFunctionResult('balanceOf', balResult);
-        balances.push({ symbol, tokenAddress: tokenAddr, balanceWei: balanceWei.toString() });
+        return { symbol, tokenAddress, balanceWei: balanceWei.toString() };
+      }
+    );
+    const balances = [];
+    for (let i = 0; i < balancesResolved.length; i += 1) {
+      if (balancesResolved[i]) {
+        balances.push(balancesResolved[i]);
       }
     }
+    balances.sort((a, b) => a.symbol.localeCompare(b.symbol));
     res.json({ balances });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -11181,6 +11914,7 @@ app.get('/api/candles', async (req, res) => {
   const range = rangeRaw;
   const cacheKey = `${symbol}|${date}|${interval}|${range}`;
   const cached = candleCache.get(cacheKey);
+  const endDate = date;
 
   const dateValid = /^\d{4}-\d{2}-\d{2}$/.test(date);
   if (!dateValid) {
@@ -11209,60 +11943,84 @@ app.get('/api/candles', async (req, res) => {
       return res.json(cached.data);
     }
 
-    const endDate = date;
-    let dates = [endDate];
-
-    if (range === '5d') {
-      const [y, m, d] = endDate.split('-').map(Number);
-      const dt = new Date(Date.UTC(y, m - 1, d));
-      const days = [];
-
-      while (days.length < 5) {
-        const cur = dt.toISOString().slice(0, 10);
-        if (isTradingDay(cur)) {
-          days.push(cur);
+    function buildDatesForRange(endDateText) {
+      let builtDates = [endDateText];
+      if (range === '5d') {
+        const [y, m, d] = endDateText.split('-').map(Number);
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        const days = [];
+        while (days.length < 5) {
+          const cur = dt.toISOString().slice(0, 10);
+          if (isTradingDay(cur)) {
+            days.push(cur);
+          }
+          dt.setUTCDate(dt.getUTCDate() - 1);
         }
-        dt.setUTCDate(dt.getUTCDate() - 1);
+        builtDates = days.reverse();
       }
-
-      dates = days.reverse();
-    }
-
-    if (range === '1m') {
-      const [y, m, d] = endDate.split('-').map(Number);
-      const end = new Date(Date.UTC(y, m - 1, d));
-      const start = new Date(end);
-      start.setUTCDate(start.getUTCDate() - 30);
-
-      const days = [];
-      const cur = new Date(start);
-      while (cur <= end) {
-        const ymd = cur.toISOString().slice(0, 10);
-        if (isTradingDay(ymd)) {
-          days.push(ymd);
+      if (range === '1m') {
+        const [y, m, d] = endDateText.split('-').map(Number);
+        const end = new Date(Date.UTC(y, m - 1, d));
+        const start = new Date(end);
+        start.setUTCDate(start.getUTCDate() - 30);
+        const days = [];
+        const cur = new Date(start);
+        while (cur <= end) {
+          const ymd = cur.toISOString().slice(0, 10);
+          if (isTradingDay(ymd)) {
+            days.push(ymd);
+          }
+          cur.setUTCDate(cur.getUTCDate() + 1);
         }
-        cur.setUTCDate(cur.getUTCDate() + 1);
+        builtDates = days;
       }
-      dates = days;
+      if (range === '3m') {
+        builtDates = tradingDaysInLastNDays(endDateText, 90);
+      }
+      if (range === '6m') {
+        builtDates = tradingDaysInLastNDays(endDateText, 180);
+      }
+      return builtDates;
     }
 
-    if (range === '3m') {
-      dates = tradingDaysInLastNDays(endDate, 90);
-    }
-    if (range === '6m') {
-      dates = tradingDaysInLastNDays(endDate, 180);
-    }
-
-    const baseCandles = [];
-
-    for (const day of dates) {
+    let dates = buildDatesForRange(endDate);
+    let baseCandles = [];
+    for (let i = 0; i < dates.length; i += 1) {
+      const day = dates[i];
       const dayCandles = await fetchIntradayCandles(symbol, '5m', day);
       baseCandles.push(...dayCandles);
     }
 
     if (baseCandles.length === 0) {
-      return res.status(404).json({
-        error: 'No candles',
+      const fallbackEndDate = previousTradingDay(endDate);
+      let hasFallbackDate = false;
+      if (fallbackEndDate && fallbackEndDate !== endDate) {
+        hasFallbackDate = true;
+      }
+      if (hasFallbackDate) {
+        dates = buildDatesForRange(fallbackEndDate);
+        baseCandles = [];
+        for (let i = 0; i < dates.length; i += 1) {
+          const day = dates[i];
+          const dayCandles = await fetchIntradayCandles(symbol, '5m', day);
+          baseCandles.push(...dayCandles);
+        }
+      }
+    }
+
+    if (baseCandles.length === 0) {
+      if (cached) {
+        return res.json({ ...cached.data, stale: true });
+      }
+      return res.json({
+        symbol,
+        date: endDate,
+        interval,
+        range,
+        dates,
+        candles: [],
+        degraded: true,
+        warnings: ['No candles'],
       });
     }
 
@@ -11286,18 +12044,31 @@ app.get('/api/candles', async (req, res) => {
     res.json(payload);
   } catch (err) {
     const msg = err.message;
-    let status = 502;
-    if (/future|No chart data|No quote data/i.test(msg)) {
-      status = 400;
-    }
     if (cached) {
       return res.json({ ...cached.data, stale: true });
     }
-    res.status(status).json({ error: msg });
+    res.json({
+      symbol,
+      date: endDate,
+      interval,
+      range,
+      dates: [endDate],
+      candles: [],
+      degraded: true,
+      warnings: [msg || 'candles unavailable'],
+    });
   }
 });
 
+try {
+  ensurePersistentDataRoot();
+  console.log(`[state] persistent root ready: ${PERSISTENT_DATA_ROOT_DIR}`);
+} catch (err) {
+  const message = err && err.message ? err.message : String(err);
+  console.warn(`[state] persistent root not writable: ${PERSISTENT_DATA_ROOT_DIR} (${message})`);
+}
 ensureIndexerDir();
+persistedGetLogsChunkSize = readPersistedGetLogsChunkSize();
 ensureIndexerSynced();
 ensureAutoTradeDir();
 ensureAdminDir();
@@ -11374,6 +12145,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running at http://localhost:${PORT}`);
   console.log(`RPC URL: ${HARDHAT_RPC_URL}`);
   console.log(`Deployments file: ${DEPLOYMENTS_FILE}`);
+  console.log(`Persistent data root: ${PERSISTENT_DATA_ROOT_DIR}`);
   console.log(`Signer keys loaded: ${RPC_SIGNERS.size}`);
   console.log(`Autotrade loop enabled: ${ENABLE_AUTOTRADE}`);
   console.log(`Autotrade interval ms: ${AUTOTRADE_POLL_INTERVAL_MS}`);
