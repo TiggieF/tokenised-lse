@@ -460,6 +460,7 @@ let leveragedProductsCache = {
 const portfolioHoldingsCache = new Map();
 const contractDeploymentBlockCache = new Map();
 const orderbookChainFillsCache = new Map();
+const walletChainActivityCache = new Map();
 const portfolioGasCache = new Map();
 const portfolioGasInflight = new Map();
 let fmpIndexTickerSnapshot = {
@@ -1349,7 +1350,16 @@ async function findContractDeploymentBlock(addressRaw) {
 }
 
 function getConfiguredIndexerStartBlock() {
-  const configuredStart = Number(process.env.ORDERBOOK_FILLS_START_BLOCK || process.env.INDEXER_START_BLOCK || '');
+  let raw = '';
+  if (process.env.ORDERBOOK_FILLS_START_BLOCK) {
+    raw = String(process.env.ORDERBOOK_FILLS_START_BLOCK).trim();
+  } else if (process.env.INDEXER_START_BLOCK) {
+    raw = String(process.env.INDEXER_START_BLOCK).trim();
+  }
+  if (!raw) {
+    return -1;
+  }
+  const configuredStart = Number(raw);
   if (Number.isFinite(configuredStart) && configuredStart >= 0) {
     return Math.floor(configuredStart);
   }
@@ -1480,6 +1490,221 @@ async function fetchOrderbookFillsFromChain(orderBookAddr, registryAddr) {
     rows: fillRows,
   });
   return fillRows;
+}
+
+async function fetchWalletActivityFromChain(walletRaw, deployments) {
+  const wallet = normalizeAddress(walletRaw);
+  const orderBookAddr = normalizeAddress(deployments && deployments.orderBookDex);
+  const registryAddr = normalizeAddress(deployments && deployments.listingsRegistry);
+  if (!wallet || !orderBookAddr || !registryAddr) {
+    return {
+      fillRows: [],
+      txHashes: [],
+      latestEventTimestampMs: 0,
+    };
+  }
+  const cacheKey = `${wallet}:${orderBookAddr}:${registryAddr}`;
+  const cached = walletChainActivityCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestampMs) < ORDERBOOK_CHAIN_FILLS_TTL_MS) {
+    return cached.value;
+  }
+
+  let startBlock = 0;
+  const configuredStart = getConfiguredIndexerStartBlock();
+  if (configuredStart >= 0) {
+    startBlock = configuredStart;
+  } else {
+    startBlock = await findContractDeploymentBlock(orderBookAddr);
+  }
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = parseRpcInt(latestBlockHex);
+  const traderTopic = ethers.zeroPadValue(wallet, 32);
+  const orderPlacedSig = ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)');
+  const orderFilledSig = ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)');
+  const placedLogs = await getLogsChunked({
+    address: orderBookAddr,
+    topics: [[orderPlacedSig], null, [traderTopic]],
+  }, startBlock, latestBlock);
+  const orderMetaById = new Map();
+  const walletOrderIds = [];
+  const txHashSet = new Set();
+  const tokenSymbolCache = new Map();
+
+  for (let i = 0; i < placedLogs.length; i += 1) {
+    const log = placedLogs[i];
+    let parsed = null;
+    try {
+      parsed = orderBookInterface.parseLog(log);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || parsed.name !== 'OrderPlaced') {
+      continue;
+    }
+    const orderId = Number(parsed.args.id);
+    const equityToken = normalizeAddress(parsed.args.equityToken);
+    let symbol = tokenSymbolCache.get(equityToken);
+    if (!symbol) {
+      symbol = await lookupSymbolByToken(registryAddr, equityToken);
+      tokenSymbolCache.set(equityToken, symbol);
+    }
+    let side = 'SELL';
+    if (Number(parsed.args.side) === 0) {
+      side = 'BUY';
+    }
+    orderMetaById.set(orderId, {
+      orderId,
+      side,
+      symbol,
+      trader: wallet,
+    });
+    walletOrderIds.push(orderId);
+    const txHash = String(log.transactionHash || '');
+    if (txHash) {
+      txHashSet.add(txHash);
+    }
+  }
+
+  const takerFillLogs = await getLogsChunked({
+    address: orderBookAddr,
+    topics: [[orderFilledSig], null, null, [traderTopic]],
+  }, startBlock, latestBlock);
+  const makerFillLogs = [];
+  const makerIdTopics = [];
+  for (let i = 0; i < walletOrderIds.length; i += 1) {
+    const topic = ethers.toBeHex(BigInt(walletOrderIds[i]), 32);
+    makerIdTopics.push(topic);
+  }
+  if (makerIdTopics.length > 0) {
+    const batchSize = 20;
+    for (let i = 0; i < makerIdTopics.length; i += batchSize) {
+      const batch = makerIdTopics.slice(i, i + batchSize);
+      const makerBatchLogs = await getLogsChunked({
+        address: orderBookAddr,
+        topics: [[orderFilledSig], batch],
+      }, startBlock, latestBlock);
+      for (let j = 0; j < makerBatchLogs.length; j += 1) {
+        makerFillLogs.push(makerBatchLogs[j]);
+      }
+    }
+  }
+  const combinedFillLogs = [];
+  const seenFillIds = new Set();
+  const allFillLogs = takerFillLogs.concat(makerFillLogs);
+  for (let i = 0; i < allFillLogs.length; i += 1) {
+    const log = allFillLogs[i];
+    const id = `${String(log.transactionHash || '')}:${Number(log.logIndex || 0)}`;
+    if (seenFillIds.has(id)) {
+      continue;
+    }
+    seenFillIds.add(id);
+    combinedFillLogs.push(log);
+  }
+  const fillRows = [];
+  for (let i = 0; i < combinedFillLogs.length; i += 1) {
+    const log = combinedFillLogs[i];
+    let parsed = null;
+    try {
+      parsed = orderBookInterface.parseLog(log);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || parsed.name !== 'OrderFilled') {
+      continue;
+    }
+    const makerId = Number(parsed.args.makerId);
+    const takerId = Number(parsed.args.takerId);
+    const takerAddress = normalizeAddress(parsed.args.taker);
+    const makerMeta = orderMetaById.get(makerId) || null;
+    const takerMeta = orderMetaById.get(takerId) || null;
+    const isMakerWallet = Boolean(makerMeta && makerMeta.trader === wallet);
+    const isTakerWallet = takerAddress === wallet || Boolean(takerMeta && takerMeta.trader === wallet);
+    if (!isMakerWallet && !isTakerWallet) {
+      continue;
+    }
+    let side = '';
+    if (isMakerWallet && makerMeta) {
+      side = makerMeta.side;
+    } else if (isTakerWallet && takerMeta) {
+      side = takerMeta.side;
+    } else if (isTakerWallet && makerMeta) {
+      if (makerMeta.side === 'BUY') {
+        side = 'SELL';
+      } else if (makerMeta.side === 'SELL') {
+        side = 'BUY';
+      }
+    }
+    let symbol = '';
+    if (makerMeta && makerMeta.symbol) {
+      symbol = makerMeta.symbol;
+    } else if (takerMeta && takerMeta.symbol) {
+      symbol = takerMeta.symbol;
+    }
+    if (!symbol) {
+      continue;
+    }
+    const txHash = String(log.transactionHash || '');
+    if (txHash) {
+      txHashSet.add(txHash);
+    }
+    fillRows.push({
+      symbol,
+      side,
+      qtyWei: parsed.args.qty.toString(),
+      priceCents: Number(parsed.args.price),
+      timestampMs: 0,
+      blockNumber: Number(log.blockNumber || 0),
+      txHash,
+      logIndex: Number(log.logIndex || 0),
+    });
+  }
+
+  const blockNumberSet = new Set();
+  for (let i = 0; i < fillRows.length; i += 1) {
+    blockNumberSet.add(fillRows[i].blockNumber);
+  }
+  const blockNumbers = Array.from(blockNumberSet);
+  const timestampRows = await mapWithConcurrency(blockNumbers, PORTFOLIO_RPC_CONCURRENCY, async (blockNumber) => {
+    const timestampMs = await getBlockTimestampMs(blockNumber);
+    return {
+      blockNumber,
+      timestampMs,
+    };
+  });
+  const timestampMap = new Map();
+  for (let i = 0; i < timestampRows.length; i += 1) {
+    timestampMap.set(timestampRows[i].blockNumber, timestampRows[i].timestampMs);
+  }
+  let latestEventTimestampMs = 0;
+  for (let i = 0; i < fillRows.length; i += 1) {
+    const ts = timestampMap.get(fillRows[i].blockNumber) || 0;
+    fillRows[i].timestampMs = ts;
+    if (ts > latestEventTimestampMs) {
+      latestEventTimestampMs = ts;
+    }
+  }
+  fillRows.sort((a, b) => {
+    const timestampDiff = a.timestampMs - b.timestampMs;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+    const blockDiff = a.blockNumber - b.blockNumber;
+    if (blockDiff !== 0) {
+      return blockDiff;
+    }
+    return a.logIndex - b.logIndex;
+  });
+
+  const value = {
+    fillRows,
+    txHashes: Array.from(txHashSet),
+    latestEventTimestampMs,
+  };
+  walletChainActivityCache.set(cacheKey, {
+    timestampMs: Date.now(),
+    value,
+  });
+  return value;
 }
 
 function collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount) {
@@ -3614,9 +3839,44 @@ function collectWalletRelatedTxContext(snapshot, wallet) {
   };
 }
 
-async function computeOverallGasForWallet(snapshot, wallet) {
+async function collectWalletRelatedTxContextWithFallback(snapshot, wallet, deployments) {
+  const context = collectWalletRelatedTxContext(snapshot, wallet);
+  if (context.txHashes.length > 0) {
+    return context;
+  }
+  try {
+    const chainActivity = await withTimeout(
+      fetchWalletActivityFromChain(wallet, deployments),
+      8000,
+      'wallet tx chain fallback timeout'
+    );
+    if (!chainActivity || !Array.isArray(chainActivity.txHashes)) {
+      return context;
+    }
+    const txHashes = [];
+    const seen = new Set();
+    for (let i = 0; i < chainActivity.txHashes.length; i += 1) {
+      const txHash = String(chainActivity.txHashes[i] || '');
+      if (!txHash || seen.has(txHash)) {
+        continue;
+      }
+      seen.add(txHash);
+      txHashes.push(txHash);
+    }
+    if (txHashes.length > 0) {
+      return {
+        txHashes,
+        latestEventTimestampMs: Number(chainActivity.latestEventTimestampMs || 0),
+      };
+    }
+  } catch {
+  }
+  return context;
+}
+
+async function computeOverallGasForWallet(snapshot, wallet, deployments) {
   const walletNorm = normalizeAddress(wallet);
-  const context = collectWalletRelatedTxContext(snapshot, walletNorm);
+  const context = await collectWalletRelatedTxContextWithFallback(snapshot, walletNorm, deployments);
   const txHashes = context.txHashes;
   const receiptRows = await mapWithConcurrency(txHashes, PORTFOLIO_RPC_CONCURRENCY, async (txHash) => {
     try {
@@ -3666,7 +3926,7 @@ function getEmptyPortfolioGasSummary() {
   };
 }
 
-function startPortfolioGasRefresh(snapshot, wallet) {
+function startPortfolioGasRefresh(snapshot, wallet, deployments) {
   const key = normalizeAddress(wallet);
   if (!key) {
     return Promise.resolve(getEmptyPortfolioGasSummary());
@@ -3674,7 +3934,7 @@ function startPortfolioGasRefresh(snapshot, wallet) {
   if (portfolioGasInflight.has(key)) {
     return portfolioGasInflight.get(key);
   }
-  const refreshPromise = computeOverallGasForWallet(snapshot, key)
+  const refreshPromise = computeOverallGasForWallet(snapshot, key, deployments)
     .then((value) => {
       portfolioGasCache.set(key, {
         value,
@@ -3700,7 +3960,8 @@ async function getPortfolioGasSummary(snapshot, wallet, waitForFresh) {
   if (cached) {
     const cachedLatestEvent = Number(cached.latestEventTimestampMs || 0);
     if (latestWalletEventTimestampMs > cachedLatestEvent) {
-      const refreshPromise = startPortfolioGasRefresh(snapshot, key);
+      const deployments = loadDeployments();
+      const refreshPromise = startPortfolioGasRefresh(snapshot, key, deployments);
       if (waitForFresh) {
         try {
           return await refreshPromise;
@@ -3717,7 +3978,8 @@ async function getPortfolioGasSummary(snapshot, wallet, waitForFresh) {
     const stale = portfolioGasCache.get(key);
     const ageMs = Date.now() - stale.timestampMs;
     if (ageMs > PORTFOLIO_GAS_CACHE_TTL_MS) {
-      const refreshPromise = startPortfolioGasRefresh(snapshot, key);
+      const deployments = loadDeployments();
+      const refreshPromise = startPortfolioGasRefresh(snapshot, key, deployments);
       if (waitForFresh) {
         try {
           return await refreshPromise;
@@ -3728,7 +3990,8 @@ async function getPortfolioGasSummary(snapshot, wallet, waitForFresh) {
     }
     return stale.value;
   }
-  const refreshPromise = startPortfolioGasRefresh(snapshot, key);
+  const deployments = loadDeployments();
+  const refreshPromise = startPortfolioGasRefresh(snapshot, key, deployments);
   if (!waitForFresh) {
     refreshPromise.catch(() => {});
     return getEmptyPortfolioGasSummary();
@@ -4118,6 +4381,25 @@ function buildWalletFillRows(snapshot, wallet) {
   return fillRows;
 }
 
+async function buildWalletFillRowsWithFallback(snapshot, wallet, deployments) {
+  const fromSnapshot = buildWalletFillRows(snapshot, wallet);
+  if (fromSnapshot.length > 0) {
+    return fromSnapshot;
+  }
+  try {
+    const chainActivity = await withTimeout(
+      fetchWalletActivityFromChain(wallet, deployments),
+      8000,
+      'wallet fills chain fallback timeout'
+    );
+    if (chainActivity && Array.isArray(chainActivity.fillRows) && chainActivity.fillRows.length > 0) {
+      return chainActivity.fillRows;
+    }
+  } catch {
+  }
+  return fromSnapshot;
+}
+
 function buildLotsAndRealized(fillRows) {
   const lotsBySymbol = new Map();
   const realizedBySymbol = new Map();
@@ -4178,7 +4460,7 @@ function formatQtyNumber(balanceWei) {
 }
 
 async function buildPortfolioPositions(snapshot, wallet, deployments, options) {
-  const fillRows = buildWalletFillRows(snapshot, wallet);
+  const fillRows = await buildWalletFillRowsWithFallback(snapshot, wallet, deployments);
   const { lotsBySymbol, realizedBySymbol } = buildLotsAndRealized(fillRows);
   if (PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY && !INDEXER_ENABLE_TRANSFERS && fillRows.length > 0) {
     const symbolTokenMap = new Map();
@@ -8171,6 +8453,21 @@ app.get('/api/portfolio/summary', async (req, res) => {
           realizedPnlWei += BigInt(position.realizedPnlWei);
           unrealizedPnlWei += BigInt(position.unrealizedPnlWei);
         }
+        if (positions.length > 0 && totalCostBasisWei === 0n) {
+          let hasNonZeroHoldings = false;
+          for (let i = 0; i < positions.length; i += 1) {
+            const position = positions[i];
+            const balanceWei = toBigIntSafe(position.balanceWei);
+            if (balanceWei > 0n) {
+              hasNonZeroHoldings = true;
+              break;
+            }
+          }
+          if (hasNonZeroHoldings && Array.isArray(snapshot.fills) && snapshot.fills.length === 0) {
+            warnings.push('cost basis unavailable until fill history is indexed');
+            source = 'stale_indexer';
+          }
+        }
 
         leveragedValueWei = await withTimeout(
           computeLeveragedValueWei(snapshot, wallet, deployments),
@@ -8186,6 +8483,10 @@ app.get('/api/portfolio/summary', async (req, res) => {
         );
         overallGasUsedUnits = gasSummary.gasUsedUnits;
         overallGasCostWei = gasSummary.gasCostWei;
+        if (overallGasUsedUnits === 0n && Array.isArray(snapshot.fills) && snapshot.fills.length === 0) {
+          warnings.push('gas summary incomplete until wallet transaction history is indexed');
+          source = 'stale_indexer';
+        }
 
         if (includeAggregator && deployments.portfolioAggregator) {
           try {
