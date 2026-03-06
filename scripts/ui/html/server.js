@@ -1338,6 +1338,14 @@ async function findContractDeploymentBlock(addressRaw) {
   return low;
 }
 
+function getConfiguredIndexerStartBlock() {
+  const configuredStart = Number(process.env.ORDERBOOK_FILLS_START_BLOCK || process.env.INDEXER_START_BLOCK || '');
+  if (Number.isFinite(configuredStart) && configuredStart >= 0) {
+    return Math.floor(configuredStart);
+  }
+  return -1;
+}
+
 async function fetchOrderbookFillsFromChain(orderBookAddr, registryAddr) {
   const cacheKey = `${orderBookAddr}:${registryAddr}`;
   const cached = orderbookChainFillsCache.get(cacheKey);
@@ -1346,9 +1354,9 @@ async function fetchOrderbookFillsFromChain(orderBookAddr, registryAddr) {
   }
 
   let startBlock = 0;
-  const configuredStart = Number(process.env.ORDERBOOK_FILLS_START_BLOCK || process.env.INDEXER_START_BLOCK || '');
-  if (Number.isFinite(configuredStart) && configuredStart >= 0) {
-    startBlock = Math.floor(configuredStart);
+  const configuredStart = getConfiguredIndexerStartBlock();
+  if (configuredStart >= 0) {
+    startBlock = configuredStart;
   } else {
     startBlock = await findContractDeploymentBlock(orderBookAddr);
   }
@@ -2936,7 +2944,17 @@ async function ensureIndexerSynced() {
     let startBlock = Math.max(0, Number(state.lastIndexedBlock) + 1);
     if (Number(state.lastIndexedBlock) < 0) {
       const lookbackStart = Math.max(0, latestBlock - INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS + 1);
-      startBlock = lookbackStart;
+      const configuredStart = getConfiguredIndexerStartBlock();
+      if (configuredStart >= 0) {
+        startBlock = configuredStart;
+      } else {
+        const deploymentStart = await findContractDeploymentBlock(orderBookAddr);
+        if (Number.isFinite(deploymentStart) && deploymentStart >= 0) {
+          startBlock = deploymentStart;
+        } else {
+          startBlock = lookbackStart;
+        }
+      }
     }
     if (startBlock > latestBlock) {
       state.latestKnownBlock = latestBlock;
