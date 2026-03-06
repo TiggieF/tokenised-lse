@@ -392,6 +392,16 @@
 
     <div class="section">
       <h2 class="section-title">Completed transactions</h2>
+      <div class="form-grid" style="margin-bottom:10px">
+        <div>
+          <label for="fills-source-mode">Data source</label>
+          <select id="fills-source-mode">
+            <option value="fast" selected>Fast</option>
+            <option value="chain">On-chain verify</option>
+          </select>
+        </div>
+      </div>
+      <div id="fills-meta-status" class="status">Ready</div>
       <!-- completed transaction here -->
       <table>
         <thead>
@@ -412,6 +422,8 @@
   <script>
     const openOrdersBody = document.getElementById("open-orders-body");
     const fillsBody = document.getElementById("fills-body");
+    const fillsSourceModeSelect = document.getElementById("fills-source-mode");
+    const fillsMetaStatus = document.getElementById("fills-meta-status");
     const listStock = document.getElementById("list-stock");
     const liveUpdatesEnabledSelect = document.getElementById("live-updates-enabled");
     const liveUpdatesSaveBtn = document.getElementById("live-updates-save-btn");
@@ -421,6 +433,8 @@
     const adminWalletRemoveBtn = document.getElementById("admin-wallet-remove-btn");
     const adminWalletStatus = document.getElementById("admin-wallet-status");
     const adminWalletsBody = document.getElementById("admin-wallets-body");
+    const SYMBOLS_SIGNAL_KEY = "tlse:symbols:refresh";
+    let lastSymbolsSignal = "";
     const listCreateBtn = document.getElementById("list-create-btn");
     const listStatus = document.getElementById("list-status");
     const divSymbol = document.getElementById("div-symbol");
@@ -533,6 +547,151 @@
       // to fixed 2 dc
     }
 
+    function renderOpenOrdersTable(openRows) {
+      openOrdersBody.innerHTML = "";
+      const activeOrders = [];
+      let rows = [];
+      if (Array.isArray(openRows)) {
+        rows = openRows;
+      }
+      for (let i = 0; i < rows.length; i += 1) {
+        const order = rows[i];
+        if (order.active === true && Number(order.remaining) > 0) {
+          activeOrders.push(order);
+        }
+      }
+      for (let i = 0; i < activeOrders.length; i += 1) {
+        const order = activeOrders[i];
+        const tr = document.createElement("tr");
+        let pillClass = "pill pill-sell";
+        if (order.side === "BUY") {
+          pillClass = "pill pill-buy";
+        }
+        tr.innerHTML = `
+          <td>${order.id}</td>
+          <td><span class="${pillClass}">${order.side}</span></td>
+          <td>${order.symbol}</td>
+          <td>${order.priceCents}</td>
+          <td>${formatQty(order.qty)}</td>
+          <td>${formatQty(order.remaining)}</td>
+          <td class="muted addr">${shortAddress(order.trader)}</td>
+          <td>${order.active}</td>
+        `;
+        openOrdersBody.appendChild(tr);
+      }
+      if (activeOrders.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8" class="muted">No open orders</td>`;
+        openOrdersBody.appendChild(tr);
+      }
+    }
+
+    function renderCompletedFillsTable(fillRows, errorMessage) {
+      fillsBody.innerHTML = "";
+      let rows = [];
+      if (Array.isArray(fillRows)) {
+        rows = fillRows;
+      }
+      for (let i = 0; i < rows.length; i += 1) {
+        const fill = rows[i];
+        const tr = document.createElement("tr");
+        const date = new Date(fill.timestampMs);
+        const formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: true,
+          timeZoneName: "short",
+        });
+        const formatted = formatter.format(date);
+        tr.innerHTML = `
+          <td class="muted addr">${shortAddress(fill.makerTrader)}</td>
+          <td class="muted addr">${shortAddress(fill.takerTrader)}</td>
+          <td>${fill.symbol}</td>
+          <td>${fill.priceCents}</td>
+          <td>${formatQty(fill.qty)}</td>
+          <td class="muted">${formatted}</td>
+        `;
+        fillsBody.appendChild(tr);
+      }
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        const message = errorMessage ? String(errorMessage) : "No completed transactions yet";
+        tr.innerHTML = `<td colspan="6" class="muted">${message}</td>`;
+        fillsBody.appendChild(tr);
+      }
+    }
+
+    function setFillsMetaStatus(text, isError = false) {
+      fillsMetaStatus.textContent = text;
+      let nextColor = "#5b6b7a";
+      if (isError) {
+        nextColor = "#e04c4c";
+      }
+      fillsMetaStatus.style.color = nextColor;
+    }
+
+    async function loadOpenOrdersTable() {
+      openOrdersBody.innerHTML = `<tr><td colspan="8" class="muted">Loading open orders...</td></tr>`;
+      try {
+        const openRes = await fetch("/api/orderbook/open");
+        const openData = await openRes.json();
+        let rows = [];
+        if (openRes.ok && openData && Array.isArray(openData.orders)) {
+          rows = openData.orders;
+        }
+        renderOpenOrdersTable(rows);
+      } catch {
+        renderOpenOrdersTable([]);
+      }
+    }
+
+    async function loadCompletedFillsTable() {
+      fillsBody.innerHTML = `<tr><td colspan="6" class="muted">Loading completed transactions...</td></tr>`;
+      setFillsMetaStatus("Loading completed transactions...");
+      try {
+        const mode = String(fillsSourceModeSelect.value || "fast").toLowerCase();
+        const fillsRes = await fetch(`/api/orderbook/fills?mode=${encodeURIComponent(mode)}`);
+        const fillsData = await fillsRes.json();
+        if (fillsRes.ok && fillsData && Array.isArray(fillsData.fills)) {
+          renderCompletedFillsTable(fillsData.fills, "");
+          let sourceText = "unknown";
+          if (fillsData.source) {
+            sourceText = String(fillsData.source);
+          }
+          let statusText = `Source: ${sourceText}`;
+          let isError = false;
+          if (fillsData.degraded) {
+            if (sourceText === "indexer_fallback") {
+              statusText = "On-chain verify unavailable right now, showing latest indexed rows";
+              isError = false;
+            } else if (sourceText === "chain_cache_stale") {
+              statusText = "Using cached on-chain rows while chain verify catches up";
+              isError = false;
+            } else {
+              statusText = `${statusText} (degraded)`;
+              isError = true;
+            }
+          }
+          if (Array.isArray(fillsData.warnings) && fillsData.warnings.length > 0 && sourceText !== "indexer_fallback") {
+            statusText = `${statusText} | ${fillsData.warnings[0]}`;
+          }
+          setFillsMetaStatus(statusText, isError);
+          return;
+        }
+        const message = (fillsData && fillsData.error) ? String(fillsData.error) : "No completed transactions yet";
+        renderCompletedFillsTable([], message);
+        setFillsMetaStatus(message, true);
+      } catch {
+        renderCompletedFillsTable([], "Loading completed transactions...");
+        setFillsMetaStatus("Completed transactions unavailable", true);
+      }
+    }
+
     function setDivStatus(text, isError = false) {
       divStatus.textContent = text;
       let nextColor = "#5b6b7a";
@@ -605,9 +764,25 @@
       adminWalletStatus.style.color = nextColor;
     }
 
+    function signalSymbolsRefresh(reason, symbol) {
+      try {
+        const payload = JSON.stringify({
+          reason: String(reason || "symbols_update"),
+          symbol: String(symbol || "").toUpperCase(),
+          timestampMs: Date.now(),
+        });
+        localStorage.setItem(SYMBOLS_SIGNAL_KEY, payload);
+        lastSymbolsSignal = payload;
+      } catch {
+      }
+    }
+
     function renderAdminWalletRows(wallets, immutableAdminWallet) {
       adminWalletsBody.innerHTML = "";
-      const rows = Array.isArray(wallets) ? wallets : [];
+      let rows = [];
+      if (Array.isArray(wallets)) {
+        rows = wallets;
+      }
       if (rows.length === 0) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="2" class="muted">No admin wallets</td>`;
@@ -643,7 +818,11 @@
           throw new Error(message);
         }
         renderAdminWalletRows(data.wallets, data.immutableAdminWallet);
-        setAdminWalletStatus(`Loaded ${Array.isArray(data.wallets) ? data.wallets.length : 0} admin wallet(s)`);
+        let walletCount = 0;
+        if (Array.isArray(data.wallets)) {
+          walletCount = data.wallets.length;
+        }
+        setAdminWalletStatus(`Loaded ${walletCount} admin wallet(s)`);
       } catch (err) {
         let message = "Failed to load admin wallets";
         if (err.message) {
@@ -780,8 +959,12 @@
       }
     }
 
-    async function loadDividendSymbols() {
-      const res = await fetch("/api/registry/listings");
+    async function loadDividendSymbols(forceFresh = true) {
+      let url = "/api/registry/listings";
+      if (forceFresh) {
+        url = "/api/registry/listings?noCache=1";
+      }
+      const res = await fetch(url);
       const data = await res.json();
       divSymbol.innerHTML = "";
       merkleDivSymbol.innerHTML = "";
@@ -860,6 +1043,7 @@
           throw new Error(message);
         }
         setLifecycleStatus(`${symbol} set to ${data.status}`);
+        signalSymbolsRefresh("lifecycle_changed", symbol);
         await loadLifecycleTable();
       } catch (err) {
         let message = "Lifecycle update failed";
@@ -974,8 +1158,7 @@
           }
           throw new Error(message);
         }
-        setMerkleDivStatus(`Merkle epoch ${data.epochId} auto-declared for ${data.symbol} Tx: ${data.txHash}`);
-        await viewMerkleTree();
+        setMerkleDivStatus(`Merkle epoch ${data.epochId} auto-declared for ${data.symbol} Tx: ${data.txHash}. Click "View Latest Tree" to load details.`);
       } catch (err) {
         let message = "Auto merkle declaration failed";
         if (err.message) {
@@ -1109,7 +1292,7 @@
           });
         } else {
           setListStatus("Listing symbol");
-          res = await fetch("/api/equity/create", {
+          res = await fetch("/api/equity/create?waitReceipt=1", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ symbol, name }),
@@ -1132,9 +1315,10 @@
         } else {
           setListStatus(`Listed ${symbol} Tx: ${data.txHash}`);
         }
+        signalSymbolsRefresh("listing_changed", symbol);
         await loadLifecycleTable();
         await loadListableStocks();
-        await loadDividendSymbols();
+        await loadDividendSymbols(true);
       } catch (err) {
         let message = "Listing failed";
         if (err.message) {
@@ -1268,6 +1452,21 @@
     symbolFreezeBtn.addEventListener("click", () => changeSymbolLifecycle("freeze"));
     symbolUnfreezeBtn.addEventListener("click", () => changeSymbolLifecycle("unfreeze"));
     symbolDelistBtn.addEventListener("click", () => changeSymbolLifecycle("delist"));
+    fillsSourceModeSelect.addEventListener("change", () => {
+      loadCompletedFillsTable();
+    });
+    window.addEventListener("storage", async (event) => {
+      if (event.key !== SYMBOLS_SIGNAL_KEY) {
+        return;
+      }
+      if (!event.newValue || event.newValue === lastSymbolsSignal) {
+        return;
+      }
+      lastSymbolsSignal = event.newValue;
+      await loadLifecycleTable();
+      await loadListableStocks();
+      await loadDividendSymbols(true);
+    });
     (async function () {
       const hasAccess = await verifyAdminAccess();
       if (!hasAccess) {
@@ -1279,84 +1478,8 @@
       await loadLiveUpdatesControl();
       await loadAdminWallets();
       await loadAwardSessionControl();
-      await loadLifecycleTable();
-      const openRes = await fetch("/api/orderbook/open");
-      const openData = await openRes.json();
-      // rest api
-
-      openOrdersBody.innerHTML = "";
-      const activeOrders = [];
-      let openRows = [];
-      if (openRes.ok && openData && Array.isArray(openData.orders)) {
-        openRows = openData.orders;
-      }
-      for (const order of openRows) {
-        if (order.active === true && Number(order.remaining) > 0) {
-          activeOrders.push(order);
-          // add to existing order if active
-        }
-      }
-      for (const order of activeOrders) {
-        const tr = document.createElement("tr");
-        let pillClass = "pill pill-sell";
-        if (order.side === "BUY") {
-          pillClass = "pill pill-buy";
-        }
-        tr.innerHTML = `
-          <td>${order.id}</td>
-          <td><span class="${pillClass}">${order.side}</span></td>
-          <td>${order.symbol}</td>
-          <td>${order.priceCents}</td>
-          <td>${formatQty(order.qty)}</td>
-          <td>${formatQty(order.remaining)}</td>
-          <td class="muted addr">${shortAddress(order.trader)}</td>
-          <td>${order.active}</td>
-        `;
-        openOrdersBody.appendChild(tr);
-      }
-
-
-
-      // satisfied order
-      const fillsRes = await fetch("/api/orderbook/fills");
-      const fillsData = await fillsRes.json();
-
-      fillsBody.innerHTML = "";
-      let fillRows = [];
-      if (fillsRes.ok && fillsData && Array.isArray(fillsData.fills)) {
-        fillRows = fillsData.fills;
-      }
-      for (const fill of fillRows) {
-        const tr = document.createElement("tr");
-        const date = new Date(fill.timestampMs);
-        const formatter = new Intl.DateTimeFormat("en-US", {
-          timeZone: "America/New_York",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-          hour12: true,
-          timeZoneName: "short",
-        });
-        const formatted = formatter.format(date);
-        tr.innerHTML = `
-          <td class="muted addr">${shortAddress(fill.makerTrader)}</td>
-          <td class="muted addr">${shortAddress(fill.takerTrader)}</td>
-          <td>${fill.symbol}</td>
-          <td>${fill.priceCents}</td>
-          <td>${formatQty(fill.qty)}</td>
-          <td class="muted">${formatted}</td>
-        `;
-        fillsBody.appendChild(tr);
-      }
-      if (fillRows.length === 0) {
-        const tr = document.createElement("tr");
-        const message = (fillsData && fillsData.error) ? String(fillsData.error) : "No completed transactions yet";
-        tr.innerHTML = `<td colspan="6" class="muted">${message}</td>`;
-        fillsBody.appendChild(tr);
-      }
+      loadOpenOrdersTable();
+      loadCompletedFillsTable();
     })();
   </script>
 </body>

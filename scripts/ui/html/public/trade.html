@@ -388,6 +388,8 @@
     let buyLimitPriceTouched = false;
     let autoLimitPriceTouched = false;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+    const SYMBOLS_SIGNAL_KEY = "tlse:symbols:refresh";
+    let lastSymbolsSignal = "";
 
     async function ensureSepoliaNetwork() {
       const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
@@ -452,6 +454,38 @@
       throw new Error(`tx not mined yet: ${txHash}`);
     }
 
+    function signalPortfolioRefresh(reason) {
+      try {
+        localStorage.setItem("tlse:portfolio:refresh", JSON.stringify({
+          reason: String(reason || "trade_update"),
+          wallet: currentAccount,
+          timestampMs: Date.now(),
+        }));
+      } catch {
+      }
+    }
+
+    function signalShellNotification(title, message) {
+      const timestampMs = Date.now();
+      const payload = {
+        id: `trade:${currentAccount || ""}:${timestampMs}:${String(title || "")}`,
+        title: String(title || "Notification"),
+        message: String(message || ""),
+        wallet: currentAccount,
+        timestampMs,
+      };
+      try {
+        localStorage.setItem("tlse:notify", JSON.stringify(payload));
+      } catch {
+      }
+      if (window.parent && window.parent !== window) {
+        try {
+          window.parent.postMessage({ type: "SHELL_NOTIFY", payload }, "*");
+        } catch {
+        }
+      }
+    }
+
     async function submitPreparedTxs(txs) {
       if (!Array.isArray(txs) || txs.length === 0) {
         throw new Error("No transactions prepared");
@@ -473,6 +507,7 @@
         await waitForWalletReceipt(txHash);
         lastTxHash = txHash;
       }
+      signalPortfolioRefresh("wallet_tx_mined");
       return lastTxHash;
     }
 
@@ -664,11 +699,15 @@
       renderLeveragedProductOptions();
     }
 
-    async function loadListedSymbols() {
+    async function loadListedSymbols(forceFresh = true) {
       const fallbackSymbols = ["TSLA", "AAPL", "MSFT"];
       let listings = [];
       try {
-        const res = await fetch("/api/registry/listings");
+        let url = "/api/registry/listings";
+        if (forceFresh) {
+          url = "/api/registry/listings?noCache=1";
+        }
+        const res = await fetch(url);
         const data = await res.json();
         if (Array.isArray(data.listings)) {
           listings = data.listings;
@@ -1022,8 +1061,10 @@
         return;
       }
       showStatus(buyStatus, "Submitting");
-      const hash = await placeLimitOrder(symbol, "BUY", priceCents, qty);
-      showStatus(buyStatus, `Order placed: ${String(hash)}`);
+      await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      signalPortfolioRefresh("buy_order_placed");
+      signalShellNotification("Buy order submitted", `${symbol} qty ${qty} at $${(priceCents / 100).toFixed(2)}`);
+      showStatus(buyStatus, "Order placed");
       await loadTTokenBalance();
     });
 
@@ -1131,6 +1172,8 @@
         if (data.clientSign && Array.isArray(data.txs)) {
           txHash = await submitPreparedTxs(data.txs);
         }
+        signalPortfolioRefresh("leveraged_buy");
+        signalShellNotification("Leveraged buy completed", `${productSymbol} using ${levTtokenIn.value} TToken`);
         showStatus(levStatus, `Bought leveraged tx ${txHash}`);
         if (data.productToken) {
           levTokenAddress.style.display = "block";
@@ -1167,14 +1210,27 @@
       loadLeveragedBaseQuote();
     });
     window.ethereum.on("chainChanged", function () {
+      loadListedSymbols(true);
       loadLifecycleStatuses();
       loadTradeLivePrice();
       loadTTokenBalance();
       loadAutoRules();
       loadLeveragedBaseQuote();
     });
-    setInterval(loadLifecycleStatuses, 5000);
-    setInterval(loadTradeLivePrice, 1000);
+    window.addEventListener("storage", async function (event) {
+      if (event.key !== SYMBOLS_SIGNAL_KEY) {
+        return;
+      }
+      if (!event.newValue || event.newValue === lastSymbolsSignal) {
+        return;
+      }
+      lastSymbolsSignal = event.newValue;
+      await loadListedSymbols(true);
+      await loadLifecycleStatuses();
+      await loadTradeLivePrice();
+    });
+    setInterval(loadLifecycleStatuses, 10000);
+    setInterval(loadTradeLivePrice, 10000);
   </script>
 </body>
 </html>

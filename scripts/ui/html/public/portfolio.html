@@ -237,6 +237,7 @@
           <th>Current</th>
           <th>Cost Basis</th>
           <th>Market Value</th>
+          <th>P/L %</th>
         </tr>
       </thead>
       <tbody id="positions-body"></tbody>
@@ -244,7 +245,7 @@
 
     <div class="section-header">
       <h2 class="section-title">Claimable Dividends</h2>
-      <div id="dividends-status" class="status">Ready</div>
+      <div id="dividends-status" class="status">Loading</div>
     </div>
     <table>
       <thead>
@@ -259,7 +260,7 @@
 
     <div class="section-header">
       <h2 class="section-title">Leveraged Tokens</h2>
-      <div id="leveraged-status" class="status">Ready</div>
+      <div id="leveraged-status" class="status">Loading</div>
     </div>
     <table>
       <thead>
@@ -291,7 +292,26 @@
 
     let currentWallet = "";
     let pollingEnabled = false;
-    let poller;
+    let livePricePoller;
+    let walletActivityPoller;
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    let refreshQueuedForceFresh = false;
+    let currentSummary = null;
+    let currentPositions = [];
+    let currentClaimables = [];
+    let currentLeveragedPositions = [];
+    let liveQuoteBySymbol = {};
+    let portfolioLoadedOnce = false;
+    let lastPortfolioSignal = "";
+    let gasRefreshPromise = null;
+    let gasSummaryReady = false;
+    let lastKnownWalletNonce = null;
+    let refreshRequestId = 0;
+    let activeRefreshAbortController = null;
+    const PORTFOLIO_SIGNAL_KEY = "tlse:portfolio:refresh";
+    const LIVE_PRICE_INTERVAL_MS = 10000;
+    const WALLET_ACTIVITY_INTERVAL_MS = 10000;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
 
     async function ensureSepoliaNetwork() {
@@ -351,6 +371,117 @@
       return "";
     }
 
+    function signalPortfolioRefresh(reason) {
+      try {
+        const payload = JSON.stringify({
+          reason: String(reason || "wallet_change"),
+          wallet: currentWallet,
+          timestampMs: Date.now(),
+        });
+        localStorage.setItem(PORTFOLIO_SIGNAL_KEY, payload);
+        lastPortfolioSignal = payload;
+      } catch {
+      }
+    }
+
+    function quoteAmountWei(valueWei, priceCents) {
+      return (BigInt(String(valueWei)) * BigInt(String(priceCents))) / 100n;
+    }
+
+    function normalizeChangePercent(rawValue) {
+      const raw = Number(rawValue);
+      if (!Number.isFinite(raw)) {
+        return null;
+      }
+      if (Math.abs(raw) <= 1) {
+        return raw * 100;
+      }
+      return raw;
+    }
+
+    function getDisplayPositionValues(position) {
+      const quote = liveQuoteBySymbol[String(position.symbol || "").toUpperCase()];
+      let priceCents = Number(position.priceCents);
+      if (quote && Number.isFinite(Number(quote.priceCents)) && Number(quote.priceCents) > 0) {
+        priceCents = Number(quote.priceCents);
+      }
+      let currentValueWei = BigInt(String(position.currentValueWei || "0"));
+      if (Number.isFinite(priceCents) && priceCents > 0) {
+        currentValueWei = quoteAmountWei(position.balanceWei, priceCents);
+      }
+      const costBasisWei = BigInt(String(position.costBasisWei || "0"));
+      let pnlPct = Number(position.unrealizedPnlPct);
+      if (!Number.isFinite(pnlPct) && costBasisWei > 0n) {
+        pnlPct = Number(((currentValueWei - costBasisWei) * 10000n) / costBasisWei) / 100;
+      } else if (costBasisWei > 0n) {
+        pnlPct = Number(((currentValueWei - costBasisWei) * 10000n) / costBasisWei) / 100;
+      }
+      return {
+        priceCents,
+        currentValueWei,
+        pnlPct,
+      };
+    }
+
+    function getDisplayLeveragedValues(item) {
+      const leverage = Number(item && item.leverage);
+      let livePriceCents = Number(item && item.navCents);
+      let baseLivePriceCents = Number(item && item.basePriceCents);
+      const liveQuote = liveQuoteBySymbol[String(item && item.baseSymbol ? item.baseSymbol : "").toUpperCase()];
+      if (liveQuote && Number.isFinite(Number(liveQuote.priceCents)) && Number(liveQuote.priceCents) > 0) {
+        baseLivePriceCents = Number(liveQuote.priceCents);
+      }
+      if (Number.isFinite(baseLivePriceCents) && baseLivePriceCents > 0) {
+        livePriceCents = baseLivePriceCents;
+      }
+
+      let changePct = null;
+      const livePrice = Number(livePriceCents) / 100;
+      const avgEntry = Number(item && item.avgEntryPriceCents) / 100;
+      if (
+        Number.isFinite(livePrice)
+        && livePrice > 0
+        && Number.isFinite(avgEntry)
+        && avgEntry > 0
+        && Number.isFinite(leverage)
+        && leverage > 0
+      ) {
+        changePct = (((livePrice - avgEntry) / avgEntry) * leverage) * 100;
+      } else {
+        let baseChangeRaw = item && item.baseChangePct ? item.baseChangePct : Number.NaN;
+        if (liveQuote && liveQuote.changePercent !== null) {
+          baseChangeRaw = liveQuote.changePercent;
+        }
+        const baseChangePct = (typeof baseChangeRaw === "number" && Number.isFinite(baseChangeRaw))
+          ? baseChangeRaw
+          : NaN;
+        if (Number.isFinite(baseChangePct)) {
+          if (Number.isFinite(leverage) && leverage > 0) {
+            changePct = baseChangePct * leverage;
+          } else {
+            changePct = baseChangePct;
+          }
+        }
+      }
+
+      let currentValueWei = toBigIntOrZero(item && item.currentValueWei);
+      const baseAtSnapshotCents = Number(item && item.basePriceCents);
+      if (
+        Number.isFinite(baseAtSnapshotCents)
+        && baseAtSnapshotCents > 0
+        && Number.isFinite(baseLivePriceCents)
+        && baseLivePriceCents > 0
+      ) {
+        currentValueWei = (currentValueWei * BigInt(Math.round(baseLivePriceCents))) / BigInt(Math.round(baseAtSnapshotCents));
+      }
+
+      return {
+        livePriceCents,
+        currentValueWei,
+        changePct,
+      };
+    }
+
     async function waitForWalletReceipt(txHash) {
       for (let i = 0; i < 120; i += 1) {
         const receipt = await window.ethereum.request({
@@ -386,6 +517,7 @@
         await waitForWalletReceipt(txHash);
         lastTxHash = txHash;
       }
+      signalPortfolioRefresh("wallet_tx_mined");
       return lastTxHash;
     }
 
@@ -425,6 +557,15 @@
       return `$${num.toFixed(2)}`;
     }
 
+    function formatCentsAllowZero(cents) {
+      const raw = Number(cents);
+      if (!Number.isFinite(raw) || raw < 0) {
+        return "-";
+      }
+      const num = raw / 100;
+      return `$${num.toFixed(2)}`;
+    }
+
     function formatEthFromWei(valueWei) {
       const num = Number(valueWei) / 1e18;
       if (!Number.isFinite(num) || num < 0) {
@@ -433,19 +574,58 @@
       return `${num.toFixed(6)} ETH`;
     }
 
+    function toBigIntOrZero(value) {
+      try {
+        if (value === undefined || value === null) {
+          return 0n;
+        }
+        return BigInt(String(value));
+      } catch {
+        return 0n;
+      }
+    }
+
     function renderSummary(summary) {
-      const totalValueWei = BigInt(String(summary.totalValueWei));
-      const totalCostBasisWei = BigInt(String(summary.totalCostBasisWei));
+      if (!summary) {
+        return;
+      }
+      const totalValueWei = toBigIntOrZero(summary.totalValueWei);
+      let stockValueWei = 0n;
+      let totalCostBasisWei = 0n;
+      for (let i = 0; i < currentPositions.length; i += 1) {
+        const row = currentPositions[i];
+        const display = getDisplayPositionValues(row);
+        stockValueWei += display.currentValueWei;
+        totalCostBasisWei += toBigIntOrZero(row.costBasisWei);
+      }
+      if (totalCostBasisWei === 0n) {
+        totalCostBasisWei = toBigIntOrZero(summary.totalCostBasisWei);
+      }
+      let leveragedValueWei = 0n;
+      for (let i = 0; i < currentLeveragedPositions.length; i += 1) {
+        const row = currentLeveragedPositions[i];
+        const display = getDisplayLeveragedValues(row);
+        leveragedValueWei += display.currentValueWei;
+      }
+      if (leveragedValueWei === 0n) {
+        leveragedValueWei = toBigIntOrZero(summary.leveragedValueWei);
+      }
+      const cashValueWei = toBigIntOrZero(summary.cashValueWei);
+      const computedTotalValueWei = cashValueWei + stockValueWei + leveragedValueWei;
       const profitWei = totalValueWei - totalCostBasisWei;
       const nativeSymbol = summary.nativeSymbol ? String(summary.nativeSymbol) : "SepoliaETH";
       const nativeEthWei = summary.nativeEthWei ? summary.nativeEthWei : "0";
+      let gasDisplay = "Loading";
+      if (gasSummaryReady) {
+        gasDisplay = formatEthFromWei(summary.overallGasCostWei);
+      }
       const cards = [
-        ["Cash", formatUsdFromWei(summary.cashValueWei)],
-        ["Stock Value", formatUsdFromWei(summary.stockValueWei)],
-        ["Leveraged Value", formatUsdFromWei(summary.leveragedValueWei)],
-        ["Total Value", formatUsdFromWei(summary.totalValueWei)],
-        ["Cost Basis", formatUsdFromWei(summary.totalCostBasisWei)],
-        ["Overall Gas Used", formatEthFromWei(summary.overallGasCostWei)],
+        ["Cash", formatUsdFromWei(cashValueWei.toString())],
+        ["Stock Value", formatUsdFromWei(stockValueWei.toString())],
+        ["Leveraged Value", formatUsdFromWei(leveragedValueWei.toString())],
+        ["Total Value", formatUsdFromWei(computedTotalValueWei.toString())],
+        ["Cost Basis", formatUsdFromWei(totalCostBasisWei.toString())],
+        ["Overall Gas Used", gasDisplay],
         [nativeSymbol, formatEthFromWei(nativeEthWei)],
         // ["Profit", formatUsdFromWeiExact(profitWei.toString())],
       ];
@@ -458,11 +638,71 @@
       }
     }
 
+    function clearPortfolioViewForWalletSwitch() {
+      summaryGrid.innerHTML = "";
+      marketAlert.style.display = "none";
+      marketAlert.textContent = "";
+      currentSummary = null;
+      currentPositions = [];
+      currentClaimables = [];
+      currentLeveragedPositions = [];
+      liveQuoteBySymbol = {};
+      portfolioLoadedOnce = false;
+      gasSummaryReady = false;
+      positionsBody.innerHTML = '<tr><td colspan="7" class="muted">Loading</td></tr>';
+      dividendsBody.innerHTML = '<tr><td colspan="3" class="muted">Loading</td></tr>';
+      leveragedBody.innerHTML = '<tr><td colspan="6" class="muted">Loading</td></tr>';
+      holdingsStatus.textContent = "Loading";
+      dividendsStatus.textContent = "Loading";
+      leveragedStatus.textContent = "Loading";
+      lastKnownWalletNonce = null;
+    }
+
+    async function refreshGasSummaryInBackground() {
+      if (!isValidWalletAddress(currentWallet)) {
+        return;
+      }
+      if (gasRefreshPromise) {
+        return gasRefreshPromise;
+      }
+      const walletAtStart = currentWallet;
+      gasRefreshPromise = (async function () {
+        try {
+          const response = await fetchJsonWithTimeout(
+            `/api/portfolio/summary?wallet=${encodeURIComponent(walletAtStart)}&includeGas=true&noCache=1`,
+            15000
+          );
+          const data = response.data;
+          if (!data || data.error) {
+            return;
+          }
+          if (walletAtStart !== currentWallet) {
+            return;
+          }
+          currentSummary = {
+            ...(currentSummary || {}),
+            overallGasUsedUnits: data.overallGasUsedUnits,
+            overallGasCostWei: data.overallGasCostWei,
+          };
+          gasSummaryReady = true;
+          renderSummary(currentSummary);
+        } catch {
+          if (currentSummary && currentSummary.overallGasCostWei) {
+            gasSummaryReady = true;
+            renderSummary(currentSummary);
+          }
+        } finally {
+          gasRefreshPromise = null;
+        }
+      })();
+      return gasRefreshPromise;
+    }
+
     function renderPositions(positions) {
       positionsBody.innerHTML = "";
       if (!positions.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="6" class="muted">No holdings yet</td>';
+        tr.innerHTML = '<td colspan="7" class="muted">No holdings yet</td>';
         positionsBody.appendChild(tr);
         return;
       }
@@ -474,14 +714,31 @@
           lifecycle = String(lifecycleRow.status).toUpperCase();
         }
         const isTradable = lifecycle === "ACTIVE";
+        const display = getDisplayPositionValues(p);
+        let pnlPct = Number(display.pnlPct);
+        let pnlClass = "gain neutral";
+        let pnlText = "-";
+        if (Number.isFinite(pnlPct)) {
+          if (pnlPct > 0) {
+            pnlClass = "gain positive";
+            pnlText = `+${pnlPct.toFixed(2)}%`;
+          } else if (pnlPct < 0) {
+            pnlClass = "gain negative";
+            pnlText = `${pnlPct.toFixed(2)}%`;
+          } else {
+            pnlClass = "gain neutral";
+            pnlText = "0.00%";
+          }
+        }
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${p.symbol}</td>
           <td>${formatWeiToToken(p.balanceWei, 2)}</td>
-          <td>${formatCents(p.avgCostCents)}</td>
-          <td>${formatCents(p.priceCents)}</td>
+          <td>${formatCentsAllowZero(resolveAvgCostCents(p))}</td>
+          <td>${formatCents(display.priceCents)}</td>
           <td>${formatUsdFromWei(p.costBasisWei)}</td>
-          <td>${formatUsdFromWei(p.currentValueWei)}</td>
+          <td>${formatUsdFromWei(display.currentValueWei.toString())}</td>
+          <td class="${pnlClass}">${pnlText}</td>
         `;
         if (isTradable) {
           tr.style.cursor = "pointer";
@@ -563,6 +820,7 @@
         if (data.clientSign && Array.isArray(data.txs)) {
           txHash = await submitPreparedTxs(data.txs);
         }
+        signalPortfolioRefresh("dividend_claim");
         dividendsStatus.textContent = `Claimed ${symbol}. Tx: ${txHash}`;
         await refreshPortfolio();
       } catch (err) {
@@ -664,6 +922,7 @@
         if (data.clientSign && Array.isArray(data.txs)) {
           txHash = await submitPreparedTxs(data.txs);
         }
+        signalPortfolioRefresh("leveraged_sell");
         leveragedStatus.textContent = `Sold ${productSymbol} Tx: ${txHash}`;
         await refreshPortfolio();
       } catch (err) {
@@ -707,32 +966,9 @@
 
         actionWrap.appendChild(sellBtn);
         actionTd.appendChild(actionWrap);
-        const leverage = Number(item.leverage);
-        let changePct = null;
-        const livePrice = Number(item.navCents) / 100;
-        const avgEntry = Number(item.avgEntryPriceCents) / 100;
-        if (
-          Number.isFinite(livePrice)
-          && livePrice > 0
-          && Number.isFinite(avgEntry)
-          && avgEntry > 0
-          && Number.isFinite(leverage)
-          && leverage > 0
-        ) {
-          changePct = (((livePrice - avgEntry) / avgEntry) * leverage) * 100;
-        } else {
-          const baseChangeRaw = item.baseChangePct;
-          const baseChangePct = (typeof baseChangeRaw === "number" && Number.isFinite(baseChangeRaw))
-            ? baseChangeRaw
-            : NaN;
-          if (Number.isFinite(baseChangePct)) {
-            if (Number.isFinite(leverage) && leverage > 0) {
-              changePct = baseChangePct * leverage;
-            } else {
-              changePct = baseChangePct;
-            }
-          }
-        }
+        const display = getDisplayLeveragedValues(item);
+        const livePriceCents = display.livePriceCents;
+        const changePct = display.changePct;
         let changeClass = "gain neutral";
         let changeText = "-";
         if (Number.isFinite(changePct)) {
@@ -749,108 +985,459 @@
         }
         tr.innerHTML = `
           <td>${item.productSymbol}</td>
-          <td>${formatCents(item.navCents)}</td>
+          <td>${formatCents(livePriceCents)}</td>
           <td class="${changeClass}">${changeText}</td>
           <td>${formatCents(item.avgEntryPriceCents)}</td>
-          <td>${formatUsdFromWei(item.currentValueWei)}</td>
+          <td>${formatUsdFromWei(display.currentValueWei.toString())}</td>
         `;
         tr.appendChild(actionTd);
         leveragedBody.appendChild(tr);
       }
     }
 
-    async function refreshPortfolio() {
+    async function fetchJsonWithTimeout(url, timeoutMs = 8000, externalSignal = null) {
+      const controller = new AbortController();
+      let detachExternalAbort = null;
+      if (externalSignal && typeof externalSignal.addEventListener === "function") {
+        const forwardAbort = function () {
+          controller.abort();
+        };
+        externalSignal.addEventListener("abort", forwardAbort);
+        detachExternalAbort = function () {
+          externalSignal.removeEventListener("abort", forwardAbort);
+        };
+        if (externalSignal.aborted) {
+          controller.abort();
+        }
+      }
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        const data = await res.json();
+        return { res, data };
+      } finally {
+        clearTimeout(timer);
+        if (detachExternalAbort) {
+          detachExternalAbort();
+        }
+      }
+    }
+
+    async function fetchJsonWithRetry(url, timeoutMs = 8000, attempts = 3, externalSignal = null) {
+      let last = null;
+      for (let i = 0; i < attempts; i += 1) {
+        if (externalSignal && externalSignal.aborted) {
+          return null;
+        }
+        try {
+          const result = await fetchJsonWithTimeout(url, timeoutMs, externalSignal);
+          last = result;
+          if (result.res && result.res.ok && result.data && !result.data.error) {
+            return result;
+          }
+        } catch (err) {
+          const message = String((err && err.message) || "");
+          if (message === "aborted" || message === "AbortError") {
+            return null;
+          }
+        }
+        if (i < attempts - 1) {
+          const waitMs = 400 * (i + 1);
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+      }
+      return last;
+    }
+
+    function abortActiveRefresh() {
+      if (activeRefreshAbortController) {
+        try {
+          activeRefreshAbortController.abort();
+        } catch {
+        }
+      }
+    }
+
+    function resolveAvgCostCents(position) {
+      const directValue = Number(position && position.avgCostCents);
+      if (Number.isFinite(directValue) && directValue >= 0) {
+        return directValue;
+      }
+      const balanceWei = toBigIntOrZero(position && position.balanceWei);
+      const costBasisWei = toBigIntOrZero(position && position.costBasisWei);
+      if (balanceWei <= 0n || costBasisWei < 0n) {
+        return 0;
+      }
+      const computed = Number((costBasisWei * 100n) / balanceWei);
+      if (Number.isFinite(computed) && computed >= 0) {
+        return computed;
+      }
+      return 0;
+    }
+
+    async function refreshLiveQuotes() {
+      const symbols = new Set();
+      for (let i = 0; i < currentPositions.length; i += 1) {
+        const row = currentPositions[i];
+        if (row && row.symbol) {
+          symbols.add(String(row.symbol).toUpperCase());
+        }
+      }
+      for (let i = 0; i < currentLeveragedPositions.length; i += 1) {
+        const row = currentLeveragedPositions[i];
+        if (row && row.baseSymbol) {
+          symbols.add(String(row.baseSymbol).toUpperCase());
+        }
+      }
+      if (symbols.size === 0) {
+        return;
+      }
+      const nextQuotes = { ...liveQuoteBySymbol };
+      const allSymbols = Array.from(symbols);
+      const responses = await Promise.allSettled(
+        allSymbols.map((symbol) => fetchJsonWithTimeout(`/api/fmp/quote-short?symbol=${encodeURIComponent(symbol)}`, 3000))
+      );
+      let anyChanged = false;
+      for (let i = 0; i < responses.length; i += 1) {
+        const row = responses[i];
+        if (row.status !== "fulfilled") {
+          continue;
+        }
+        const data = row.value.data;
+        if (!data || data.error) {
+          continue;
+        }
+        const price = Number(data.price);
+        const priceCents = Number.isFinite(price) && price > 0 ? Math.round(price * 100) : NaN;
+        const changePercent = normalizeChangePercent(data.changePercent);
+        if (Number.isFinite(priceCents) && priceCents > 0) {
+          nextQuotes[allSymbols[i]] = {
+            priceCents,
+            changePercent,
+          };
+          anyChanged = true;
+        }
+      }
+      if (!anyChanged) {
+        return;
+      }
+      liveQuoteBySymbol = nextQuotes;
+      renderPositions(currentPositions);
+      renderLeveragedPositions(currentLeveragedPositions);
+      renderSummary(currentSummary);
+    }
+
+    async function refreshPortfolio(forceFresh = false) {
       if (!isValidWalletAddress(currentWallet)) {
         holdingsStatus.textContent = "Wallet not connected";
         return;
       }
+      if (refreshInFlight) {
+        refreshQueued = true;
+        if (forceFresh) {
+          refreshQueuedForceFresh = true;
+          abortActiveRefresh();
+          refreshRequestId += 1;
+        }
+        return;
+      }
+      refreshInFlight = true;
+      const refreshController = new AbortController();
+      activeRefreshAbortController = refreshController;
       try {
         await ensureSepoliaNetwork();
       } catch (err) {
         holdingsStatus.textContent = err.message ? String(err.message) : "Please switch to Sepolia";
+        if (activeRefreshAbortController === refreshController) {
+          activeRefreshAbortController = null;
+        }
+        refreshInFlight = false;
         return;
       }
-      holdingsStatus.textContent = "Loading";
+      try {
+        holdingsStatus.textContent = portfolioLoadedOnce ? "Refreshing" : "Loading";
+        dividendsStatus.textContent = "Loading";
+        leveragedStatus.textContent = "Loading";
+        gasSummaryReady = false;
+        const requestId = ++refreshRequestId;
+        const walletAtStart = currentWallet;
+        let freshnessQuery = "";
+        if (forceFresh) {
+          freshnessQuery = "&noCache=1";
+        }
+        const claimablesPromise = fetchJsonWithRetry(
+          `/api/dividends/claimables?wallet=${encodeURIComponent(walletAtStart)}`,
+          12000,
+          2,
+          refreshController.signal
+        );
+        const leveragedPromise = fetchJsonWithRetry(
+          `/api/leveraged/positions?wallet=${encodeURIComponent(walletAtStart)}`,
+          12000,
+          2,
+          refreshController.signal
+        );
+        const summaryResult = await fetchJsonWithRetry(
+          `/api/portfolio/summary?wallet=${encodeURIComponent(walletAtStart)}${freshnessQuery}`,
+          15000,
+          3,
+          refreshController.signal
+        );
+        if (requestId !== refreshRequestId || walletAtStart !== currentWallet) {
+          return;
+        }
 
-      const [summaryRes, positionsRes, claimablesRes, leveragedRes, lifecycleRes] = await Promise.all([
-        fetch(`/api/portfolio/summary?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/portfolio/positions?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/dividends/claimables?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch(`/api/leveraged/positions?wallet=${encodeURIComponent(currentWallet)}`),
-        fetch("/api/admin/symbols/status"),
-      ]);
+        let summaryData = null;
+        let positionsData = null;
+        if (summaryResult && summaryResult.data && !summaryResult.data.error) {
+          summaryData = summaryResult.data;
+        }
+        let summaryDegraded = false;
+        if (summaryData && summaryData.degraded) {
+          summaryDegraded = true;
+        }
+        if (summaryData && Array.isArray(summaryData.positions) && !summaryDegraded) {
+          positionsData = { positions: summaryData.positions };
+        } else {
+          let positionsQuery = freshnessQuery;
+          if (summaryDegraded) {
+            positionsQuery = "&noCache=1";
+          }
+          const positionsResult = await fetchJsonWithRetry(
+            `/api/portfolio/positions?wallet=${encodeURIComponent(walletAtStart)}${positionsQuery}`,
+            12000,
+            2,
+            refreshController.signal
+          );
+          if (positionsResult && positionsResult.data && !positionsResult.data.error) {
+            positionsData = positionsResult.data;
+          }
+        }
+        let summaryOk = false;
+        if (summaryData && !summaryData.error) {
+          summaryOk = true;
+        }
+        let positionsOk = false;
+        if (positionsData && !positionsData.error && Array.isArray(positionsData.positions)) {
+          positionsOk = true;
+        }
+        if (summaryOk) {
+          currentSummary = summaryData;
+        }
+        if (!summaryOk && !currentSummary) {
+          const cashResult = await fetchJsonWithRetry(
+            `/api/ttoken/balance?address=${encodeURIComponent(walletAtStart)}`,
+            8000,
+            2,
+            refreshController.signal
+          );
+          let cashWei = "0";
+          if (cashResult && cashResult.data && !cashResult.data.error && cashResult.data.balanceWei) {
+            cashWei = String(cashResult.data.balanceWei);
+          }
+          currentSummary = {
+            wallet: walletAtStart,
+            nativeSymbol: "SepoliaETH",
+            nativeEthWei: "0",
+            cashValueWei: cashWei,
+            stockValueWei: "0",
+            leveragedValueWei: "0",
+            totalValueWei: "0",
+            totalCostBasisWei: "0",
+            overallGasUsedUnits: "0",
+            overallGasCostWei: "0",
+          };
+        }
+        if (positionsOk) {
+          currentPositions = positionsData.positions;
+          renderPositions(currentPositions);
+          renderMarketAlert(currentPositions);
+          portfolioLoadedOnce = true;
+          if (summaryData && summaryData.degraded) {
+            let stockValueWei = 0n;
+            let costBasisWei = 0n;
+            for (let i = 0; i < currentPositions.length; i += 1) {
+              const row = currentPositions[i];
+              stockValueWei += toBigIntOrZero(row.currentValueWei);
+              costBasisWei += toBigIntOrZero(row.costBasisWei);
+            }
+            const cashWei = toBigIntOrZero(summaryData.cashValueWei);
+            const leveragedWei = toBigIntOrZero(summaryData.leveragedValueWei);
+            summaryData.stockValueWei = stockValueWei.toString();
+            summaryData.totalCostBasisWei = costBasisWei.toString();
+            summaryData.totalValueWei = (cashWei + stockValueWei + leveragedWei).toString();
+          }
+        }
+        if (currentSummary) {
+          renderSummary(currentSummary);
+        }
+        refreshGasSummaryInBackground();
+        if (summaryOk && positionsOk) {
+          holdingsStatus.textContent = "";
+        } else {
+          holdingsStatus.textContent = "Loading";
+        }
 
-      const summaryData = await summaryRes.json();
-      const positionsData = await positionsRes.json();
-      const claimablesData = await claimablesRes.json();
-      const leveragedData = await leveragedRes.json();
-      const lifecycleData = await lifecycleRes.json();
-      let lifecycleRows = [];
-      if (Array.isArray(lifecycleData.symbols)) {
-        lifecycleRows = lifecycleData.symbols;
-      }
-      lifecycleBySymbol = {};
-      for (let i = 0; i < lifecycleRows.length; i += 1) {
-        const row = lifecycleRows[i];
-        lifecycleBySymbol[String(row.symbol).toUpperCase()] = row;
-      }
+        let claimablesData = null;
+        const claimablesResult = await claimablesPromise;
+        if (requestId !== refreshRequestId || walletAtStart !== currentWallet) {
+          return;
+        }
+        if (claimablesResult && claimablesResult.data) {
+          claimablesData = claimablesResult.data;
+        }
+        let claimablesOk = false;
+        if (claimablesData && !claimablesData.error && Array.isArray(claimablesData.claimables)) {
+          claimablesOk = true;
+        }
+        if (claimablesOk) {
+          currentClaimables = claimablesData.claimables;
+          renderClaimables(currentClaimables);
+          dividendsStatus.textContent = "Ready";
+        } else {
+          renderClaimables([]);
+          dividendsStatus.textContent = "Loading";
+        }
 
-      let summaryFailed = false;
-      if (!summaryRes.ok) {
-        summaryFailed = true;
+        let leveragedData = null;
+        const leveragedResult = await leveragedPromise;
+        if (requestId !== refreshRequestId || walletAtStart !== currentWallet) {
+          return;
+        }
+        if (leveragedResult && leveragedResult.data) {
+          leveragedData = leveragedResult.data;
+        }
+        let leveragedOk = false;
+        if (leveragedData && !leveragedData.error && Array.isArray(leveragedData.positions)) {
+          leveragedOk = true;
+        }
+        if (leveragedOk) {
+          currentLeveragedPositions = leveragedData.positions;
+          renderLeveragedPositions(currentLeveragedPositions);
+          leveragedStatus.textContent = "Ready";
+        } else {
+          renderLeveragedPositions([]);
+          leveragedStatus.textContent = "Loading";
+        }
+        await refreshLiveQuotes();
+      } catch (err) {
+        const message = String((err && err.message) || "");
+        if (message !== "aborted") {
+          holdingsStatus.textContent = "Loading";
+          dividendsStatus.textContent = "Loading";
+          leveragedStatus.textContent = "Loading";
+        }
+      } finally {
+        if (activeRefreshAbortController === refreshController) {
+          activeRefreshAbortController = null;
+        }
+        refreshInFlight = false;
+        if (refreshQueued) {
+          const nextForceFresh = refreshQueuedForceFresh;
+          refreshQueued = false;
+          refreshQueuedForceFresh = false;
+          refreshPortfolio(nextForceFresh);
+        }
       }
-      if (summaryData.error) {
-        summaryFailed = true;
-      }
-      if (summaryFailed) {
-        holdingsStatus.textContent = String(summaryData.error);
-        return;
-      }
-      let positionsFailed = false;
-      if (!positionsRes.ok) {
-        positionsFailed = true;
-      }
-      if (positionsData.error) {
-        positionsFailed = true;
-      }
-      if (positionsFailed) {
-        holdingsStatus.textContent = String(positionsData.error);
-        return;
-      }
-
-      renderSummary(summaryData);
-      renderPositions(positionsData.positions);
-      renderMarketAlert(positionsData.positions);
-      renderClaimables(claimablesData.claimables);
-      renderLeveragedPositions(leveragedData.positions);
-      holdingsStatus.textContent = ``;
-      holdingsStatus.textContent = ``;
-      // Loaded ${positionsData.positions.length} positions
-
-      dividendsStatus.textContent = "Ready";
-      leveragedStatus.textContent = "Ready";
     }
 
     function setPolling(enabled) {
       pollingEnabled = enabled;
-      if (poller) {
-        clearInterval(poller);
+      if (livePricePoller) {
+        clearInterval(livePricePoller);
       }
       if (enabled) {
-        refreshPortfolio();
-        poller = setInterval(refreshPortfolio, 10000);
+        livePricePoller = setInterval(refreshLiveQuotes, LIVE_PRICE_INTERVAL_MS);
       }
     }
 
-    refreshBtn.addEventListener("click", refreshPortfolio);
+    async function checkWalletActivityAndRefresh() {
+      if (!isValidWalletAddress(currentWallet) || !window.ethereum) {
+        return;
+      }
+      try {
+        const nonceHex = await window.ethereum.request({
+          method: "eth_getTransactionCount",
+          params: [currentWallet, "latest"],
+        });
+        const nonce = Number(nonceHex);
+        if (!Number.isFinite(nonce)) {
+          return;
+        }
+        if (lastKnownWalletNonce === null) {
+          lastKnownWalletNonce = nonce;
+          return;
+        }
+        if (nonce !== lastKnownWalletNonce) {
+          lastKnownWalletNonce = nonce;
+          refreshPortfolio();
+        }
+      } catch {
+      }
+    }
+
+    function startWalletActivityListener() {
+      if (walletActivityPoller) {
+        clearInterval(walletActivityPoller);
+      }
+      walletActivityPoller = setInterval(checkWalletActivityAndRefresh, WALLET_ACTIVITY_INTERVAL_MS);
+      checkWalletActivityAndRefresh();
+    }
+
+    refreshBtn.addEventListener("click", function () {
+      refreshPortfolio(true);
+    });
 
     window.ethereum.on("accountsChanged", function (accounts) {
+      abortActiveRefresh();
+      refreshRequestId += 1;
       currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
-      refreshPortfolio();
+      clearPortfolioViewForWalletSwitch();
+      refreshPortfolio(true);
     });
     window.ethereum.on("chainChanged", function () {
-      refreshPortfolio();
+      refreshPortfolio(true);
+    });
+    window.addEventListener("focus", function () {
+      refreshPortfolio(true);
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) {
+        refreshPortfolio(true);
+      }
+    });
+    window.addEventListener("storage", function (event) {
+      if (event.key !== PORTFOLIO_SIGNAL_KEY) {
+        return;
+      }
+      if (!event.newValue || event.newValue === lastPortfolioSignal) {
+        return;
+      }
+      lastPortfolioSignal = event.newValue;
+      let forceFresh = true;
+      try {
+        const payload = JSON.parse(event.newValue);
+        const signalWallet = String(payload && payload.wallet ? payload.wallet : "").toLowerCase();
+        const activeWallet = String(currentWallet || "").toLowerCase();
+        if (signalWallet && activeWallet && signalWallet !== activeWallet) {
+          return;
+        }
+        const reason = String(payload && payload.reason ? payload.reason : "").toLowerCase();
+        if (
+          reason.includes("tx")
+          || reason.includes("claim")
+          || reason.includes("sell")
+          || reason.includes("buy")
+          || reason.includes("mint")
+          || reason.includes("trade")
+          || reason.includes("order")
+        ) {
+          forceFresh = true;
+        }
+      } catch {
+      }
+      refreshPortfolio(forceFresh);
     });
 
     (async function init() {
@@ -858,6 +1445,7 @@
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       currentWallet = chooseDisplayAccount(accounts);
       walletEl.textContent = `Wallet: ${currentWallet}`;
+      clearPortfolioViewForWalletSwitch();
       try {
         const lifecycleRes = await fetch("/api/admin/symbols/status");
         const lifecycleData = await lifecycleRes.json();
@@ -873,7 +1461,8 @@
       } catch {
         lifecycleBySymbol = {};
       }
-      await refreshPortfolio();
+      await refreshPortfolio(true);
+      startWalletActivityListener();
       setPolling(pollingEnabled);
     })();
 

@@ -24,6 +24,7 @@ const fmpDetailsCache = new Map();
 const FMP_DETAILS_TTL_MS = 30000;
 const fmpIndexTickerCache = new Map();
 const FMP_INDEX_TTL_MS = 2000;
+const FMP_INDEX_SNAPSHOT_TTL_MS = 10000;
 const INDEXER_SYNC_INTERVAL_MS = 5000;
 // fmp caches
 let FMP_API_KEY = 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
@@ -299,7 +300,18 @@ const leveragedRouterInterface = new ethers.Interface([
   'event LeveragedUnwound(address indexed user,address indexed productToken,string baseSymbol,uint8 leverage,uint256 productInWei,uint256 ttokenOutWei,uint256 navCents)',
 ]);
 
-const INDEXER_DIR = path.join(__dirname, '../../..', 'cache', 'indexer');
+const DEFAULT_CACHE_ROOT_DIR = path.join(__dirname, '../../..', 'cache');
+const PERSISTENT_DATA_ROOT_DIR = (() => {
+  let configured = '';
+  if (process.env.PERSISTENT_DATA_DIR) {
+    configured = String(process.env.PERSISTENT_DATA_DIR).trim();
+  }
+  if (!configured) {
+    return DEFAULT_CACHE_ROOT_DIR;
+  }
+  return path.resolve(configured);
+})();
+const INDEXER_DIR = path.join(PERSISTENT_DATA_ROOT_DIR, 'indexer');
 const INDEXER_STATE_FILE = path.join(INDEXER_DIR, 'state.json');
 const INDEXER_ORDERS_FILE = path.join(INDEXER_DIR, 'orders.json');
 const INDEXER_FILLS_FILE = path.join(INDEXER_DIR, 'fills.json');
@@ -307,14 +319,15 @@ const INDEXER_CANCELLATIONS_FILE = path.join(INDEXER_DIR, 'cancellations.json');
 const INDEXER_CASHFLOWS_FILE = path.join(INDEXER_DIR, 'cashflows.json');
 const INDEXER_TRANSFERS_FILE = path.join(INDEXER_DIR, 'transfers.json');
 const INDEXER_LEVERAGED_FILE = path.join(INDEXER_DIR, 'leveraged.json');
-const AUTOTRADE_DIR = path.join(__dirname, '../../..', 'cache', 'autotrade');
+const GET_LOGS_CHUNK_STATE_FILE = path.join(INDEXER_DIR, 'get-logs-chunk.json');
+const AUTOTRADE_DIR = path.join(PERSISTENT_DATA_ROOT_DIR, 'autotrade');
 const AUTOTRADE_STATE_FILE = path.join(AUTOTRADE_DIR, 'state.json');
 const SYMBOL_STATUS_FILE = path.join(AUTOTRADE_DIR, 'symbolStatus.json');
-const ADMIN_DIR = path.join(__dirname, '../../..', 'cache', 'admin');
+const ADMIN_DIR = path.join(PERSISTENT_DATA_ROOT_DIR, 'admin');
 const AWARD_SESSION_FILE = path.join(ADMIN_DIR, 'awardSession.json');
 const LIVE_UPDATES_STATE_FILE = path.join(ADMIN_DIR, 'liveUpdates.json');
 const ADMIN_WALLETS_STATE_FILE = path.join(ADMIN_DIR, 'adminWallets.json');
-const DIVIDENDS_MERKLE_DIR = path.join(__dirname, '../../..', 'cache', 'dividends-merkle');
+const DIVIDENDS_MERKLE_DIR = path.join(PERSISTENT_DATA_ROOT_DIR, 'dividends-merkle');
 const MERKLE_HOLDER_SCAN_STATE_FILE = path.join(DIVIDENDS_MERKLE_DIR, 'holder-scan-state.json');
 const MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS = (() => {
   const raw = Number(process.env.MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS || '');
@@ -380,6 +393,41 @@ const INDEXER_ENABLE_LEVERAGED = process.env.INDEXER_ENABLE_LEVERAGED
 const TXS_ENABLE_LEVERAGE_FALLBACK_SCAN = process.env.TXS_ENABLE_LEVERAGE_FALLBACK_SCAN
   ? String(process.env.TXS_ENABLE_LEVERAGE_FALLBACK_SCAN).toLowerCase() === 'true'
   : false;
+const INDEXER_SYNC_WAIT_MS = (() => {
+  const raw = Number(process.env.INDEXER_SYNC_WAIT_MS || '');
+  if (Number.isFinite(raw) && raw >= 500) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 4000;
+  }
+  return 8000;
+})();
+const INDEXER_STALE_ALLOW_MS = (() => {
+  if (NETWORK_NAME === 'sepolia') {
+    return 30000;
+  }
+  return 10000;
+})();
+const INDEXER_MAX_SYNC_BLOCKS_PER_RUN = (() => {
+  const raw = Number(process.env.INDEXER_MAX_SYNC_BLOCKS_PER_RUN || '');
+  if (Number.isFinite(raw) && raw >= 1) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 3000;
+  }
+  return 15000;
+})();
+const LISTINGS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
+const LEVERAGED_PRODUCTS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
+const PORTFOLIO_HOLDINGS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 5000 : 2000;
+const PORTFOLIO_RPC_CONCURRENCY = NETWORK_NAME === 'sepolia' ? 4 : 8;
+const ORDERBOOK_CHAIN_FILLS_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
+const PORTFOLIO_GAS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 60000 : 15000;
+const PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY = process.env.PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY
+  ? String(process.env.PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY).toLowerCase() === 'true'
+  : false;
 
 let indexerSyncPromise = null;
 const symbolByTokenCache = new Map();
@@ -399,6 +447,169 @@ const awardCache = {
 };
 const txReceiptGasCache = new Map();
 const signerTxQueues = new Map();
+let listingsCache = {
+  registryAddr: '',
+  timestampMs: 0,
+  items: [],
+};
+let leveragedProductsCache = {
+  factoryAddr: '',
+  timestampMs: 0,
+  items: [],
+};
+const portfolioHoldingsCache = new Map();
+const contractDeploymentBlockCache = new Map();
+const orderbookChainFillsCache = new Map();
+const walletChainActivityCache = new Map();
+const portfolioGasCache = new Map();
+const portfolioGasInflight = new Map();
+let fmpIndexTickerSnapshot = {
+  timestampMs: 0,
+  rows: [],
+  degraded: false,
+  warnings: [],
+};
+let fmpIndexTickerInflight = null;
+const uiReadCache = new Map();
+const uiReadInflight = new Map();
+const lastKnownPortfolioSummaryByWallet = new Map();
+const lastKnownPortfolioPositionsByWallet = new Map();
+const lastKnownClaimablesByWallet = new Map();
+let persistedGetLogsChunkSize = 0;
+
+const UI_SUMMARY_TTL_MS = 5000;
+const UI_POSITIONS_TTL_MS = 5000;
+const UI_CLAIMABLES_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 10000;
+const UI_FILLS_FAST_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 10000;
+const UI_LISTINGS_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 10000;
+
+function makeUiReadCacheKey(prefix, parts) {
+  const rows = [];
+  if (parts && typeof parts === 'object') {
+    const entries = Object.entries(parts);
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+    for (let i = 0; i < entries.length; i += 1) {
+      const entry = entries[i];
+      rows.push(`${entry[0]}=${String(entry[1])}`);
+    }
+  }
+  return `${prefix}|${rows.join('&')}`;
+}
+
+function readUiReadCache(cacheKey, ttlMs) {
+  const row = uiReadCache.get(cacheKey);
+  if (!row) {
+    return null;
+  }
+  if ((Date.now() - Number(row.timestampMs || 0)) > ttlMs) {
+    uiReadCache.delete(cacheKey);
+    return null;
+  }
+  return row.value;
+}
+
+function writeUiReadCache(cacheKey, value) {
+  uiReadCache.set(cacheKey, {
+    timestampMs: Date.now(),
+    value,
+  });
+}
+
+function clearUiReadCacheByPrefix(prefix) {
+  const start = `${String(prefix)}|`;
+  const keys = Array.from(uiReadCache.keys());
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i];
+    if (String(key).startsWith(start)) {
+      uiReadCache.delete(key);
+    }
+  }
+}
+
+async function runUiCoalesced(cacheKey, loader) {
+  const existing = uiReadInflight.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+  const task = Promise.resolve().then(loader).finally(() => {
+    if (uiReadInflight.get(cacheKey) === task) {
+      uiReadInflight.delete(cacheKey);
+    }
+  });
+  uiReadInflight.set(cacheKey, task);
+  return task;
+}
+
+function invalidatePortfolioCachesForWallet(walletRaw) {
+  const wallet = normalizeAddress(walletRaw);
+  if (!wallet) {
+    return;
+  }
+  const lower = wallet.toLowerCase();
+  const cacheKeys = [];
+  cacheKeys.push(makeUiReadCacheKey('portfolio-summary', { wallet, includeGas: false, includeAggregator: false }));
+  cacheKeys.push(makeUiReadCacheKey('portfolio-summary', { wallet, includeGas: true, includeAggregator: false }));
+  cacheKeys.push(makeUiReadCacheKey('portfolio-summary', { wallet, includeGas: false, includeAggregator: true }));
+  cacheKeys.push(makeUiReadCacheKey('portfolio-summary', { wallet, includeGas: true, includeAggregator: true }));
+  cacheKeys.push(makeUiReadCacheKey('portfolio-positions', { wallet }));
+  cacheKeys.push(makeUiReadCacheKey('dividends-claimables', { wallet }));
+  for (let i = 0; i < cacheKeys.length; i += 1) {
+    uiReadCache.delete(cacheKeys[i]);
+  }
+  portfolioGasCache.delete(lower);
+  portfolioGasInflight.delete(lower);
+}
+
+function invalidateListingsCaches() {
+  listingsCache = {
+    registryAddr: '',
+    timestampMs: 0,
+    items: [],
+  };
+  clearUiReadCacheByPrefix('registry-listings');
+}
+
+async function withTimeout(promise, timeoutMs, timeoutMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
+    }),
+  ]);
+}
+
+function readPersistedGetLogsChunkSize() {
+  try {
+    const payload = readJsonFile(GET_LOGS_CHUNK_STATE_FILE, null);
+    if (!payload || typeof payload !== 'object') {
+      return 0;
+    }
+    const value = Number(payload.chunkSize || 0);
+    if (Number.isFinite(value) && value >= 1) {
+      return Math.floor(value);
+    }
+  } catch {
+  }
+  return 0;
+}
+
+function persistGetLogsChunkSize(chunkSizeRaw) {
+  const chunkSize = Number(chunkSizeRaw);
+  if (!Number.isFinite(chunkSize) || chunkSize < 1) {
+    return;
+  }
+  persistedGetLogsChunkSize = Math.floor(chunkSize);
+  try {
+    ensureIndexerDir();
+    writeJsonFile(GET_LOGS_CHUNK_STATE_FILE, {
+      chunkSize: persistedGetLogsChunkSize,
+      updatedAtMs: Date.now(),
+    });
+  } catch {
+  }
+}
 
 async function enqueueSignerSend(address, job) {
   const key = String(address || '').toLowerCase();
@@ -431,6 +642,19 @@ function getBaseAdminWalletAllowlist() {
   if (IMMUTABLE_ADMIN_WALLET) {
     wallets.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
   }
+  try {
+    const deployments = loadDeployments();
+    const deployedAdmin = normalizeAddress(deployments.admin);
+    if (deployedAdmin) {
+      wallets.add(deployedAdmin.toLowerCase());
+    }
+  } catch {
+  }
+  return wallets;
+}
+
+function getSeedAdminWalletAllowlist() {
+  const wallets = getBaseAdminWalletAllowlist();
   if (process.env.ADMIN_WALLETS) {
     const rawValues = String(process.env.ADMIN_WALLETS)
       .split(',')
@@ -443,31 +667,32 @@ function getBaseAdminWalletAllowlist() {
       }
     }
   }
-  try {
-    const deployments = loadDeployments();
-    const deployedAdmin = normalizeAddress(deployments.admin);
-    if (deployedAdmin) {
-      wallets.add(deployedAdmin.toLowerCase());
-    }
-  } catch {
-  }
   return wallets;
 }
 
 function getDefaultAdminWalletState() {
-  const base = Array.from(getBaseAdminWalletAllowlist())
+  const base = Array.from(getSeedAdminWalletAllowlist())
     .map((item) => normalizeAddress(item))
     .filter(Boolean);
   base.sort((a, b) => a.localeCompare(b));
   return {
     wallets: base,
+    removedWallets: [],
     updatedAtMs: 0,
   };
 }
 
 function readAdminWalletState() {
   ensureAdminDir();
-  return readJsonFile(ADMIN_WALLETS_STATE_FILE, getDefaultAdminWalletState());
+  const fallbackWallets = Array.from(getBaseAdminWalletAllowlist())
+    .map((item) => normalizeAddress(item))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+  return readJsonFile(ADMIN_WALLETS_STATE_FILE, {
+    wallets: fallbackWallets,
+    removedWallets: [],
+    updatedAtMs: 0,
+  });
 }
 
 function writeAdminWalletState(state) {
@@ -478,12 +703,23 @@ function writeAdminWalletState(state) {
 function getAdminWalletAllowlist() {
   const wallets = getBaseAdminWalletAllowlist();
   const state = readAdminWalletState();
+  const removedRowsRaw = Array.isArray(state.removedWallets) ? state.removedWallets : [];
+  const removedSet = new Set();
+  for (let i = 0; i < removedRowsRaw.length; i += 1) {
+    const normalized = normalizeAddress(removedRowsRaw[i]);
+    if (normalized) {
+      removedSet.add(normalized.toLowerCase());
+    }
+  }
   const rows = Array.isArray(state.wallets) ? state.wallets : [];
   for (let i = 0; i < rows.length; i += 1) {
     const normalized = normalizeAddress(rows[i]);
     if (normalized) {
       wallets.add(normalized.toLowerCase());
     }
+  }
+  for (const row of removedSet) {
+    wallets.delete(row);
   }
   return wallets;
 }
@@ -722,11 +958,29 @@ async function sendSignedRpcTransaction(txRequest) {
     tx.chainId = toOptionalNumber(txRequest.chainId);
   }
 
-  const txHash = await enqueueSignerSend(signer.address, async () => {
-    const txResponse = await signer.sendTransaction(tx);
-    return txResponse.hash;
-  });
-  return txHash;
+  let lastError = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const txHash = await enqueueSignerSend(signer.address, async () => {
+        const txResponse = await signer.sendTransaction(tx);
+        return txResponse.hash;
+      });
+      return txHash;
+    } catch (error) {
+      lastError = error;
+      const message = String(error && error.message ? error.message : error);
+      const retryable = isRpcRateLimitError(message);
+      if (!retryable || attempt >= 5) {
+        throw error;
+      }
+      const waitMs = Math.min(10000, 700 * (attempt + 1));
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error('signed tx submit failed');
 }
 
 // connect to rpc and contracts
@@ -833,11 +1087,19 @@ function isRpcRateLimitError(messageRaw) {
   return false;
 }
 
-async function getLogsChunked(baseFilter, startBlock, endBlock) {
+async function getLogsChunked(baseFilter, startBlock, endBlock, preferredChunkSize) {
   const allLogs = [];
   let from = Number(startBlock);
   const end = Number(endBlock);
-  let chunkSize = Math.max(1, GET_LOGS_BLOCK_RANGE);
+  let startingChunkSize = Number(preferredChunkSize) || 0;
+  if (!Number.isFinite(startingChunkSize) || startingChunkSize < 1) {
+    if (persistedGetLogsChunkSize >= 1) {
+      startingChunkSize = persistedGetLogsChunkSize;
+    } else {
+      startingChunkSize = GET_LOGS_BLOCK_RANGE;
+    }
+  }
+  let chunkSize = Math.max(1, Math.floor(startingChunkSize));
   let rateRetryCount = 0;
   while (from <= end) {
     const to = Math.min(end, from + chunkSize - 1);
@@ -850,6 +1112,9 @@ async function getLogsChunked(baseFilter, startBlock, endBlock) {
       allLogs.push(...part);
       from = to + 1;
       rateRetryCount = 0;
+      if (chunkSize > persistedGetLogsChunkSize) {
+        persistGetLogsChunkSize(chunkSize);
+      }
     } catch (err) {
       if (isRpcRateLimitError(err.message)) {
         rateRetryCount += 1;
@@ -869,8 +1134,10 @@ async function getLogsChunked(baseFilter, startBlock, endBlock) {
       } else {
         chunkSize = Math.max(1, Math.floor(chunkSize / 2));
       }
+      persistGetLogsChunkSize(chunkSize);
     }
   }
+  persistGetLogsChunkSize(chunkSize);
   return allLogs;
 }
 
@@ -1052,6 +1319,394 @@ async function fetchRecentLeveragedEventsForWallet(wallet, lookbackBlocksInput) 
   return events;
 }
 
+async function findContractDeploymentBlock(addressRaw) {
+  const address = normalizeAddress(addressRaw);
+  if (!address) {
+    return 0;
+  }
+  if (contractDeploymentBlockCache.has(address)) {
+    return contractDeploymentBlockCache.get(address);
+  }
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = parseRpcInt(latestBlockHex);
+  const latestCode = await hardhatRpc('eth_getCode', [address, 'latest']);
+  if (!latestCode || latestCode === '0x') {
+    contractDeploymentBlockCache.set(address, 0);
+    return 0;
+  }
+  let low = 0;
+  let high = latestBlock;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    const code = await hardhatRpc('eth_getCode', [address, ethers.toQuantity(mid)]);
+    if (code && code !== '0x') {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  contractDeploymentBlockCache.set(address, low);
+  return low;
+}
+
+function getConfiguredIndexerStartBlock() {
+  let raw = '';
+  if (process.env.ORDERBOOK_FILLS_START_BLOCK) {
+    raw = String(process.env.ORDERBOOK_FILLS_START_BLOCK).trim();
+  } else if (process.env.INDEXER_START_BLOCK) {
+    raw = String(process.env.INDEXER_START_BLOCK).trim();
+  }
+  if (!raw) {
+    return -1;
+  }
+  const configuredStart = Number(raw);
+  if (Number.isFinite(configuredStart) && configuredStart >= 0) {
+    return Math.floor(configuredStart);
+  }
+  return -1;
+}
+
+async function fetchOrderbookFillsFromChain(orderBookAddr, registryAddr) {
+  const cacheKey = `${orderBookAddr}:${registryAddr}`;
+  const cached = orderbookChainFillsCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestampMs) < ORDERBOOK_CHAIN_FILLS_TTL_MS) {
+    return cached.rows;
+  }
+
+  let startBlock = 0;
+  const configuredStart = getConfiguredIndexerStartBlock();
+  if (configuredStart >= 0) {
+    startBlock = configuredStart;
+  } else {
+    startBlock = await findContractDeploymentBlock(orderBookAddr);
+  }
+
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = parseRpcInt(latestBlockHex);
+  const topics = [
+    ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)'),
+    ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)'),
+  ];
+  const logs = await getLogsChunked({
+    address: orderBookAddr,
+    topics: [topics],
+  }, startBlock, latestBlock, NETWORK_NAME === 'sepolia' ? 2000 : 10000);
+  logs.sort((a, b) => {
+    const aBlock = Number(a.blockNumber);
+    const bBlock = Number(b.blockNumber);
+    if (aBlock !== bBlock) {
+      return aBlock - bBlock;
+    }
+    return Number(a.logIndex) - Number(b.logIndex);
+  });
+
+  const orderMetaById = new Map();
+  const tokenSymbolCache = new Map();
+  const fillRows = [];
+  for (let i = 0; i < logs.length; i += 1) {
+    const log = logs[i];
+    let parsed = null;
+    try {
+      parsed = orderBookInterface.parseLog(log);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) {
+      continue;
+    }
+    if (parsed.name === 'OrderPlaced') {
+      const id = Number(parsed.args.id);
+      const equityToken = normalizeAddress(parsed.args.equityToken);
+      let symbol = tokenSymbolCache.get(equityToken) || '';
+      if (!symbol) {
+        symbol = await lookupSymbolByToken(registryAddr, equityToken);
+        tokenSymbolCache.set(equityToken, symbol);
+      }
+      orderMetaById.set(id, {
+        trader: normalizeAddress(parsed.args.trader),
+        symbol,
+        equityToken,
+      });
+      continue;
+    }
+    if (parsed.name === 'OrderFilled') {
+      const makerId = Number(parsed.args.makerId);
+      const takerId = Number(parsed.args.takerId);
+      const equityToken = normalizeAddress(parsed.args.equityToken);
+      const makerOrder = orderMetaById.get(makerId) || null;
+      const takerOrder = orderMetaById.get(takerId) || null;
+      let symbol = '';
+      if (makerOrder && makerOrder.symbol) {
+        symbol = makerOrder.symbol;
+      } else if (takerOrder && takerOrder.symbol) {
+        symbol = takerOrder.symbol;
+      } else {
+        symbol = tokenSymbolCache.get(equityToken) || '';
+        if (!symbol) {
+          symbol = await lookupSymbolByToken(registryAddr, equityToken);
+          tokenSymbolCache.set(equityToken, symbol);
+        }
+      }
+      fillRows.push({
+        makerId,
+        takerId,
+        makerTrader: makerOrder ? makerOrder.trader : '',
+        takerTrader: takerOrder ? takerOrder.trader : '',
+        symbol,
+        priceCents: Number(parsed.args.price),
+        qty: parsed.args.qty.toString(),
+        blockNumber: Number(log.blockNumber),
+        txHash: String(log.transactionHash),
+        logIndex: Number(log.logIndex),
+      });
+    }
+  }
+
+  const blockNumbers = Array.from(new Set(fillRows.map((row) => row.blockNumber)));
+  const blockTimestampRows = await mapWithConcurrency(blockNumbers, PORTFOLIO_RPC_CONCURRENCY, async (blockNumber) => {
+    const timestampMs = await getBlockTimestampMs(blockNumber);
+    return { blockNumber, timestampMs };
+  });
+  const blockTimestampMap = new Map();
+  for (let i = 0; i < blockTimestampRows.length; i += 1) {
+    const row = blockTimestampRows[i];
+    blockTimestampMap.set(row.blockNumber, row.timestampMs);
+  }
+  for (let i = 0; i < fillRows.length; i += 1) {
+    fillRows[i].timestampMs = blockTimestampMap.get(fillRows[i].blockNumber) || 0;
+  }
+  fillRows.sort((a, b) => {
+    const timestampDiff = b.timestampMs - a.timestampMs;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+    if (b.blockNumber !== a.blockNumber) {
+      return b.blockNumber - a.blockNumber;
+    }
+    return b.logIndex - a.logIndex;
+  });
+  orderbookChainFillsCache.set(cacheKey, {
+    timestampMs: Date.now(),
+    rows: fillRows,
+  });
+  return fillRows;
+}
+
+async function fetchWalletActivityFromChain(walletRaw, deployments) {
+  const wallet = normalizeAddress(walletRaw);
+  const orderBookAddr = normalizeAddress(deployments && deployments.orderBookDex);
+  const registryAddr = normalizeAddress(deployments && deployments.listingsRegistry);
+  if (!wallet || !orderBookAddr || !registryAddr) {
+    return {
+      fillRows: [],
+      txHashes: [],
+      latestEventTimestampMs: 0,
+    };
+  }
+  const cacheKey = `${wallet}:${orderBookAddr}:${registryAddr}`;
+  const cached = walletChainActivityCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestampMs) < ORDERBOOK_CHAIN_FILLS_TTL_MS) {
+    return cached.value;
+  }
+
+  let startBlock = 0;
+  const configuredStart = getConfiguredIndexerStartBlock();
+  if (configuredStart >= 0) {
+    startBlock = configuredStart;
+  } else {
+    startBlock = await findContractDeploymentBlock(orderBookAddr);
+  }
+  const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
+  const latestBlock = parseRpcInt(latestBlockHex);
+  const traderTopic = ethers.zeroPadValue(wallet, 32);
+  const orderPlacedSig = ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)');
+  const orderFilledSig = ethers.id('OrderFilled(uint256,uint256,address,uint256,uint256)');
+  const placedLogs = await getLogsChunked({
+    address: orderBookAddr,
+    topics: [[orderPlacedSig], null, [traderTopic]],
+  }, startBlock, latestBlock);
+  const orderMetaById = new Map();
+  const walletOrderIds = [];
+  const txHashSet = new Set();
+  const tokenSymbolCache = new Map();
+
+  for (let i = 0; i < placedLogs.length; i += 1) {
+    const log = placedLogs[i];
+    let parsed = null;
+    try {
+      parsed = orderBookInterface.parseLog(log);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || parsed.name !== 'OrderPlaced') {
+      continue;
+    }
+    const orderId = Number(parsed.args.id);
+    const equityToken = normalizeAddress(parsed.args.equityToken);
+    let symbol = tokenSymbolCache.get(equityToken);
+    if (!symbol) {
+      symbol = await lookupSymbolByToken(registryAddr, equityToken);
+      tokenSymbolCache.set(equityToken, symbol);
+    }
+    let side = 'SELL';
+    if (Number(parsed.args.side) === 0) {
+      side = 'BUY';
+    }
+    orderMetaById.set(orderId, {
+      orderId,
+      side,
+      symbol,
+      trader: wallet,
+    });
+    walletOrderIds.push(orderId);
+    const txHash = String(log.transactionHash || '');
+    if (txHash) {
+      txHashSet.add(txHash);
+    }
+  }
+
+  const takerFillLogs = await getLogsChunked({
+    address: orderBookAddr,
+    topics: [[orderFilledSig], null, null, [traderTopic]],
+  }, startBlock, latestBlock);
+  const makerFillLogs = [];
+  const makerIdTopics = [];
+  for (let i = 0; i < walletOrderIds.length; i += 1) {
+    const topic = ethers.toBeHex(BigInt(walletOrderIds[i]), 32);
+    makerIdTopics.push(topic);
+  }
+  if (makerIdTopics.length > 0) {
+    const batchSize = 20;
+    for (let i = 0; i < makerIdTopics.length; i += batchSize) {
+      const batch = makerIdTopics.slice(i, i + batchSize);
+      const makerBatchLogs = await getLogsChunked({
+        address: orderBookAddr,
+        topics: [[orderFilledSig], batch],
+      }, startBlock, latestBlock);
+      for (let j = 0; j < makerBatchLogs.length; j += 1) {
+        makerFillLogs.push(makerBatchLogs[j]);
+      }
+    }
+  }
+  const combinedFillLogs = [];
+  const seenFillIds = new Set();
+  const allFillLogs = takerFillLogs.concat(makerFillLogs);
+  for (let i = 0; i < allFillLogs.length; i += 1) {
+    const log = allFillLogs[i];
+    const id = `${String(log.transactionHash || '')}:${Number(log.logIndex || 0)}`;
+    if (seenFillIds.has(id)) {
+      continue;
+    }
+    seenFillIds.add(id);
+    combinedFillLogs.push(log);
+  }
+  const fillRows = [];
+  for (let i = 0; i < combinedFillLogs.length; i += 1) {
+    const log = combinedFillLogs[i];
+    let parsed = null;
+    try {
+      parsed = orderBookInterface.parseLog(log);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || parsed.name !== 'OrderFilled') {
+      continue;
+    }
+    const makerId = Number(parsed.args.makerId);
+    const takerId = Number(parsed.args.takerId);
+    const takerAddress = normalizeAddress(parsed.args.taker);
+    const makerMeta = orderMetaById.get(makerId) || null;
+    const takerMeta = orderMetaById.get(takerId) || null;
+    const isMakerWallet = Boolean(makerMeta && makerMeta.trader === wallet);
+    const isTakerWallet = takerAddress === wallet || Boolean(takerMeta && takerMeta.trader === wallet);
+    if (!isMakerWallet && !isTakerWallet) {
+      continue;
+    }
+    let side = '';
+    if (isMakerWallet && makerMeta) {
+      side = makerMeta.side;
+    } else if (isTakerWallet && takerMeta) {
+      side = takerMeta.side;
+    } else if (isTakerWallet && makerMeta) {
+      if (makerMeta.side === 'BUY') {
+        side = 'SELL';
+      } else if (makerMeta.side === 'SELL') {
+        side = 'BUY';
+      }
+    }
+    let symbol = '';
+    if (makerMeta && makerMeta.symbol) {
+      symbol = makerMeta.symbol;
+    } else if (takerMeta && takerMeta.symbol) {
+      symbol = takerMeta.symbol;
+    }
+    if (!symbol) {
+      continue;
+    }
+    const txHash = String(log.transactionHash || '');
+    if (txHash) {
+      txHashSet.add(txHash);
+    }
+    fillRows.push({
+      symbol,
+      side,
+      qtyWei: parsed.args.qty.toString(),
+      priceCents: Number(parsed.args.price),
+      timestampMs: 0,
+      blockNumber: Number(log.blockNumber || 0),
+      txHash,
+      logIndex: Number(log.logIndex || 0),
+    });
+  }
+
+  const blockNumberSet = new Set();
+  for (let i = 0; i < fillRows.length; i += 1) {
+    blockNumberSet.add(fillRows[i].blockNumber);
+  }
+  const blockNumbers = Array.from(blockNumberSet);
+  const timestampRows = await mapWithConcurrency(blockNumbers, PORTFOLIO_RPC_CONCURRENCY, async (blockNumber) => {
+    const timestampMs = await getBlockTimestampMs(blockNumber);
+    return {
+      blockNumber,
+      timestampMs,
+    };
+  });
+  const timestampMap = new Map();
+  for (let i = 0; i < timestampRows.length; i += 1) {
+    timestampMap.set(timestampRows[i].blockNumber, timestampRows[i].timestampMs);
+  }
+  let latestEventTimestampMs = 0;
+  for (let i = 0; i < fillRows.length; i += 1) {
+    const ts = timestampMap.get(fillRows[i].blockNumber) || 0;
+    fillRows[i].timestampMs = ts;
+    if (ts > latestEventTimestampMs) {
+      latestEventTimestampMs = ts;
+    }
+  }
+  fillRows.sort((a, b) => {
+    const timestampDiff = a.timestampMs - b.timestampMs;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+    const blockDiff = a.blockNumber - b.blockNumber;
+    if (blockDiff !== 0) {
+      return blockDiff;
+    }
+    return a.logIndex - b.logIndex;
+  });
+
+  const value = {
+    fillRows,
+    txHashes: Array.from(txHashSet),
+    latestEventTimestampMs,
+  };
+  walletChainActivityCache.set(cacheKey, {
+    timestampMs: Date.now(),
+    value,
+  });
+  return value;
+}
+
 function collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount) {
   const rowsOut = [];
   const seen = new Set();
@@ -1167,6 +1822,47 @@ function collectWalletTxRowsFromSnapshot(snapshot, wallet, maxCount) {
   return rowsOut;
 }
 
+function buildOrderbookFillsFallbackFromSnapshot(snapshot) {
+  const rows = Array.isArray(snapshot && snapshot.fills) ? snapshot.fills : [];
+  const out = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (!row) {
+      continue;
+    }
+    const makerId = Number(row.makerId || 0);
+    const takerId = Number(row.takerId || 0);
+    const syntheticManualFill = makerId <= 0 && takerId <= 0;
+    if (syntheticManualFill) {
+      continue;
+    }
+    out.push({
+      makerId,
+      takerId,
+      makerTrader: normalizeAddress(row.makerTrader),
+      takerTrader: normalizeAddress(row.takerTrader),
+      symbol: String(row.symbol || ''),
+      priceCents: Number(row.priceCents || 0),
+      qty: String(row.qtyWei || row.qty || '0'),
+      blockNumber: Number(row.blockNumber || 0),
+      txHash: String(row.txHash || ''),
+      logIndex: Number(row.logIndex || 0),
+      timestampMs: Number(row.timestampMs || 0),
+    });
+  }
+  out.sort((a, b) => {
+    const timestampDiff = b.timestampMs - a.timestampMs;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+    if (b.blockNumber !== a.blockNumber) {
+      return b.blockNumber - a.blockNumber;
+    }
+    return b.logIndex - a.logIndex;
+  });
+  return out;
+}
+
 async function buildWalletGasRowsFromIndexer(wallet, maxCount) {
   await Promise.race([
     ensureIndexerSynced(),
@@ -1214,6 +1910,15 @@ function ensureIndexerDir() {
   if (!fs.existsSync(INDEXER_DIR)) {
     fs.mkdirSync(INDEXER_DIR, { recursive: true });
   }
+}
+
+function ensurePersistentDataRoot() {
+  if (!fs.existsSync(PERSISTENT_DATA_ROOT_DIR)) {
+    fs.mkdirSync(PERSISTENT_DATA_ROOT_DIR, { recursive: true });
+  }
+  const probePath = path.join(PERSISTENT_DATA_ROOT_DIR, '.write-test');
+  fs.writeFileSync(probePath, String(Date.now()));
+  fs.unlinkSync(probePath);
 }
 
 function readJsonFile(filePath, fallbackValue) {
@@ -1469,6 +2174,12 @@ function toUserErrorMessage(messageRaw) {
   }
   if (message.includes('product not found')) {
     return 'Selected leveraged product does not exist';
+  }
+  if (message.includes('compute units per second capacity')) {
+    return 'RPC is rate-limited right now. Please retry in a few seconds.';
+  }
+  if (message.includes('429')) {
+    return 'RPC is rate-limited right now. Please retry in a few seconds.';
   }
   return message;
 }
@@ -2214,6 +2925,8 @@ async function getBlockTimestampMs(blockNumberRaw) {
 
 function appendManualMintActivity(input) {
   ensureIndexerDir();
+  const orders = readJsonFile(INDEXER_ORDERS_FILE, {});
+  const fills = readJsonFile(INDEXER_FILLS_FILE, []);
   const cashflows = readJsonFile(INDEXER_CASHFLOWS_FILE, []);
   const transfers = readJsonFile(INDEXER_TRANSFERS_FILE, []);
   const transferId = `${input.txHash}:manual-mint-transfer:${input.tokenAddress}:${input.wallet}`;
@@ -2263,8 +2976,131 @@ function appendManualMintActivity(input) {
     });
   }
 
+  const entryPriceCents = Number(input.priceCents);
+  if (Number.isFinite(entryPriceCents) && entryPriceCents > 0) {
+    const fillId = `${input.txHash}:manual-mint-fill:${normalizeAddress(input.wallet)}:${input.symbol}`;
+    let hasFill = false;
+    for (let i = 0; i < fills.length; i += 1) {
+      if (fills[i].id === fillId) {
+        hasFill = true;
+        break;
+      }
+    }
+    if (!hasFill) {
+      fills.push({
+        id: fillId,
+        makerId: 0,
+        takerId: 0,
+        makerTrader: '',
+        takerTrader: normalizeAddress(input.wallet),
+        side: 'BUY',
+        symbol: input.symbol,
+        equityToken: normalizeAddress(input.tokenAddress),
+        priceCents: Math.round(entryPriceCents),
+        qtyWei: String(input.amountWei),
+        blockNumber: Number(input.blockNumber),
+        txHash: input.txHash,
+        logIndex: 1,
+        timestampMs: Number(input.timestampMs),
+      });
+    }
+  }
+
+  writeJsonFile(INDEXER_ORDERS_FILE, orders);
+  writeJsonFile(INDEXER_FILLS_FILE, fills);
   writeJsonFile(INDEXER_CASHFLOWS_FILE, cashflows);
   writeJsonFile(INDEXER_TRANSFERS_FILE, transfers);
+}
+
+function appendManualMintActivityAfterReceipt(input) {
+  Promise.resolve().then(async () => {
+    const receipt = await waitForReceipt(input.txHash);
+    const blockNumber = parseRpcInt(receipt.blockNumber);
+    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+    appendManualMintActivity({
+      wallet: input.wallet,
+      tokenAddress: input.tokenAddress,
+      symbol: input.symbol,
+      assetType: input.assetType,
+      amountWei: input.amountWei,
+      priceCents: input.priceCents,
+      reason: input.reason,
+      txHash: input.txHash,
+      blockNumber,
+      timestampMs,
+    });
+    invalidatePortfolioCachesForWallet(input.wallet);
+  }).catch(() => {});
+}
+
+async function resolveEntryPriceCentsForSymbol(symbol, deployments) {
+  const upper = String(symbol || '').toUpperCase().trim();
+  if (!upper) {
+    return 0;
+  }
+  try {
+    const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol: upper }));
+    const quote = Array.isArray(payload) ? payload[0] : payload;
+    const price = Number(quote && quote.price);
+    if (Number.isFinite(price) && price > 0) {
+      return Math.round(price * 100);
+    }
+  } catch {
+  }
+  try {
+    const quote = await fetchQuote(upper);
+    const yahooPrice = Number(quote.regularMarketPrice || quote.price || 0);
+    if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
+      return Math.round(yahooPrice * 100);
+    }
+  } catch {
+  }
+  const priceFeedAddr = normalizeAddress(deployments && deployments.priceFeed);
+  if (priceFeedAddr) {
+    try {
+      const feedData = priceFeedInterface.encodeFunctionData('getPrice', [upper]);
+      const feedResult = await hardhatRpc('eth_call', [{ to: priceFeedAddr, data: feedData }, 'latest']);
+      const [onchainPriceRaw] = priceFeedInterface.decodeFunctionResult('getPrice', feedResult);
+      const onchainPrice = Number(onchainPriceRaw);
+      if (Number.isFinite(onchainPrice) && onchainPrice > 0) {
+        return Math.round(onchainPrice);
+      }
+    } catch {
+    }
+  }
+  const snapshot = readIndexerSnapshot();
+  const rows = Array.isArray(snapshot.fills) ? snapshot.fills : [];
+  let latest = null;
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (String(row.symbol || '').toUpperCase() !== upper) {
+      continue;
+    }
+    if (!latest) {
+      latest = row;
+      continue;
+    }
+    const prevTs = Number(latest.timestampMs) || 0;
+    const currTs = Number(row.timestampMs) || 0;
+    if (currTs > prevTs) {
+      latest = row;
+      continue;
+    }
+    if (currTs === prevTs) {
+      const prevBlock = Number(latest.blockNumber) || 0;
+      const currBlock = Number(row.blockNumber) || 0;
+      if (currBlock > prevBlock) {
+        latest = row;
+      }
+    }
+  }
+  if (latest) {
+    const fallback = Number(latest.priceCents);
+    if (Number.isFinite(fallback) && fallback > 0) {
+      return Math.round(fallback);
+    }
+  }
+  return 0;
 }
 
 async function lookupSymbolByToken(registryAddr, tokenAddr) {
@@ -2343,7 +3179,17 @@ async function ensureIndexerSynced() {
     let startBlock = Math.max(0, Number(state.lastIndexedBlock) + 1);
     if (Number(state.lastIndexedBlock) < 0) {
       const lookbackStart = Math.max(0, latestBlock - INDEXER_BOOTSTRAP_LOOKBACK_BLOCKS + 1);
-      startBlock = lookbackStart;
+      const configuredStart = getConfiguredIndexerStartBlock();
+      if (configuredStart >= 0) {
+        startBlock = configuredStart;
+      } else {
+        const deploymentStart = await findContractDeploymentBlock(orderBookAddr);
+        if (Number.isFinite(deploymentStart) && deploymentStart >= 0) {
+          startBlock = deploymentStart;
+        } else {
+          startBlock = lookbackStart;
+        }
+      }
     }
     if (startBlock > latestBlock) {
       state.latestKnownBlock = latestBlock;
@@ -2356,6 +3202,14 @@ async function ensureIndexerSynced() {
         processedLogs: 0,
       };
     }
+    let syncEndBlock = latestBlock;
+    const maxSyncBlocks = INDEXER_MAX_SYNC_BLOCKS_PER_RUN;
+    if (Number.isFinite(maxSyncBlocks) && maxSyncBlocks >= 1) {
+      const cappedEnd = startBlock + maxSyncBlocks - 1;
+      if (cappedEnd < syncEndBlock) {
+        syncEndBlock = cappedEnd;
+      }
+    }
 
     const topics = [
       ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)'),
@@ -2365,7 +3219,7 @@ async function ensureIndexerSynced() {
     const logs = await getLogsChunked({
       address: orderBookAddr,
       topics: [topics],
-    }, startBlock, latestBlock);
+    }, startBlock, syncEndBlock);
     logs.sort((a, b) => {
       const blockA = Number(a.blockNumber);
       const blockB = Number(b.blockNumber);
@@ -2389,26 +3243,13 @@ async function ensureIndexerSynced() {
       addresses.add(ttoken);
       symbolByTokenCache.set(ttoken, 'TTOKEN');
     }
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-    for (const symbol of symbols) {
-      const lookupData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
-      const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
-      const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
-      const normalized = normalizeAddress(tokenAddr);
-      const isMissing = !normalized;
-      const isZero = normalized === ethers.ZeroAddress;
-      let includeToken = true;
-      if (isMissing) {
-        includeToken = false;
-      }
-      if (isZero) {
-        includeToken = false;
-      }
-      if (includeToken) {
+    const listings = await getIndexedListings(registryAddr);
+    for (let i = 0; i < listings.length; i += 1) {
+      const listing = listings[i];
+      const normalized = normalizeAddress(listing.tokenAddress);
+      if (normalized && normalized !== ethers.ZeroAddress) {
         addresses.add(normalized);
-        symbolByTokenCache.set(normalized, symbol);
+        symbolByTokenCache.set(normalized, listing.symbol);
       }
     }
     const tokenAddresses = Array.from(addresses);
@@ -2423,7 +3264,7 @@ async function ensureIndexerSynced() {
       leveragedLogs = await getLogsChunked({
         address: leveragedRouterAddress,
         topics: [leveragedTopics],
-      }, startBlock, latestBlock);
+      }, startBlock, syncEndBlock);
       leveragedLogs.sort((a, b) => {
         const blockA = Number(a.blockNumber);
         const blockB = Number(b.blockNumber);
@@ -2442,7 +3283,7 @@ async function ensureIndexerSynced() {
         const part = await getLogsChunked({
           address: token,
           topics: [transferTopic],
-        }, startBlock, latestBlock);
+        }, startBlock, syncEndBlock);
         transferLogs.push(...part);
       }
       transferLogs.sort((a, b) => {
@@ -2466,10 +3307,18 @@ async function ensureIndexerSynced() {
       blocksNeeded.add(log.blockNumber);
     }
 
-    const blockTimestampsMs = new Map();
-    for (const blockHex of blocksNeeded) {
+    const blockNumbers = Array.from(blocksNeeded);
+    const blockTimestampRows = await mapWithConcurrency(blockNumbers, PORTFOLIO_RPC_CONCURRENCY, async (blockHex) => {
       const block = await hardhatRpc('eth_getBlockByNumber', [blockHex, false]);
-      blockTimestampsMs.set(blockHex, Number(block.timestamp) * 1000);
+      return {
+        blockHex,
+        timestampMs: Number(block.timestamp) * 1000,
+      };
+    });
+    const blockTimestampsMs = new Map();
+    for (let i = 0; i < blockTimestampRows.length; i += 1) {
+      const row = blockTimestampRows[i];
+      blockTimestampsMs.set(row.blockHex, row.timestampMs);
     }
 
     const existingTransferIds = new Set();
@@ -2794,7 +3643,7 @@ async function ensureIndexerSynced() {
       }
     }
 
-    state.lastIndexedBlock = latestBlock;
+    state.lastIndexedBlock = syncEndBlock;
     state.latestKnownBlock = latestBlock;
     state.lastSyncAtMs = Date.now();
 
@@ -2809,7 +3658,8 @@ async function ensureIndexerSynced() {
     return {
       synced: true,
       startBlock,
-      latestBlock,
+      latestBlock: syncEndBlock,
+      chainLatestBlock: latestBlock,
       processedLogs: logs.length,
       processedTransfers: transferLogs.length,
       processedLeveragedLogs: leveragedLogs.length,
@@ -2820,6 +3670,23 @@ async function ensureIndexerSynced() {
       indexerSyncPromise = null;
     });
   return indexerSyncPromise;
+}
+
+async function waitForIndexerSyncBounded() {
+  const snapshot = readIndexerSnapshot();
+  const lastIndexedBlock = Number(snapshot.state && snapshot.state.lastIndexedBlock);
+  const lastSyncAtMs = Number(snapshot.state && snapshot.state.lastSyncAtMs);
+  if (lastIndexedBlock >= 0) {
+    const ageMs = Date.now() - lastSyncAtMs;
+    if (ageMs <= INDEXER_STALE_ALLOW_MS || indexerSyncPromise) {
+      ensureIndexerSynced().catch(() => {});
+      return;
+    }
+  }
+  await Promise.race([
+    ensureIndexerSynced(),
+    new Promise((resolve) => setTimeout(resolve, INDEXER_SYNC_WAIT_MS)),
+  ]);
 }
 
 function readIndexerSnapshot() {
@@ -2892,9 +3759,16 @@ async function readReceiptGasData(txHashRaw) {
   };
 }
 
-function collectWalletRelatedTxHashes(snapshot, wallet) {
+function collectWalletRelatedTxContext(snapshot, wallet) {
   const walletNorm = normalizeAddress(wallet);
   const txHashes = new Set();
+  let latestEventTimestampMs = 0;
+  function markTimestamp(rawValue) {
+    const parsed = Number(rawValue);
+    if (Number.isFinite(parsed) && parsed > latestEventTimestampMs) {
+      latestEventTimestampMs = parsed;
+    }
+  }
   const orderIds = Object.keys(snapshot.orders);
   for (let i = 0; i < orderIds.length; i += 1) {
     const order = snapshot.orders[orderIds[i]];
@@ -2904,6 +3778,8 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(order.placedTimestampMs);
+      markTimestamp(order.timestampMs);
     }
   }
   for (let i = 0; i < snapshot.cancellations.length; i += 1) {
@@ -2914,6 +3790,7 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(row.timestampMs);
     }
   }
   for (let i = 0; i < snapshot.fills.length; i += 1) {
@@ -2930,6 +3807,7 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(row.timestampMs);
     }
   }
   for (let i = 0; i < snapshot.leveragedEvents.length; i += 1) {
@@ -2940,6 +3818,7 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(row.timestampMs);
     }
   }
   for (let i = 0; i < snapshot.transfers.length; i += 1) {
@@ -2951,24 +3830,65 @@ function collectWalletRelatedTxHashes(snapshot, wallet) {
       if (txHash) {
         txHashes.add(txHash);
       }
+      markTimestamp(row.timestampMs);
     }
   }
-  return Array.from(txHashes);
+  return {
+    txHashes: Array.from(txHashes),
+    latestEventTimestampMs,
+  };
 }
 
-async function computeOverallGasForWallet(snapshot, wallet) {
+async function collectWalletRelatedTxContextWithFallback(snapshot, wallet, deployments) {
+  const context = collectWalletRelatedTxContext(snapshot, wallet);
+  if (context.txHashes.length > 0) {
+    return context;
+  }
+  try {
+    const chainActivity = await withTimeout(
+      fetchWalletActivityFromChain(wallet, deployments),
+      8000,
+      'wallet tx chain fallback timeout'
+    );
+    if (!chainActivity || !Array.isArray(chainActivity.txHashes)) {
+      return context;
+    }
+    const txHashes = [];
+    const seen = new Set();
+    for (let i = 0; i < chainActivity.txHashes.length; i += 1) {
+      const txHash = String(chainActivity.txHashes[i] || '');
+      if (!txHash || seen.has(txHash)) {
+        continue;
+      }
+      seen.add(txHash);
+      txHashes.push(txHash);
+    }
+    if (txHashes.length > 0) {
+      return {
+        txHashes,
+        latestEventTimestampMs: Number(chainActivity.latestEventTimestampMs || 0),
+      };
+    }
+  } catch {
+  }
+  return context;
+}
+
+async function computeOverallGasForWallet(snapshot, wallet, deployments) {
   const walletNorm = normalizeAddress(wallet);
-  const txHashes = collectWalletRelatedTxHashes(snapshot, walletNorm);
+  const context = await collectWalletRelatedTxContextWithFallback(snapshot, walletNorm, deployments);
+  const txHashes = context.txHashes;
+  const receiptRows = await mapWithConcurrency(txHashes, PORTFOLIO_RPC_CONCURRENCY, async (txHash) => {
+    try {
+      return await readReceiptGasData(txHash);
+    } catch {
+      return null;
+    }
+  });
   let totalGasUsed = 0n;
   let totalCostWei = 0n;
-  for (let i = 0; i < txHashes.length; i += 1) {
-    const txHash = txHashes[i];
-    let receiptData = null;
-    try {
-      receiptData = await readReceiptGasData(txHash);
-    } catch {
-      receiptData = null;
-    }
+  for (let i = 0; i < receiptRows.length; i += 1) {
+    const receiptData = receiptRows[i];
     if (receiptData && receiptData.from === walletNorm) {
       totalGasUsed += receiptData.gasUsed;
       totalCostWei += receiptData.costWei;
@@ -2978,11 +3898,154 @@ async function computeOverallGasForWallet(snapshot, wallet) {
     gasUsedUnits: totalGasUsed,
     gasCostWei: totalCostWei,
     txCount: txHashes.length,
+    latestEventTimestampMs: context.latestEventTimestampMs,
   };
+}
+
+function readPortfolioGasCache(wallet) {
+  const key = normalizeAddress(wallet);
+  if (!key) {
+    return null;
+  }
+  const cached = portfolioGasCache.get(key);
+  if (!cached) {
+    return null;
+  }
+  if ((Date.now() - cached.timestampMs) > PORTFOLIO_GAS_CACHE_TTL_MS) {
+    return null;
+  }
+  return cached.value;
+}
+
+function getEmptyPortfolioGasSummary() {
+  return {
+    gasUsedUnits: 0n,
+    gasCostWei: 0n,
+    txCount: 0,
+    latestEventTimestampMs: 0,
+  };
+}
+
+function startPortfolioGasRefresh(snapshot, wallet, deployments) {
+  const key = normalizeAddress(wallet);
+  if (!key) {
+    return Promise.resolve(getEmptyPortfolioGasSummary());
+  }
+  if (portfolioGasInflight.has(key)) {
+    return portfolioGasInflight.get(key);
+  }
+  const refreshPromise = computeOverallGasForWallet(snapshot, key, deployments)
+    .then((value) => {
+      portfolioGasCache.set(key, {
+        value,
+        timestampMs: Date.now(),
+      });
+      return value;
+    })
+    .finally(() => {
+      portfolioGasInflight.delete(key);
+    });
+  portfolioGasInflight.set(key, refreshPromise);
+  return refreshPromise;
+}
+
+async function getPortfolioGasSummary(snapshot, wallet, waitForFresh) {
+  const key = normalizeAddress(wallet);
+  if (!key) {
+    return getEmptyPortfolioGasSummary();
+  }
+  const context = collectWalletRelatedTxContext(snapshot, key);
+  const latestWalletEventTimestampMs = context.latestEventTimestampMs;
+  const cached = readPortfolioGasCache(key);
+  if (cached) {
+    const cachedLatestEvent = Number(cached.latestEventTimestampMs || 0);
+    if (latestWalletEventTimestampMs > cachedLatestEvent) {
+      const deployments = loadDeployments();
+      const refreshPromise = startPortfolioGasRefresh(snapshot, key, deployments);
+      if (waitForFresh) {
+        try {
+          return await refreshPromise;
+        } catch {
+          return cached;
+        }
+      }
+      refreshPromise.catch(() => {});
+    } else {
+      return cached;
+    }
+  }
+  if (portfolioGasCache.has(key)) {
+    const stale = portfolioGasCache.get(key);
+    const ageMs = Date.now() - stale.timestampMs;
+    if (ageMs > PORTFOLIO_GAS_CACHE_TTL_MS) {
+      const deployments = loadDeployments();
+      const refreshPromise = startPortfolioGasRefresh(snapshot, key, deployments);
+      if (waitForFresh) {
+        try {
+          return await refreshPromise;
+        } catch {
+          return stale.value;
+        }
+      }
+    }
+    return stale.value;
+  }
+  const deployments = loadDeployments();
+  const refreshPromise = startPortfolioGasRefresh(snapshot, key, deployments);
+  if (!waitForFresh) {
+    refreshPromise.catch(() => {});
+    return getEmptyPortfolioGasSummary();
+  }
+  try {
+    return await refreshPromise;
+  } catch {
+    return getEmptyPortfolioGasSummary();
+  }
 }
 
 function quoteAmountWei(qtyWei, priceCents) {
   return (BigInt(qtyWei) * BigInt(priceCents)) / 100n;
+}
+
+function getStableUnmatchedCostCents(snapshot, symbol, usedQty, usedCostWei) {
+  if (usedQty > 0n && usedCostWei > 0n) {
+    const avgKnown = Number((usedCostWei * 100n) / usedQty);
+    if (Number.isFinite(avgKnown) && avgKnown > 0) {
+      return avgKnown;
+    }
+  }
+  const fills = Array.isArray(snapshot && snapshot.fills) ? snapshot.fills : [];
+  let latest = null;
+  for (let i = 0; i < fills.length; i += 1) {
+    const row = fills[i];
+    if (String(row.symbol || '').toUpperCase() !== String(symbol || '').toUpperCase()) {
+      continue;
+    }
+    if (!latest) {
+      latest = row;
+      continue;
+    }
+    const prevTs = Number(latest.timestampMs) || 0;
+    const currTs = Number(row.timestampMs) || 0;
+    if (currTs > prevTs) {
+      latest = row;
+      continue;
+    }
+    if (currTs === prevTs) {
+      const prevBlock = Number(latest.blockNumber) || 0;
+      const currBlock = Number(row.blockNumber) || 0;
+      if (currBlock > prevBlock) {
+        latest = row;
+      }
+    }
+  }
+  if (latest) {
+    const fallback = Number(latest.priceCents);
+    if (Number.isFinite(fallback) && fallback > 0) {
+      return fallback;
+    }
+  }
+  return 0;
 }
 
 async function getListingBySymbol(registryAddr, symbol) {
@@ -3001,6 +4064,659 @@ async function getSymbolByToken(registryAddr, tokenAddress) {
     symbolText = String(symbol);
   }
   return symbolText.toUpperCase();
+}
+
+async function getIndexedListings(registryAddr) {
+  const now = Date.now();
+  if (
+    listingsCache.registryAddr === registryAddr
+    && (now - listingsCache.timestampMs) < LISTINGS_CACHE_TTL_MS
+    && Array.isArray(listingsCache.items)
+  ) {
+    return listingsCache.items;
+  }
+  const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
+  const listResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']);
+  const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
+  const resolved = await mapWithConcurrency(symbols, PORTFOLIO_RPC_CONCURRENCY, async (symbol) => {
+    const tokenAddress = await getListingBySymbol(registryAddr, symbol);
+    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+      return null;
+    }
+    symbolByTokenCache.set(tokenAddress, symbol);
+    return {
+      symbol: String(symbol),
+      tokenAddress,
+    };
+  });
+  const items = [];
+  for (let i = 0; i < resolved.length; i += 1) {
+    if (resolved[i]) {
+      items.push(resolved[i]);
+    }
+  }
+  listingsCache = {
+    registryAddr,
+    timestampMs: now,
+    items,
+  };
+  return items;
+}
+
+async function getLeveragedProducts(factoryAddr) {
+  const now = Date.now();
+  if (
+    leveragedProductsCache.factoryAddr === factoryAddr
+    && (now - leveragedProductsCache.timestampMs) < LEVERAGED_PRODUCTS_CACHE_TTL_MS
+    && Array.isArray(leveragedProductsCache.items)
+  ) {
+    return leveragedProductsCache.items;
+  }
+  const countData = leveragedFactoryInterface.encodeFunctionData('productCount', []);
+  const countResult = await hardhatRpc('eth_call', [{ to: factoryAddr, data: countData }, 'latest']);
+  const [countRaw] = leveragedFactoryInterface.decodeFunctionResult('productCount', countResult);
+  const count = Number(countRaw);
+  const indexes = [];
+  for (let i = 0; i < count; i += 1) {
+    indexes.push(i);
+  }
+  const resolved = await mapWithConcurrency(indexes, PORTFOLIO_RPC_CONCURRENCY, async (index) => {
+    const itemData = leveragedFactoryInterface.encodeFunctionData('getProductAt', [index]);
+    const itemResult = await hardhatRpc('eth_call', [{ to: factoryAddr, data: itemData }, 'latest']);
+    const [item] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', itemResult);
+    return {
+      productSymbol: String(item.productSymbol),
+      baseSymbol: String(item.baseSymbol),
+      baseToken: normalizeAddress(item.baseToken),
+      leverage: Number(item.leverage),
+      isLong: Boolean(item.isLong),
+      token: normalizeAddress(item.token),
+    };
+  });
+  leveragedProductsCache = {
+    factoryAddr,
+    timestampMs: now,
+    items: resolved,
+  };
+  return resolved;
+}
+
+async function getPortfolioHoldings(wallet, deployments, options) {
+  const aggregatorAddress = normalizeAddress(deployments && deployments.portfolioAggregator);
+  if (!aggregatorAddress) {
+    return null;
+  }
+  const disableCache = Boolean(options && options.disableCache);
+  const cacheKey = `${aggregatorAddress}:${normalizeAddress(wallet)}`;
+  if (!disableCache) {
+    const cached = portfolioHoldingsCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestampMs) < PORTFOLIO_HOLDINGS_CACHE_TTL_MS) {
+      return cached.items;
+    }
+  }
+  const data = aggregatorInterface.encodeFunctionData('getHoldings', [wallet]);
+  const result = await hardhatRpc('eth_call', [{ to: aggregatorAddress, data }, 'latest']);
+  const [holdingsRaw] = aggregatorInterface.decodeFunctionResult('getHoldings', result);
+  const items = [];
+  for (let i = 0; i < holdingsRaw.length; i += 1) {
+    const row = holdingsRaw[i];
+    items.push({
+      symbol: String(row.symbol),
+      tokenAddress: normalizeAddress(row.token),
+      balanceWei: BigInt(row.balanceWei.toString()),
+      priceCents: Number(row.priceCents),
+      valueWei: BigInt(row.valueWei.toString()),
+    });
+  }
+  if (!disableCache) {
+    portfolioHoldingsCache.set(cacheKey, {
+      timestampMs: Date.now(),
+      items,
+    });
+  }
+  return items;
+}
+
+function findLatestFillPriceCents(snapshot, symbol) {
+  const rows = Array.isArray(snapshot && snapshot.fills) ? snapshot.fills : [];
+  const upper = String(symbol || '').toUpperCase();
+  let latest = null;
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (String(row.symbol || '').toUpperCase() !== upper) {
+      continue;
+    }
+    if (!latest) {
+      latest = row;
+      continue;
+    }
+    const prevTs = Number(latest.timestampMs) || 0;
+    const currTs = Number(row.timestampMs) || 0;
+    if (currTs > prevTs) {
+      latest = row;
+      continue;
+    }
+    if (currTs === prevTs) {
+      const prevBlock = Number(latest.blockNumber) || 0;
+      const currBlock = Number(row.blockNumber) || 0;
+      if (currBlock > prevBlock) {
+        latest = row;
+      }
+    }
+  }
+  if (!latest) {
+    return 0;
+  }
+  const priceCents = Number(latest.priceCents);
+  if (!Number.isFinite(priceCents) || priceCents <= 0) {
+    return 0;
+  }
+  return priceCents;
+}
+
+async function getBestLivePriceCents(snapshot, deployments, symbol) {
+  let symbolText = '';
+  if (symbol) {
+    symbolText = String(symbol);
+  }
+  const upper = symbolText.toUpperCase();
+  if (!upper) {
+    return {
+      priceCents: 0,
+      priceSource: 'NONE',
+    };
+  }
+
+  const lifecycleStatus = getSymbolLifecycleStatus(symbolText);
+  if (lifecycleStatus === 'DELISTED') {
+    return {
+      priceCents: 0,
+      priceSource: 'DELISTED',
+    };
+  }
+
+  const cached = fmpQuoteCache.get(upper);
+  if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
+    const cachedPrice = Number(cached.data && cached.data.price);
+    if (Number.isFinite(cachedPrice) && cachedPrice > 0) {
+      return {
+        priceCents: Math.round(cachedPrice * 100),
+        priceSource: String(cached.data.source || 'LIVE'),
+      };
+    }
+  }
+
+  const priceFeedAddr = normalizeAddress(deployments && deployments.priceFeed);
+  if (priceFeedAddr) {
+    try {
+      const feedData = priceFeedInterface.encodeFunctionData('getPrice', [symbolText]);
+      const feedResult = await hardhatRpc('eth_call', [{ to: priceFeedAddr, data: feedData }, 'latest']);
+      const [onchainPriceRaw] = priceFeedInterface.decodeFunctionResult('getPrice', feedResult);
+      const onchainPrice = Number(onchainPriceRaw);
+      if (Number.isFinite(onchainPrice) && onchainPrice > 0) {
+        return {
+          priceCents: onchainPrice,
+          priceSource: 'ONCHAIN_PRICEFEED',
+        };
+      }
+    } catch {
+    }
+  }
+
+  const lastFillCents = findLatestFillPriceCents(snapshot, symbolText);
+  if (lastFillCents > 0) {
+    return {
+      priceCents: lastFillCents,
+      priceSource: 'LAST_FILL',
+    };
+  }
+
+  try {
+    const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol: upper }));
+    const quote = Array.isArray(payload) ? payload[0] : payload;
+    const price = Number(quote && quote.price);
+    if (Number.isFinite(price) && price > 0) {
+      fmpQuoteCache.set(upper, {
+        data: { symbol: upper, price, source: 'LIVE' },
+        timestamp: Date.now(),
+      });
+      return {
+        priceCents: Math.round(price * 100),
+        priceSource: 'LIVE',
+      };
+    }
+  } catch {
+  }
+
+  try {
+    const yahoo = await fetchQuote(upper);
+    const price = Number(yahoo && (yahoo.regularMarketPrice || yahoo.price || 0));
+    if (Number.isFinite(price) && price > 0) {
+      fmpQuoteCache.set(upper, {
+        data: { symbol: upper, price, source: 'YAHOO' },
+        timestamp: Date.now(),
+      });
+      return {
+        priceCents: Math.round(price * 100),
+        priceSource: 'YAHOO',
+      };
+    }
+  } catch {
+  }
+
+  try {
+    const candle = await buildCandleFallback(upper);
+    const price = Number(candle && candle.close);
+    if (Number.isFinite(price) && price > 0) {
+      fmpQuoteCache.set(upper, {
+        data: { symbol: upper, price, source: 'CANDLES' },
+        timestamp: Date.now(),
+      });
+      return {
+        priceCents: Math.round(price * 100),
+        priceSource: 'CANDLES',
+      };
+    }
+  } catch {
+  }
+
+  return {
+    priceCents: 0,
+    priceSource: 'NONE',
+  };
+}
+
+function buildWalletFillRows(snapshot, wallet) {
+  const fillRows = [];
+  const walletNorm = normalizeAddress(wallet);
+  const fills = Array.isArray(snapshot && snapshot.fills) ? snapshot.fills : [];
+  for (let i = 0; i < fills.length; i += 1) {
+    const fill = fills[i];
+    let isWalletFill = false;
+    if (fill.makerTrader === walletNorm) {
+      isWalletFill = true;
+    }
+    if (fill.takerTrader === walletNorm) {
+      isWalletFill = true;
+    }
+    if (!isWalletFill) {
+      continue;
+    }
+    let side = '';
+    if (fill.side) {
+      side = String(fill.side).toUpperCase();
+    } else if (fill.makerTrader === walletNorm) {
+      const makerOrder = snapshot.orders[String(fill.makerId)];
+      if (makerOrder && makerOrder.side) {
+        side = makerOrder.side;
+      }
+    } else {
+      const takerOrder = snapshot.orders[String(fill.takerId)];
+      if (takerOrder && takerOrder.side) {
+        side = takerOrder.side;
+      }
+    }
+    fillRows.push({
+      symbol: fill.symbol,
+      side,
+      qtyWei: fill.qtyWei,
+      priceCents: fill.priceCents,
+      timestampMs: fill.timestampMs,
+      blockNumber: fill.blockNumber,
+      txHash: fill.txHash,
+      logIndex: fill.logIndex,
+    });
+  }
+  fillRows.sort((a, b) => {
+    const timestampDiff = a.timestampMs - b.timestampMs;
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+    const blockDiff = a.blockNumber - b.blockNumber;
+    if (blockDiff !== 0) {
+      return blockDiff;
+    }
+    return a.logIndex - b.logIndex;
+  });
+  return fillRows;
+}
+
+async function buildWalletFillRowsWithFallback(snapshot, wallet, deployments) {
+  const fromSnapshot = buildWalletFillRows(snapshot, wallet);
+  if (fromSnapshot.length > 0) {
+    return fromSnapshot;
+  }
+  try {
+    const chainActivity = await withTimeout(
+      fetchWalletActivityFromChain(wallet, deployments),
+      8000,
+      'wallet fills chain fallback timeout'
+    );
+    if (chainActivity && Array.isArray(chainActivity.fillRows) && chainActivity.fillRows.length > 0) {
+      return chainActivity.fillRows;
+    }
+  } catch {
+  }
+  return fromSnapshot;
+}
+
+function buildLotsAndRealized(fillRows) {
+  const lotsBySymbol = new Map();
+  const realizedBySymbol = new Map();
+  for (let i = 0; i < fillRows.length; i += 1) {
+    const row = fillRows[i];
+    if (!lotsBySymbol.has(row.symbol)) {
+      lotsBySymbol.set(row.symbol, []);
+    }
+    if (!realizedBySymbol.has(row.symbol)) {
+      realizedBySymbol.set(row.symbol, 0n);
+    }
+    const lots = lotsBySymbol.get(row.symbol);
+    if (row.side === 'BUY') {
+      lots.push({ qtyWei: BigInt(row.qtyWei), priceCents: row.priceCents });
+      continue;
+    }
+    if (row.side === 'SELL') {
+      let remainingSell = BigInt(row.qtyWei);
+      while (remainingSell > 0n && lots.length > 0) {
+        const lot = lots[0];
+        let consume = lot.qtyWei;
+        if (remainingSell < lot.qtyWei) {
+          consume = remainingSell;
+        }
+        const sellQuote = quoteAmountWei(consume, row.priceCents);
+        const buyQuote = quoteAmountWei(consume, lot.priceCents);
+        const previousRealized = realizedBySymbol.get(row.symbol);
+        realizedBySymbol.set(row.symbol, previousRealized + (sellQuote - buyQuote));
+        lot.qtyWei -= consume;
+        remainingSell -= consume;
+        if (lot.qtyWei === 0n) {
+          lots.shift();
+        }
+      }
+    }
+  }
+  return {
+    lotsBySymbol,
+    realizedBySymbol,
+  };
+}
+
+function formatQtyNumber(balanceWei) {
+  const qtyValueWeiText = balanceWei.toString();
+  const qtyNegative = String(qtyValueWeiText).startsWith('-');
+  let qtyRaw = String(qtyValueWeiText);
+  if (qtyNegative) {
+    qtyRaw = String(qtyValueWeiText).slice(1);
+  }
+  const qtyPadded = qtyRaw.padStart(19, '0');
+  const qtyWhole = qtyPadded.slice(0, -18);
+  const qtyFraction = qtyPadded.slice(-18, -12);
+  let qtyNumber = Number(`${qtyWhole}.${qtyFraction}`);
+  if (qtyNegative) {
+    qtyNumber = -qtyNumber;
+  }
+  return qtyNumber;
+}
+
+async function buildPortfolioPositions(snapshot, wallet, deployments, options) {
+  const fillRows = await buildWalletFillRowsWithFallback(snapshot, wallet, deployments);
+  const { lotsBySymbol, realizedBySymbol } = buildLotsAndRealized(fillRows);
+  if (PORTFOLIO_USE_OFFCHAIN_POSITIONS_ONLY && !INDEXER_ENABLE_TRANSFERS && fillRows.length > 0) {
+    const symbolTokenMap = new Map();
+    const orderValues = Object.values(snapshot.orders || {});
+    for (let i = 0; i < orderValues.length; i += 1) {
+      const order = orderValues[i];
+      if (order && order.symbol && order.equityToken && !symbolTokenMap.has(order.symbol)) {
+        symbolTokenMap.set(order.symbol, order.equityToken);
+      }
+    }
+    const symbols = new Set();
+    for (const symbol of lotsBySymbol.keys()) {
+      symbols.add(symbol);
+    }
+    for (const symbol of realizedBySymbol.keys()) {
+      symbols.add(symbol);
+    }
+    const positions = [];
+    for (const symbol of symbols) {
+      const lots = lotsBySymbol.get(symbol) || [];
+      let balanceWei = 0n;
+      let costBasisWei = 0n;
+      for (let i = 0; i < lots.length; i += 1) {
+        balanceWei += lots[i].qtyWei;
+        costBasisWei += quoteAmountWei(lots[i].qtyWei, lots[i].priceCents);
+      }
+      let realizedPnlWei = 0n;
+      const realizedFound = realizedBySymbol.get(symbol);
+      if (realizedFound) {
+        realizedPnlWei = realizedFound;
+      }
+      if (balanceWei === 0n && realizedPnlWei === 0n) {
+        continue;
+      }
+      let priceCents = 0;
+      let priceSource = 'NONE';
+      if (balanceWei > 0n) {
+        priceCents = findLatestFillPriceCents(snapshot, symbol);
+        if (priceCents > 0) {
+          priceSource = 'LAST_FILL';
+        }
+      }
+      let currentValueWei = 0n;
+      if (priceCents > 0) {
+        currentValueWei = quoteAmountWei(balanceWei, priceCents);
+      }
+      let avgCostCents = 0;
+      if (balanceWei > 0n && costBasisWei > 0n) {
+        avgCostCents = Number((costBasisWei * 100n) / balanceWei);
+      }
+      const unrealizedPnlWei = currentValueWei - costBasisWei;
+      let unrealizedPnlPct = null;
+      if (costBasisWei > 0n) {
+        unrealizedPnlPct = Number(unrealizedPnlWei * 10000n / costBasisWei) / 100;
+      }
+      positions.push({
+        symbol,
+        tokenAddress: symbolTokenMap.get(symbol) || '',
+        balanceWei: balanceWei.toString(),
+        qty: formatQtyNumber(balanceWei),
+        avgCostCents,
+        costBasisWei: costBasisWei.toString(),
+        priceCents,
+        priceSource,
+        currentValueWei: currentValueWei.toString(),
+        realizedPnlWei: realizedPnlWei.toString(),
+        unrealizedPnlWei: unrealizedPnlWei.toString(),
+        unrealizedPnlPct,
+        totalPnlWei: (realizedPnlWei + unrealizedPnlWei).toString(),
+        unmatchedQtyWei: '0',
+      });
+    }
+    positions.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    return positions;
+  }
+  let listingRows = [];
+  let holdingsBySymbol = new Map();
+  try {
+    const holdings = await getPortfolioHoldings(wallet, deployments, options);
+    if (holdings && holdings.length > 0) {
+      for (let i = 0; i < holdings.length; i += 1) {
+        const holding = holdings[i];
+        holdingsBySymbol.set(holding.symbol, holding);
+      }
+      const realizedSymbols = Array.from(realizedBySymbol.keys());
+      const symbolsNeeded = new Set();
+      for (let i = 0; i < holdings.length; i += 1) {
+        const holding = holdings[i];
+        if (holding.balanceWei > 0n || realizedBySymbol.has(holding.symbol)) {
+          symbolsNeeded.add(holding.symbol);
+        }
+      }
+      for (let i = 0; i < realizedSymbols.length; i += 1) {
+        symbolsNeeded.add(realizedSymbols[i]);
+      }
+      const listings = await getIndexedListings(deployments.listingsRegistry);
+      const listingLookup = new Map();
+      for (let i = 0; i < listings.length; i += 1) {
+        listingLookup.set(listings[i].symbol, listings[i].tokenAddress);
+      }
+      listingRows = Array.from(symbolsNeeded).map((symbol) => {
+        const holding = holdingsBySymbol.get(symbol);
+        return {
+          symbol,
+          tokenAddress: holding ? holding.tokenAddress : (listingLookup.get(symbol) || ''),
+        };
+      });
+    }
+  } catch {
+    listingRows = [];
+    holdingsBySymbol = new Map();
+  }
+  if (listingRows.length === 0) {
+    listingRows = await getIndexedListings(deployments.listingsRegistry);
+  }
+  const rows = await mapWithConcurrency(listingRows, PORTFOLIO_RPC_CONCURRENCY, async (listing) => {
+    const holding = holdingsBySymbol.get(listing.symbol) || null;
+    let balanceWei = 0n;
+    if (holding) {
+      balanceWei = holding.balanceWei;
+    } else {
+      const balData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+      const balResult = await hardhatRpc('eth_call', [{ to: listing.tokenAddress, data: balData }, 'latest']);
+      const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balResult);
+      balanceWei = BigInt(balanceWeiRaw.toString());
+    }
+    const lots = lotsBySymbol.get(listing.symbol) || [];
+    let realizedPnlWei = 0n;
+    const realizedFound = realizedBySymbol.get(listing.symbol);
+    if (realizedFound) {
+      realizedPnlWei = realizedFound;
+    }
+    if (balanceWei === 0n && realizedPnlWei === 0n) {
+      return null;
+    }
+    let remaining = balanceWei;
+    let usedQty = 0n;
+    let usedCostWei = 0n;
+    for (let i = 0; i < lots.length; i += 1) {
+      const lot = lots[i];
+      if (remaining === 0n) {
+        break;
+      }
+      let useQty = lot.qtyWei;
+      if (remaining < lot.qtyWei) {
+        useQty = remaining;
+      }
+      usedQty += useQty;
+      usedCostWei += quoteAmountWei(useQty, lot.priceCents);
+      remaining -= useQty;
+    }
+    let unmatchedQtyWei = 0n;
+    if (balanceWei > usedQty) {
+      unmatchedQtyWei = balanceWei - usedQty;
+    }
+    let valuation = {
+      priceCents: 0,
+      priceSource: 'NONE',
+    };
+    let currentValueWei = 0n;
+    if (holding && holding.balanceWei > 0n && holding.priceCents > 0) {
+      valuation = {
+        priceCents: holding.priceCents,
+        priceSource: 'ONCHAIN_PRICEFEED',
+      };
+      currentValueWei = holding.valueWei;
+    } else if (balanceWei > 0n) {
+      valuation = await getBestLivePriceCents(snapshot, deployments, listing.symbol);
+      if (valuation.priceCents > 0) {
+        currentValueWei = quoteAmountWei(balanceWei, valuation.priceCents);
+      }
+    }
+    let unmatchedCostWei = 0n;
+    if (unmatchedQtyWei > 0n) {
+      let unmatchedCostCents = getStableUnmatchedCostCents(snapshot, listing.symbol, usedQty, usedCostWei);
+      if (!(unmatchedCostCents > 0) && Number(valuation.priceCents) > 0) {
+        unmatchedCostCents = Number(valuation.priceCents);
+      }
+      if (unmatchedCostCents > 0) {
+        unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, unmatchedCostCents);
+      }
+    }
+    const effectiveCostBasisWei = usedCostWei + unmatchedCostWei;
+    let avgCostCents = 0;
+    if (balanceWei > 0n) {
+      avgCostCents = Number((effectiveCostBasisWei * 100n) / balanceWei);
+    }
+    const unrealizedPnlWei = currentValueWei - effectiveCostBasisWei;
+    let unrealizedPnlPct = null;
+    if (effectiveCostBasisWei > 0n) {
+      unrealizedPnlPct = Number(unrealizedPnlWei * 10000n / effectiveCostBasisWei) / 100;
+    }
+    return {
+      symbol: listing.symbol,
+      tokenAddress: listing.tokenAddress,
+      balanceWei: balanceWei.toString(),
+      qty: formatQtyNumber(balanceWei),
+      avgCostCents,
+      costBasisWei: effectiveCostBasisWei.toString(),
+      priceCents: valuation.priceCents,
+      priceSource: valuation.priceSource,
+      currentValueWei: currentValueWei.toString(),
+      realizedPnlWei: realizedPnlWei.toString(),
+      unrealizedPnlWei: unrealizedPnlWei.toString(),
+      unrealizedPnlPct,
+      totalPnlWei: (realizedPnlWei + unrealizedPnlWei).toString(),
+      unmatchedQtyWei: unmatchedQtyWei.toString(),
+    };
+  });
+  const positions = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    if (rows[i]) {
+      positions.push(rows[i]);
+    }
+  }
+  positions.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  return positions;
+}
+
+async function computeLeveragedValueWei(snapshot, wallet, deployments) {
+  const factoryAddress = normalizeAddress(deployments.leveragedTokenFactory);
+  const routerAddress = normalizeAddress(deployments.leveragedProductRouter);
+  if (!factoryAddress || !routerAddress) {
+    return 0n;
+  }
+  const walletNorm = normalizeAddress(wallet);
+  let hasWalletEvents = false;
+  const leveragedEvents = Array.isArray(snapshot && snapshot.leveragedEvents) ? snapshot.leveragedEvents : [];
+  for (let i = 0; i < leveragedEvents.length; i += 1) {
+    if (normalizeAddress(leveragedEvents[i].wallet) === walletNorm) {
+      hasWalletEvents = true;
+      break;
+    }
+  }
+  if (!hasWalletEvents) {
+    return 0n;
+  }
+  const products = await getLeveragedProducts(factoryAddress);
+  const rows = await mapWithConcurrency(products, PORTFOLIO_RPC_CONCURRENCY, async (item) => {
+    const positionData = leveragedRouterInterface.encodeFunctionData('positions', [wallet, item.token]);
+    const positionResult = await hardhatRpc('eth_call', [{ to: routerAddress, data: positionData }, 'latest']);
+    const [qtyWeiRaw] = leveragedRouterInterface.decodeFunctionResult('positions', positionResult);
+    const qtyWei = BigInt(qtyWeiRaw.toString());
+    if (qtyWei <= 0n) {
+      return 0n;
+    }
+    const quoteData = leveragedRouterInterface.encodeFunctionData('previewUnwind', [wallet, item.token, qtyWei]);
+    const quoteResult = await hardhatRpc('eth_call', [{ to: routerAddress, data: quoteData }, 'latest']);
+    const [ttokenOutWeiRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', quoteResult);
+    return BigInt(ttokenOutWeiRaw.toString());
+  });
+  let total = 0n;
+  for (let i = 0; i < rows.length; i += 1) {
+    total += rows[i];
+  }
+  return total;
 }
 
 function ensureAutoTradeDir() {
@@ -3242,7 +4958,11 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
   const current = state.tokens[tokenKey] || {};
   let deploymentBlock = Number(current.deploymentBlock);
   if (!Number.isFinite(deploymentBlock) || deploymentBlock < 0 || deploymentBlock > endBlock) {
-    deploymentBlock = await resolveContractDeploymentBlock(normalizedToken, endBlock);
+    if (MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS > 0) {
+      deploymentBlock = Math.max(0, endBlock - MERKLE_HOLDER_INITIAL_LOOKBACK_BLOCKS + 1);
+    } else {
+      deploymentBlock = await resolveContractDeploymentBlock(normalizedToken, endBlock);
+    }
   }
   let lastScannedBlock = Number(current.lastScannedBlock);
   const hasPriorScan = Number.isFinite(lastScannedBlock);
@@ -3265,7 +4985,9 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
     lastScannedBlock + 1 - MERKLE_HOLDER_REORG_LOOKBACK_BLOCKS,
   );
   const seen = new Set();
+  const touched = new Set();
   const cachedHolders = normalizeHolderArray(current.holders);
+  const cachedNonZeroHolders = normalizeHolderArray(current.nonZeroHolders);
   for (let i = 0; i < cachedHolders.length; i += 1) {
     seen.add(cachedHolders[i].toLowerCase());
   }
@@ -3284,9 +5006,11 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
       const to = normalizeAddress(parsed.args.to);
       if (from && from !== ethers.ZeroAddress) {
         seen.add(from.toLowerCase());
+        touched.add(from.toLowerCase());
       }
       if (to && to !== ethers.ZeroAddress) {
         seen.add(to.toLowerCase());
+        touched.add(to.toLowerCase());
       }
     } catch {
     }
@@ -3304,10 +5028,24 @@ async function collectHolderCandidatesFromChain(tokenAddress, toBlockHex) {
     deploymentBlock,
     lastScannedBlock: endBlock,
     holders: rows,
+    nonZeroHolders: cachedNonZeroHolders,
     updatedAtMs: Date.now(),
   };
   writeMerkleHolderScanState(state);
-  return rows;
+  const touchedRows = [];
+  const touchedValues = Array.from(touched.values());
+  for (let i = 0; i < touchedValues.length; i += 1) {
+    const normalized = normalizeAddress(touchedValues[i]);
+    if (normalized && normalized !== ethers.ZeroAddress) {
+      touchedRows.push(normalized);
+    }
+  }
+  touchedRows.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  return {
+    holders: rows,
+    touchedHolders: touchedRows,
+    cachedNonZeroHolders,
+  };
 }
 
 function getDefaultAutoTradeState() {
@@ -4159,92 +5897,140 @@ app.get('/api/fmp/quote-short', async (req, res) => {
 
 app.get('/api/fmp/index-ticker', async (_req, res) => {
   const now = Date.now();
-  const rows = [];
-
-  for (let i = 0; i < FMP_US_TOP_SYMBOLS.length; i += 1) {
-    const symbol = String(FMP_US_TOP_SYMBOLS[i]).toUpperCase();
-    const cached = fmpIndexTickerCache.get(symbol);
-    let shouldUseCache = false;
-    if (cached) {
-      const ageMs = now - cached.timestamp;
-      if (ageMs < FMP_INDEX_TTL_MS) {
-        shouldUseCache = true;
-      }
-    }
-    if (shouldUseCache) {
-      rows.push(cached.data);
-    } else {
-      try {
-        const payload = await fetchFmpJson(getFmpUrl('quote', { symbol }));
-        let quote = payload;
-        if (Array.isArray(payload)) {
-          quote = payload[0];
-        }
-        const price = Number(pick(quote, ['price', 'regularMarketPrice']));
-        const previousClose = Number(quote.previousClose);
-        const change = Number(quote.change);
-
-        let changePercentRaw = quote.changePercentage;
-        if (!Number.isFinite(Number(changePercentRaw))) {
-          changePercentRaw = quote.changesPercentage;
-        }
-        if (!Number.isFinite(Number(changePercentRaw))) {
-          changePercentRaw = quote.changePercent;
-        }
-
-        let changePercent = NaN;
-        if (typeof changePercentRaw === 'string') {
-          const cleaned = changePercentRaw.replace('%', '').trim();
-          changePercent = Number(cleaned);
-        } else {
-          changePercent = Number(changePercentRaw);
-        }
-
-        // FMP returns percent units (0.53 = 0.53%), UI expects ratio (0.0053)
-        if (Number.isFinite(changePercent)) {
-          changePercent = changePercent / 100;
-        } else if (Number.isFinite(change) && Number.isFinite(previousClose) && previousClose > 0) {
-          changePercent = change / previousClose;
-        }
-        let label = '';
-        if (quote.name) {
-          label = String(quote.name);
-        }
-        if (!label && quote.symbol) {
-          label = String(quote.symbol);
-        }
-        if (!label) {
-          label = symbol;
-        }
-
-        let outputSymbol = symbol;
-        if (quote.symbol) {
-          outputSymbol = String(quote.symbol);
-        }
-        const next = {
-          symbol: outputSymbol,
-          label,
-          price,
-          changePercent,
-        };
-        fmpIndexTickerCache.set(symbol, { data: next, timestamp: now });
-        rows.push(next);
-      } catch (err) {
-        if (cached) {
-          rows.push(cached.data);
-        }
-      }
-    }
+  if ((now - Number(fmpIndexTickerSnapshot.timestampMs || 0)) < FMP_INDEX_SNAPSHOT_TTL_MS) {
+    return res.json({
+      ok: true,
+      updatedAtMs: Number(fmpIndexTickerSnapshot.timestampMs || now),
+      rows: fmpIndexTickerSnapshot.rows,
+      degraded: Boolean(fmpIndexTickerSnapshot.degraded),
+      warnings: fmpIndexTickerSnapshot.warnings,
+    });
   }
 
-  if (rows.length === 0) {
-    return res.status(502).json({ error: 'failed to load stock ticker' });
+  if (!fmpIndexTickerInflight) {
+    fmpIndexTickerInflight = (async () => {
+      const fetchStartedAtMs = Date.now();
+      const warnings = [];
+      const resolved = await mapWithConcurrency(
+        FMP_US_TOP_SYMBOLS,
+        4,
+        async (symbolRaw) => {
+          const symbol = String(symbolRaw).toUpperCase();
+          const cached = fmpIndexTickerCache.get(symbol);
+          let shouldUseCache = false;
+          if (cached) {
+            const ageMs = fetchStartedAtMs - Number(cached.timestamp || 0);
+            if (ageMs < FMP_INDEX_TTL_MS) {
+              shouldUseCache = true;
+            }
+          }
+          if (shouldUseCache) {
+            return cached.data;
+          }
+          try {
+            const payload = await withTimeout(
+              fetchFmpJson(getFmpUrl('quote', { symbol })),
+              1800,
+              `index ticker timeout ${symbol}`
+            );
+            let quote = payload;
+            if (Array.isArray(payload)) {
+              quote = payload[0];
+            }
+            const price = Number(pick(quote, ['price', 'regularMarketPrice']));
+            const previousClose = Number(quote.previousClose);
+            const change = Number(quote.change);
+
+            let changePercentRaw = quote.changePercentage;
+            if (!Number.isFinite(Number(changePercentRaw))) {
+              changePercentRaw = quote.changesPercentage;
+            }
+            if (!Number.isFinite(Number(changePercentRaw))) {
+              changePercentRaw = quote.changePercent;
+            }
+
+            let changePercent = NaN;
+            if (typeof changePercentRaw === 'string') {
+              const cleaned = changePercentRaw.replace('%', '').trim();
+              changePercent = Number(cleaned);
+            } else {
+              changePercent = Number(changePercentRaw);
+            }
+            if (Number.isFinite(changePercent)) {
+              changePercent = changePercent / 100;
+            } else if (Number.isFinite(change) && Number.isFinite(previousClose) && previousClose > 0) {
+              changePercent = change / previousClose;
+            }
+            let label = '';
+            if (quote.name) {
+              label = String(quote.name);
+            }
+            if (!label && quote.symbol) {
+              label = String(quote.symbol);
+            }
+            if (!label) {
+              label = symbol;
+            }
+            let outputSymbol = symbol;
+            if (quote.symbol) {
+              outputSymbol = String(quote.symbol);
+            }
+            const row = {
+              symbol: outputSymbol,
+              label,
+              price,
+              changePercent,
+            };
+            fmpIndexTickerCache.set(symbol, { data: row, timestamp: fetchStartedAtMs });
+            return row;
+          } catch (err) {
+            if (cached && cached.data) {
+              warnings.push(`ticker stale for ${symbol}`);
+              return {
+                ...cached.data,
+                stale: true,
+              };
+            }
+            warnings.push(`ticker unavailable for ${symbol}`);
+            return {
+              symbol,
+              label: symbol,
+              price: 0,
+              changePercent: 0,
+              stale: true,
+            };
+          }
+        }
+      );
+      const rows = [];
+      for (let i = 0; i < resolved.length; i += 1) {
+        if (resolved[i]) {
+          rows.push(resolved[i]);
+        }
+      }
+      let degraded = false;
+      if (warnings.length > 0) {
+        degraded = true;
+      }
+      fmpIndexTickerSnapshot = {
+        timestampMs: Date.now(),
+        rows,
+        degraded,
+        warnings,
+      };
+      return fmpIndexTickerSnapshot;
+    })().finally(() => {
+      fmpIndexTickerInflight = null;
+    });
   }
 
+  const snapshot = await fmpIndexTickerInflight;
   res.json({
     ok: true,
-    updatedAtMs: now,
-    rows,
+    updatedAtMs: Number(snapshot.timestampMs || now),
+    rows: snapshot.rows,
+    degraded: Boolean(snapshot.degraded),
+    warnings: snapshot.warnings,
   });
 });
 
@@ -5321,7 +7107,7 @@ app.get('/api/hardhat/accounts', async (_req, res) => {
     }
     res.json({ accounts });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 // rest api to get token address
@@ -5365,18 +7151,8 @@ app.get('/api/admin/wallets', (req, res) => {
       return res.status(403).json({ error: 'admin wallet required' });
     }
     const state = readAdminWalletState();
-    const rows = Array.isArray(state.wallets) ? state.wallets : [];
-    const set = new Set();
-    if (IMMUTABLE_ADMIN_WALLET) {
-      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
-    }
-    for (let i = 0; i < rows.length; i += 1) {
-      const normalized = normalizeAddress(rows[i]);
-      if (normalized) {
-        set.add(normalized.toLowerCase());
-      }
-    }
-    const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
+    const allowlist = getAdminWalletAllowlist();
+    const wallets = Array.from(allowlist).map((item) => normalizeAddress(item)).filter(Boolean);
     wallets.sort((a, b) => a.localeCompare(b));
     res.json({
       wallets,
@@ -5404,21 +7180,34 @@ app.post('/api/admin/wallets/add', (req, res) => {
     }
     const state = readAdminWalletState();
     const set = new Set();
-    if (IMMUTABLE_ADMIN_WALLET) {
-      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
+    const base = getBaseAdminWalletAllowlist();
+    for (const row of base) {
+      set.add(String(row).toLowerCase());
     }
     const rows = Array.isArray(state.wallets) ? state.wallets : [];
+    const removedRows = Array.isArray(state.removedWallets) ? state.removedWallets : [];
     for (let i = 0; i < rows.length; i += 1) {
       const normalized = normalizeAddress(rows[i]);
       if (normalized) {
         set.add(normalized.toLowerCase());
       }
     }
+    const removedSet = new Set();
+    for (let i = 0; i < removedRows.length; i += 1) {
+      const normalized = normalizeAddress(removedRows[i]);
+      if (normalized) {
+        removedSet.add(normalized.toLowerCase());
+      }
+    }
     set.add(targetWallet.toLowerCase());
+    removedSet.delete(targetWallet.toLowerCase());
     const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
     wallets.sort((a, b) => a.localeCompare(b));
+    const removedWallets = Array.from(removedSet).map((item) => normalizeAddress(item)).filter(Boolean);
+    removedWallets.sort((a, b) => a.localeCompare(b));
     const next = {
       wallets,
+      removedWallets,
       updatedAtMs: Date.now(),
     };
     writeAdminWalletState(next);
@@ -5446,15 +7235,17 @@ app.post('/api/admin/wallets/remove', (req, res) => {
     if (!targetWallet) {
       return res.status(400).json({ error: 'targetWallet must be a valid address' });
     }
-    if (IMMUTABLE_ADMIN_WALLET && targetWallet.toLowerCase() === IMMUTABLE_ADMIN_WALLET.toLowerCase()) {
-      return res.status(400).json({ error: 'cannot remove immutable admin wallet' });
+    const base = getBaseAdminWalletAllowlist();
+    if (base.has(targetWallet.toLowerCase())) {
+      return res.status(400).json({ error: 'cannot remove core admin wallet' });
     }
     const state = readAdminWalletState();
     const set = new Set();
-    if (IMMUTABLE_ADMIN_WALLET) {
-      set.add(IMMUTABLE_ADMIN_WALLET.toLowerCase());
+    for (const row of base) {
+      set.add(String(row).toLowerCase());
     }
     const rows = Array.isArray(state.wallets) ? state.wallets : [];
+    const removedRows = Array.isArray(state.removedWallets) ? state.removedWallets : [];
     for (let i = 0; i < rows.length; i += 1) {
       const normalized = normalizeAddress(rows[i]);
       if (normalized) {
@@ -5464,10 +7255,21 @@ app.post('/api/admin/wallets/remove', (req, res) => {
         }
       }
     }
+    const removedSet = new Set();
+    for (let i = 0; i < removedRows.length; i += 1) {
+      const normalized = normalizeAddress(removedRows[i]);
+      if (normalized) {
+        removedSet.add(normalized.toLowerCase());
+      }
+    }
+    removedSet.add(targetWallet.toLowerCase());
     const wallets = Array.from(set).map((item) => normalizeAddress(item)).filter(Boolean);
     wallets.sort((a, b) => a.localeCompare(b));
+    const removedWallets = Array.from(removedSet).map((item) => normalizeAddress(item)).filter(Boolean);
+    removedWallets.sort((a, b) => a.localeCompare(b));
     const next = {
       wallets,
+      removedWallets,
       updatedAtMs: Date.now(),
     };
     writeAdminWalletState(next);
@@ -5479,6 +7281,10 @@ app.post('/api/admin/wallets/remove', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.all('/api/admin/wallets/wipe', (_req, res) => {
+  res.status(404).json({ error: 'not found' });
 });
 
 app.get('/api/live-updates/status', (_req, res) => {
@@ -5503,7 +7309,7 @@ app.get('/api/ttoken/balance', async (req, res) => {
     const [balanceWei] = equityTokenInterface.decodeFunctionResult('balanceOf', result);
     res.json({ address, ttokenAddress, balanceWei: balanceWei.toString() });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -5535,6 +7341,14 @@ app.post('/api/ttoken/mint', async (req, res) => {
   }
 
   try {
+    const waitReceiptRaw = req.query.waitReceipt;
+    let waitReceipt = false;
+    if (String(waitReceiptRaw || '').toLowerCase() === '1') {
+      waitReceipt = true;
+    }
+    if (String(waitReceiptRaw || '').toLowerCase() === 'true') {
+      waitReceipt = true;
+    }
     const deployments = loadDeployments();
     const from = deployments.admin;
     const fromValid = isValidAddress(from);
@@ -5557,10 +7371,25 @@ app.post('/api/ttoken/mint', async (req, res) => {
       to: ttokenAddress,
       data,
     }]);
-    const receipt = await waitForReceipt(txHash);
-    const blockNumber = parseRpcInt(receipt.blockNumber);
-    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
-    appendManualMintActivity({
+    if (waitReceipt) {
+      const receipt = await waitForReceipt(txHash);
+      const blockNumber = parseRpcInt(receipt.blockNumber);
+      const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+      appendManualMintActivity({
+        wallet: to,
+        tokenAddress: ttokenAddress,
+        symbol: 'TTOKEN',
+        assetType: 'TTOKEN',
+        amountWei: amountWei.toString(),
+        reason: 'MINT_TTOKEN',
+        txHash,
+        blockNumber,
+        timestampMs,
+      });
+      invalidatePortfolioCachesForWallet(to);
+      return res.json({ txHash, status: 'confirmed' });
+    }
+    appendManualMintActivityAfterReceipt({
       wallet: to,
       tokenAddress: ttokenAddress,
       symbol: 'TTOKEN',
@@ -5568,12 +7397,12 @@ app.post('/api/ttoken/mint', async (req, res) => {
       amountWei: amountWei.toString(),
       reason: 'MINT_TTOKEN',
       txHash,
-      blockNumber,
-      timestampMs,
+      priceCents: 0,
     });
-    res.json({ txHash });
+    invalidatePortfolioCachesForWallet(to);
+    res.json({ txHash, status: 'submitted' });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -5699,94 +7528,160 @@ app.post('/api/orderbook/limit', async (req, res) => {
 // get orders that's no filled
 app.get('/api/orderbook/open', async (_req, res) => {
   try {
-    const deployments = loadDeployments();
-    const registryAddr = deployments.listingsRegistry;
-    const orderBookAddr = deployments.orderBookDex;
-
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-
+    await waitForIndexerSyncBounded();
+    const snapshot = readIndexerSnapshot();
+    const orderValues = Object.values(snapshot.orders || {});
     const orders = [];
-    for (const symbol of symbols) {
-      const lookupData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
-      const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
-      const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
-
-      const buyData = orderBookInterface.encodeFunctionData('getBuyOrders', [tokenAddr]);
-      const buyResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: buyData }, 'latest']);
-      const [buyOrders] = orderBookInterface.decodeFunctionResult('getBuyOrders', buyResult);
-
-      const sellData = orderBookInterface.encodeFunctionData('getSellOrders', [tokenAddr]);
-      const sellResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: sellData }, 'latest']);
-      const [sellOrders] = orderBookInterface.decodeFunctionResult('getSellOrders', sellResult);
-
-      for (const order of buyOrders) {
-        orders.push({
-          id: Number(order.id),
-          side: 'BUY',
-          symbol: symbol,
-          priceCents: Number(order.price),
-          qty: order.qty.toString(),
-          remaining: order.remaining.toString(),
-          trader: order.trader,
-          active: order.active,
-        });
+    for (let i = 0; i < orderValues.length; i += 1) {
+      const order = orderValues[i];
+      if (!order || order.active !== true) {
+        continue;
       }
-
-      for (const order of sellOrders) {
-        orders.push({
-          id: Number(order.id),
-          side: 'SELL',
-          symbol: symbol,
-          priceCents: Number(order.price),
-          qty: order.qty.toString(),
-          remaining: order.remaining.toString(),
-          trader: order.trader,
-          active: order.active,
-        });
+      if (BigInt(String(order.remainingWei || '0')) <= 0n) {
+        continue;
       }
+      orders.push({
+        id: Number(order.id),
+        side: String(order.side || ''),
+        symbol: String(order.symbol || ''),
+        priceCents: Number(order.priceCents || 0),
+        qty: String(order.qtyWei || '0'),
+        remaining: String(order.remainingWei || '0'),
+        trader: order.trader,
+        active: true,
+      });
     }
-
-    orders.sort((a, b) => {
-      return a.id - b.id;
-    });
-    res.json({ orders: orders });
+    orders.sort((a, b) => a.id - b.id);
+    res.json({ orders });
   } catch (err) {
     res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
 // rest api to get all the filled orders
-app.get('/api/orderbook/fills', async (_req, res) => {
+app.get('/api/orderbook/fills', async (req, res) => {
   try {
-    await ensureIndexerSynced();
-    const snapshot = readIndexerSnapshot();
-    const fills = [];
-    for (const row of snapshot.fills) {
-      fills.push({
-        makerId: Number(row.makerId),
-        takerId: Number(row.takerId),
-        makerTrader: row.makerTrader,
-        takerTrader: row.takerTrader,
-        symbol: row.symbol,
-        priceCents: Number(row.priceCents),
-        qty: row.qtyWei,
-        blockNumber: Number(row.blockNumber),
-        txHash: row.txHash,
-        timestampMs: Number(row.timestampMs),
-      });
+    const deployments = loadDeployments();
+    const chainCacheKey = `${deployments.orderBookDex}:${deployments.listingsRegistry}`;
+    const chainCached = orderbookChainFillsCache.get(chainCacheKey);
+    const chainCachedRows = chainCached && Array.isArray(chainCached.rows) ? chainCached.rows : [];
+    const chainCacheAgeMs = chainCached ? (Date.now() - Number(chainCached.timestampMs || 0)) : Number.MAX_SAFE_INTEGER;
+    const chainCacheFresh = chainCached && chainCachedRows.length > 0 && chainCacheAgeMs < ORDERBOOK_CHAIN_FILLS_TTL_MS;
+    const fastFlag = String(req.query.fast || '').toLowerCase() === '1'
+      || String(req.query.fast || '').toLowerCase() === 'true';
+    let mode = String(req.query.mode || '').toLowerCase();
+    if (!mode) {
+      mode = fastFlag ? 'fast' : 'fast';
     }
-    fills.sort((a, b) => b.timestampMs - a.timestampMs);
-    res.json({ fills: fills });
+    if (mode !== 'chain') {
+      mode = 'fast';
+    }
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const snapshot = readIndexerSnapshot();
+    const fallbackRows = buildOrderbookFillsFallbackFromSnapshot(snapshot);
+    const cacheKey = makeUiReadCacheKey('orderbook-fills', {
+      mode,
+      orderBook: deployments.orderBookDex,
+      registry: deployments.listingsRegistry,
+    });
+    let allowUiRouteCache = false;
+    if (!disableCache && mode === 'fast') {
+      allowUiRouteCache = true;
+    }
+    if (allowUiRouteCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_FILLS_FAST_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
+      }
+    }
+
+    if (mode === 'fast') {
+      const payload = await runUiCoalesced(cacheKey, async () => {
+        const nextPayload = {
+          fills: fallbackRows,
+          source: 'indexer_fast',
+          degraded: false,
+          warnings: [],
+        };
+        if (allowUiRouteCache) {
+          writeUiReadCache(cacheKey, nextPayload);
+        }
+        return nextPayload;
+      });
+      return res.json(payload);
+    }
+
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      let warnings = [];
+      let fills = fallbackRows;
+      let source = 'indexer_fallback';
+      let degraded = false;
+      if (chainCacheFresh) {
+        fetchOrderbookFillsFromChain(
+          deployments.orderBookDex,
+          deployments.listingsRegistry
+        ).catch(() => {});
+        fills = chainCachedRows;
+        source = 'chain_cache';
+      }
+      try {
+        const chainRows = await withTimeout(
+          fetchOrderbookFillsFromChain(
+            deployments.orderBookDex,
+            deployments.listingsRegistry
+          ),
+          8000,
+          'orderbook chain timeout'
+        );
+        if (Array.isArray(chainRows)) {
+          fills = chainRows;
+          source = 'chain';
+          degraded = false;
+        }
+      } catch (err) {
+        if (chainCachedRows.length > 0) {
+          fills = chainCachedRows;
+          source = 'chain_cache_stale';
+          degraded = true;
+          warnings.push(`chain verify timed out, using cached on-chain rows (${Math.floor(chainCacheAgeMs / 1000)}s old)`);
+        } else {
+          degraded = true;
+          warnings.push(`chain fills unavailable: ${toUserErrorMessage(err.message)}`);
+        }
+      }
+      const nextPayload = { fills, source, degraded, warnings };
+      if (allowUiRouteCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: toUserErrorMessage(err.message) });
+    const fallback = readIndexerSnapshot();
+    const fills = buildOrderbookFillsFallbackFromSnapshot(fallback);
+    res.json({
+      fills,
+      source: 'indexer_fallback',
+      degraded: true,
+      warnings: [`fills unavailable: ${toUserErrorMessage(err.message)}`],
+    });
   }
 });
 
 app.get('/api/indexer/status', async (_req, res) => {
   try {
-    const sync = await ensureIndexerSynced();
+    let sync = null;
+    try {
+      sync = await withTimeout(ensureIndexerSynced(), 4000, 'indexer status timeout');
+    } catch (syncErr) {
+      ensureIndexerSynced().catch(() => {});
+      sync = {
+        synced: false,
+        inProgress: true,
+        error: toUserErrorMessage(syncErr.message),
+      };
+    }
     const snapshot = readIndexerSnapshot();
     const orderIds = [];
     const orderValues = Object.values(snapshot.orders);
@@ -5847,7 +7742,17 @@ app.post('/api/indexer/rebuild', async (_req, res) => {
     writeJsonFile(INDEXER_CASHFLOWS_FILE, []);
     writeJsonFile(INDEXER_TRANSFERS_FILE, []);
     writeJsonFile(INDEXER_LEVERAGED_FILE, []);
-    const sync = await ensureIndexerSynced();
+    let sync = null;
+    try {
+      sync = await withTimeout(ensureIndexerSynced(), 5000, 'indexer rebuild timeout');
+    } catch (syncErr) {
+      ensureIndexerSynced().catch(() => {});
+      sync = {
+        synced: false,
+        inProgress: true,
+        error: toUserErrorMessage(syncErr.message),
+      };
+    }
     const snapshot = readIndexerSnapshot();
     const orderIds = [];
     const orderValues = Object.values(snapshot.orders);
@@ -5909,7 +7814,7 @@ app.get('/api/orders/open', async (req, res) => {
     return res.status(400).json({ error: 'wallet is required' });
   }
   try {
-    await ensureIndexerSynced();
+    await waitForIndexerSyncBounded();
     const { orders } = readIndexerSnapshot();
     const items = [];
     const orderValues = Object.values(orders);
@@ -5964,7 +7869,7 @@ app.get('/api/orders/:orderId', async (req, res) => {
   }
 
   try {
-    await ensureIndexerSynced();
+    await waitForIndexerSyncBounded();
     const { orders } = readIndexerSnapshot();
     const order = orders[String(orderId)];
     let missingOrder = false;
@@ -6104,10 +8009,7 @@ app.get('/api/txs', async (req, res) => {
   }
 
   try {
-    await Promise.race([
-      ensureIndexerSynced(),
-      new Promise((resolve) => setTimeout(resolve, 4000)),
-    ]);
+    await waitForIndexerSyncBounded();
     const snapshot = readIndexerSnapshot();
     const { orders, fills, cancellations, cashflows, transfers, leveragedEvents } = snapshot;
     const items = [];
@@ -6174,7 +8076,9 @@ app.get('/api/txs', async (req, res) => {
     if (includeFills) {
       for (const fill of fills) {
         let side = '';
-        if (fill.makerTrader === wallet) {
+        if (fill.side) {
+          side = String(fill.side).toUpperCase();
+        } else if (fill.makerTrader === wallet) {
           const makerOrder = orders[String(fill.makerId)];
           if (makerOrder && makerOrder.side) {
             side = makerOrder.side;
@@ -6390,324 +8294,76 @@ app.get('/api/portfolio/positions', async (req, res) => {
   }
 
   try {
-    await ensureIndexerSynced();
-    const snapshot = readIndexerSnapshot();
-    const deployments = loadDeployments();
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: deployments.listingsRegistry, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-    const listings = [];
-    for (const symbol of symbols) {
-      const token = await getListingBySymbol(deployments.listingsRegistry, symbol);
-      const hasToken = Boolean(token);
-      const isNonZero = token !== ethers.ZeroAddress;
-      if (hasToken && isNonZero) {
-        listings.push({ symbol, tokenAddress: token });
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const cacheKey = makeUiReadCacheKey('portfolio-positions', { wallet });
+    if (!disableCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_POSITIONS_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
       }
     }
-    const fillRows = [];
-    const walletNorm = normalizeAddress(wallet);
-    for (const fill of snapshot.fills) {
-      let isWalletFill = false;
-      if (fill.makerTrader === walletNorm) {
-        isWalletFill = true;
-      }
-      if (fill.takerTrader === walletNorm) {
-        isWalletFill = true;
-      }
-      if (isWalletFill) {
-        let side = '';
-        if (fill.makerTrader === walletNorm) {
-          const makerOrder = snapshot.orders[String(fill.makerId)];
-          if (makerOrder) {
-            side = makerOrder.side;
-          } else {
-            side = '';
-          }
-        } else {
-          const takerOrder = snapshot.orders[String(fill.takerId)];
-          if (takerOrder) {
-            side = takerOrder.side;
-          } else {
-            side = '';
-          }
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      let warnings = [];
+      let source = 'chain';
+      let degraded = false;
+      let positions = [];
+      try {
+        let snapshot = readIndexerSnapshot();
+        try {
+          await withTimeout(waitForIndexerSyncBounded(), 1500, 'indexer sync timeout');
+          snapshot = readIndexerSnapshot();
+        } catch (syncErr) {
+          warnings.push(`indexer stale snapshot: ${toUserErrorMessage(syncErr.message)}`);
+          source = 'stale_indexer';
         }
-        fillRows.push({
-          symbol: fill.symbol,
-          side,
-          qtyWei: fill.qtyWei,
-          priceCents: fill.priceCents,
-          timestampMs: fill.timestampMs,
-          blockNumber: fill.blockNumber,
-          txHash: fill.txHash,
-          logIndex: fill.logIndex,
-        });
+        const deployments = loadDeployments();
+        positions = await withTimeout(
+          buildPortfolioPositions(snapshot, wallet, deployments, { disableCache }),
+          6000,
+          'portfolio positions timeout'
+        );
+        lastKnownPortfolioPositionsByWallet.set(wallet.toLowerCase(), positions);
+      } catch (err) {
+        degraded = true;
+        warnings.push(`positions degraded: ${toUserErrorMessage(err.message)}`);
+        const lastKnown = lastKnownPortfolioPositionsByWallet.get(wallet.toLowerCase());
+        if (Array.isArray(lastKnown)) {
+          positions = lastKnown;
+          source = 'last_known';
+        } else {
+          positions = [];
+          source = 'empty_fallback';
+        }
       }
-    }
-    fillRows.sort((a, b) => {
-      const timestampDiff = a.timestampMs - b.timestampMs;
-      if (timestampDiff !== 0) {
-        return timestampDiff;
+      const nextPayload = {
+        wallet,
+        positions,
+        source,
+        degraded,
+        warnings,
+      };
+      if (!disableCache) {
+        writeUiReadCache(cacheKey, nextPayload);
       }
-      const blockDiff = a.blockNumber - b.blockNumber;
-      if (blockDiff !== 0) {
-        return blockDiff;
-      }
-      const logDiff = a.logIndex - b.logIndex;
-      return logDiff;
+      return nextPayload;
     });
-    const lotsBySymbol = new Map();
-    const realizedBySymbol = new Map();
-    for (const row of fillRows) {
-      if (!lotsBySymbol.has(row.symbol)) {
-        lotsBySymbol.set(row.symbol, []);
-      }
-      if (!realizedBySymbol.has(row.symbol)) {
-        realizedBySymbol.set(row.symbol, 0n);
-      }
-      const lots = lotsBySymbol.get(row.symbol);
-      if (row.side === 'BUY') {
-        lots.push({ qtyWei: BigInt(row.qtyWei), priceCents: row.priceCents });
-      } else if (row.side === 'SELL') {
-        let remainingSell = BigInt(row.qtyWei);
-        while (remainingSell > 0n && lots.length > 0) {
-          const lot = lots[0];
-          let consume = lot.qtyWei;
-          if (remainingSell < lot.qtyWei) {
-            consume = remainingSell;
-          }
-          const sellQuote = quoteAmountWei(consume, row.priceCents);
-          const buyQuote = quoteAmountWei(consume, lot.priceCents);
-          const previousRealized = realizedBySymbol.get(row.symbol);
-          const nextRealized = previousRealized + (sellQuote - buyQuote);
-          realizedBySymbol.set(row.symbol, nextRealized);
-          lot.qtyWei -= consume;
-          remainingSell -= consume;
-          if (lot.qtyWei === 0n) {
-            lots.shift();
-          }
-        }
-      }
-    }
-    const positions = [];
-    for (const listing of listings) {
-      const balData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
-      const balResult = await hardhatRpc('eth_call', [{ to: listing.tokenAddress, data: balData }, 'latest']);
-      const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balResult);
-      const balanceWei = BigInt(balanceWeiRaw.toString());
-      let lots = [];
-      const existingLots = lotsBySymbol.get(listing.symbol);
-      if (existingLots) {
-        lots = existingLots;
-      }
-      let remaining = BigInt(balanceWei);
-      let usedQty = 0n;
-      let usedCostWei = 0n;
-      for (const lot of lots) {
-        if (remaining === 0n) {
-          break;
-        }
-        let useQty = lot.qtyWei;
-        if (remaining < lot.qtyWei) {
-          useQty = remaining;
-        }
-        usedQty += useQty;
-        usedCostWei += quoteAmountWei(useQty, lot.priceCents);
-        remaining -= useQty;
-      }
-      let unmatchedQtyWei = 0n;
-      if (balanceWei > usedQty) {
-        unmatchedQtyWei = balanceWei - usedQty;
-      }
-      let liveCents = 0;
-      let symbolText = '';
-      if (listing.symbol) {
-        symbolText = String(listing.symbol);
-      }
-      const upper = symbolText.toUpperCase();
-      if (upper) {
-        const cached = fmpQuoteCache.get(upper);
-        if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
-          let cachedPriceRaw = 0;
-          if (cached.data.price) {
-            cachedPriceRaw = cached.data.price;
-          }
-          liveCents = Math.round(Number(cachedPriceRaw) * 100);
-        } else {
-          try {
-            const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol: upper }));
-            let quote = payload;
-            if (Array.isArray(payload)) {
-              quote = payload[0];
-            }
-            let quotePriceRaw = 0;
-            if (quote.price) {
-              quotePriceRaw = quote.price;
-            }
-            const price = Number(quotePriceRaw);
-            const data = { symbol: upper, price };
-            fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-            liveCents = Math.round(price * 100);
-          } catch {
-            try {
-              const yahoo = await fetchQuote(upper);
-              let yahooPriceRaw = 0;
-              if (yahoo.regularMarketPrice) {
-                yahooPriceRaw = yahoo.regularMarketPrice;
-              }
-              const price = Number(yahooPriceRaw);
-              if (price > 0) {
-                const data = { symbol: upper, price, source: 'yahoo' };
-                fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                liveCents = Math.round(price * 100);
-              } else {
-                try {
-                  const candle = await buildCandleFallback(upper);
-                  let candlePriceRaw = 0;
-                  if (candle.close) {
-                    candlePriceRaw = candle.close;
-                  }
-                  const candlePrice = Number(candlePriceRaw);
-                  if (candlePrice > 0) {
-                    const data = { symbol: upper, price: candlePrice, source: 'candles' };
-                    fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                    liveCents = Math.round(candlePrice * 100);
-                  } else {
-                    liveCents = 0;
-                  }
-                } catch {
-                  liveCents = 0;
-                }
-              }
-            } catch {
-              try {
-                const candle = await buildCandleFallback(upper);
-                let candlePriceRaw = 0;
-                if (candle.close) {
-                  candlePriceRaw = candle.close;
-                }
-                const candlePrice = Number(candlePriceRaw);
-                if (candlePrice > 0) {
-                  const data = { symbol: upper, price: candlePrice, source: 'candles' };
-                  fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                  liveCents = Math.round(candlePrice * 100);
-                } else {
-                  liveCents = 0;
-                }
-              } catch {
-                liveCents = 0;
-              }
-            }
-          }
-        }
-      }
-      const lifecycleStatus = getSymbolLifecycleStatus(listing.symbol);
-      let valuation = { priceCents: 0, priceSource: 'NONE' };
-      if (lifecycleStatus === 'DELISTED') {
-        valuation = { priceCents: 0, priceSource: 'DELISTED' };
-      } else if (liveCents > 0) {
-        valuation = { priceCents: liveCents, priceSource: 'LIVE' };
-      } else {
-        const priceFeedAddr = normalizeAddress(deployments.priceFeed);
-        if (priceFeedAddr) {
-          try {
-            const feedData = priceFeedInterface.encodeFunctionData('getPrice', [listing.symbol]);
-            const feedResult = await hardhatRpc('eth_call', [{ to: priceFeedAddr, data: feedData }, 'latest']);
-            const [onchainPriceRaw] = priceFeedInterface.decodeFunctionResult('getPrice', feedResult);
-            const onchainPrice = Number(onchainPriceRaw);
-            if (onchainPrice > 0) {
-              valuation = { priceCents: onchainPrice, priceSource: 'ONCHAIN_PRICEFEED' };
-            }
-          } catch {
-            // best-effort fallback chain
-          }
-        }
-        if (valuation.priceCents === 0) {
-          let latest = null;
-          for (const fill of snapshot.fills) {
-            if (fill.symbol === listing.symbol) {
-              if (!latest) {
-                latest = fill;
-              } else if (fill.timestampMs > latest.timestampMs) {
-                latest = fill;
-              } else if (fill.timestampMs === latest.timestampMs && fill.blockNumber > latest.blockNumber) {
-                latest = fill;
-              }
-            }
-          }
-          let lastFillCents = 0;
-          if (latest) {
-            let latestPriceRaw = 0;
-            if (latest.priceCents) {
-              latestPriceRaw = latest.priceCents;
-            }
-            lastFillCents = Number(latestPriceRaw);
-          }
-          if (lastFillCents > 0) {
-            valuation = { priceCents: lastFillCents, priceSource: 'LAST_FILL' };
-          }
-        }
-      }
-      const priceCents = valuation.priceCents;
-      let currentValueWei = 0n;
-      if (priceCents > 0) {
-        currentValueWei = quoteAmountWei(balanceWei, priceCents);
-      }
-      let unmatchedCostWei = 0n;
-      if (priceCents > 0) {
-        unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, priceCents);
-      }
-      const effectiveCostBasisWei = usedCostWei + unmatchedCostWei;
-      let avgCostCents = 0;
-      if (balanceWei > 0n) {
-        avgCostCents = Number((effectiveCostBasisWei * 100n) / balanceWei);
-      }
-      let realizedPnlWei = 0n;
-      const realizedFound = realizedBySymbol.get(listing.symbol);
-      if (realizedFound) {
-        realizedPnlWei = realizedFound;
-      }
-      const unrealizedPnlWei = currentValueWei - effectiveCostBasisWei;
-      let unrealizedPnlPct = null;
-      if (effectiveCostBasisWei > 0n) {
-        unrealizedPnlPct = Number(unrealizedPnlWei * 10000n / effectiveCostBasisWei) / 100;
-      }
-      if (!(balanceWei === 0n && realizedPnlWei === 0n)) {
-        const qtyValueWeiText = balanceWei.toString();
-        const qtyNegative = String(qtyValueWeiText).startsWith('-');
-        let qtyRaw = String(qtyValueWeiText);
-        if (qtyNegative) {
-          qtyRaw = String(qtyValueWeiText).slice(1);
-        }
-        const qtyPadded = qtyRaw.padStart(19, '0');
-        const qtyWhole = qtyPadded.slice(0, -18);
-        const qtyFraction = qtyPadded.slice(-18, -12);
-        let qtyNumber = Number(`${qtyWhole}.${qtyFraction}`);
-        if (qtyNegative) {
-          qtyNumber = -qtyNumber;
-        }
-        positions.push({
-          symbol: listing.symbol,
-          tokenAddress: listing.tokenAddress,
-          balanceWei: balanceWei.toString(),
-          qty: qtyNumber,
-          avgCostCents,
-          costBasisWei: effectiveCostBasisWei.toString(),
-          priceCents,
-          priceSource: valuation.priceSource,
-          currentValueWei: currentValueWei.toString(),
-          realizedPnlWei: realizedPnlWei.toString(),
-          unrealizedPnlWei: unrealizedPnlWei.toString(),
-          unrealizedPnlPct,
-          totalPnlWei: (realizedPnlWei + unrealizedPnlWei).toString(),
-          unmatchedQtyWei: unmatchedQtyWei.toString(),
-        });
-      }
-    }
-    positions.sort((a, b) => a.symbol.localeCompare(b.symbol));
-    res.json({ wallet, positions });
+    res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const lastKnown = lastKnownPortfolioPositionsByWallet.get(wallet.toLowerCase());
+    let positions = [];
+    let source = 'empty_fallback';
+    if (Array.isArray(lastKnown)) {
+      positions = lastKnown;
+      source = 'last_known';
+    }
+    res.json({
+      wallet,
+      positions,
+      source,
+      degraded: true,
+      warnings: [`positions unavailable: ${toUserErrorMessage(err.message)}`],
+    });
   }
 });
 
@@ -6724,433 +8380,272 @@ app.get('/api/portfolio/summary', async (req, res) => {
   }
 
   try {
-    await ensureIndexerSynced();
-    const snapshot = readIndexerSnapshot();
-    const deployments = loadDeployments();
-    const chainIdHex = await hardhatRpc('eth_chainId', []);
-    const chainId = parseRpcInt(chainIdHex);
-    const nativeEthWeiHex = await hardhatRpc('eth_getBalance', [wallet, 'latest']);
-    const nativeEthWei = BigInt(nativeEthWeiHex).toString();
-    let nativeSymbol = 'ETH';
-    if (chainId === 11155111) {
-      nativeSymbol = 'SepoliaETH';
-    }
-    const ttokenAddr = deployments.ttoken;
-    const ttokenData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
-    const ttokenResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: ttokenData }, 'latest']);
-    const [cashWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', ttokenResult);
-    const cashWei = BigInt(cashWeiRaw.toString());
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: deployments.listingsRegistry, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-    const listings = [];
-    for (const symbol of symbols) {
-      const token = await getListingBySymbol(deployments.listingsRegistry, symbol);
-      const hasToken = Boolean(token);
-      const isNonZero = token !== ethers.ZeroAddress;
-      if (hasToken && isNonZero) {
-        listings.push({ symbol, tokenAddress: token });
+    const includeGas = String(req.query.includeGas || '').toLowerCase() === 'true';
+    const includeAggregator = String(req.query.includeAggregator || '').toLowerCase() === 'true';
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const cacheKey = makeUiReadCacheKey('portfolio-summary', { wallet, includeGas, includeAggregator });
+    if (!disableCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_SUMMARY_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
       }
     }
-    const fillRows = [];
-    const walletNorm = normalizeAddress(wallet);
-    for (const fill of snapshot.fills) {
-      let matchesFillWallet = false;
-      if (fill.makerTrader === walletNorm) {
-        matchesFillWallet = true;
-      }
-      if (fill.takerTrader === walletNorm) {
-        matchesFillWallet = true;
-      }
-      if (matchesFillWallet) {
-        let side = '';
-        if (fill.makerTrader === walletNorm) {
-          const makerOrder = snapshot.orders[String(fill.makerId)];
-          if (makerOrder) {
-            side = makerOrder.side;
-          } else {
-            side = '';
-          }
-        } else {
-          const takerOrder = snapshot.orders[String(fill.takerId)];
-          if (takerOrder) {
-            side = takerOrder.side;
-          } else {
-            side = '';
-          }
-        }
-        fillRows.push({
-          symbol: fill.symbol,
-          side,
-          qtyWei: fill.qtyWei,
-          priceCents: fill.priceCents,
-          timestampMs: fill.timestampMs,
-          blockNumber: fill.blockNumber,
-          txHash: fill.txHash,
-          logIndex: fill.logIndex,
-        });
-      }
-    }
-    fillRows.sort((a, b) => {
-      const timestampDiff = a.timestampMs - b.timestampMs;
-      if (timestampDiff !== 0) {
-        return timestampDiff;
-      }
-      const blockDiff = a.blockNumber - b.blockNumber;
-      if (blockDiff !== 0) {
-        return blockDiff;
-      }
-      const logDiff = a.logIndex - b.logIndex;
-      return logDiff;
-    });
-    const lotsBySymbol = new Map();
-    const realizedBySymbol = new Map();
-    for (const row of fillRows) {
-      if (!lotsBySymbol.has(row.symbol)) {
-        lotsBySymbol.set(row.symbol, []);
-      }
-      if (!realizedBySymbol.has(row.symbol)) {
-        realizedBySymbol.set(row.symbol, 0n);
-      }
-      const lots = lotsBySymbol.get(row.symbol);
-      if (row.side === 'BUY') {
-        lots.push({ qtyWei: BigInt(row.qtyWei), priceCents: row.priceCents });
-      } else if (row.side === 'SELL') {
-        let remainingSell = BigInt(row.qtyWei);
-        while (remainingSell > 0n && lots.length > 0) {
-          const lot = lots[0];
-          let consume = lot.qtyWei;
-          if (remainingSell < lot.qtyWei) {
-            consume = remainingSell;
-          }
-          const sellQuote = quoteAmountWei(consume, row.priceCents);
-          const buyQuote = quoteAmountWei(consume, lot.priceCents);
-          const previousRealized = realizedBySymbol.get(row.symbol);
-          const nextRealized = previousRealized + (sellQuote - buyQuote);
-          realizedBySymbol.set(row.symbol, nextRealized);
-          lot.qtyWei -= consume;
-          remainingSell -= consume;
-          if (lot.qtyWei === 0n) {
-            lots.shift();
-          }
-        }
-      }
-    }
-    const positions = [];
-    for (const listing of listings) {
-      const balData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
-      const balResult = await hardhatRpc('eth_call', [{ to: listing.tokenAddress, data: balData }, 'latest']);
-      const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balResult);
-      const balanceWei = BigInt(balanceWeiRaw.toString());
-      let lots = [];
-      const existingLots = lotsBySymbol.get(listing.symbol);
-      if (existingLots) {
-        lots = existingLots;
-      }
-      let remaining = BigInt(balanceWei);
-      let usedQty = 0n;
-      let usedCostWei = 0n;
-      for (const lot of lots) {
-        if (remaining === 0n) {
-          break;
-        }
-        let useQty = lot.qtyWei;
-        if (remaining < lot.qtyWei) {
-          useQty = remaining;
-        }
-        usedQty += useQty;
-        usedCostWei += quoteAmountWei(useQty, lot.priceCents);
-        remaining -= useQty;
-      }
-      let unmatchedQtyWei = 0n;
-      if (balanceWei > usedQty) {
-        unmatchedQtyWei = balanceWei - usedQty;
-      }
-      let liveCents = 0;
-      let symbolText = '';
-      if (listing.symbol) {
-        symbolText = String(listing.symbol);
-      }
-      const upper = symbolText.toUpperCase();
-      if (upper) {
-        const cached = fmpQuoteCache.get(upper);
-        if (cached && (Date.now() - cached.timestamp) < FMP_QUOTE_TTL_MS) {
-          let cachedPriceRaw = 0;
-          if (cached.data.price) {
-            cachedPriceRaw = cached.data.price;
-          }
-          liveCents = Math.round(Number(cachedPriceRaw) * 100);
-        } else {
-          try {
-            const payload = await fetchFmpJson(getFmpUrl('quote-short', { symbol: upper }));
-            let quote = payload;
-            if (Array.isArray(payload)) {
-              quote = payload[0];
-            }
-            let quotePriceRaw = 0;
-            if (quote.price) {
-              quotePriceRaw = quote.price;
-            }
-            const price = Number(quotePriceRaw);
-            const data = { symbol: upper, price };
-            fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-            liveCents = Math.round(price * 100);
-          } catch {
-            try {
-              const yahoo = await fetchQuote(upper);
-              let yahooPriceRaw = 0;
-              if (yahoo.regularMarketPrice) {
-                yahooPriceRaw = yahoo.regularMarketPrice;
-              }
-              const price = Number(yahooPriceRaw);
-              if (price > 0) {
-                const data = { symbol: upper, price, source: 'yahoo' };
-                fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                liveCents = Math.round(price * 100);
-              } else {
-                try {
-                  const candle = await buildCandleFallback(upper);
-                  let candlePriceRaw = 0;
-                  if (candle.close) {
-                    candlePriceRaw = candle.close;
-                  }
-                  const candlePrice = Number(candlePriceRaw);
-                  if (candlePrice > 0) {
-                    const data = { symbol: upper, price: candlePrice, source: 'candles' };
-                    fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                    liveCents = Math.round(candlePrice * 100);
-                  } else {
-                    liveCents = 0;
-                  }
-                } catch {
-                  liveCents = 0;
-                }
-              }
-            } catch {
-              try {
-                const candle = await buildCandleFallback(upper);
-                let candlePriceRaw = 0;
-                if (candle.close) {
-                  candlePriceRaw = candle.close;
-                }
-                const candlePrice = Number(candlePriceRaw);
-                if (candlePrice > 0) {
-                  const data = { symbol: upper, price: candlePrice, source: 'candles' };
-                  fmpQuoteCache.set(upper, { data, timestamp: Date.now() });
-                  liveCents = Math.round(candlePrice * 100);
-                } else {
-                  liveCents = 0;
-                }
-              } catch {
-                liveCents = 0;
-              }
-            }
-          }
-        }
-      }
-      const lifecycleStatus = getSymbolLifecycleStatus(listing.symbol);
-      let valuation = { priceCents: 0, priceSource: 'NONE' };
-      if (lifecycleStatus === 'DELISTED') {
-        valuation = { priceCents: 0, priceSource: 'DELISTED' };
-      } else if (liveCents > 0) {
-        valuation = { priceCents: liveCents, priceSource: 'LIVE' };
-      } else {
-        const priceFeedAddr = normalizeAddress(deployments.priceFeed);
-        if (priceFeedAddr) {
-          try {
-            const feedData = priceFeedInterface.encodeFunctionData('getPrice', [listing.symbol]);
-            const feedResult = await hardhatRpc('eth_call', [{ to: priceFeedAddr, data: feedData }, 'latest']);
-            const [onchainPriceRaw] = priceFeedInterface.decodeFunctionResult('getPrice', feedResult);
-            const onchainPrice = Number(onchainPriceRaw);
-            if (onchainPrice > 0) {
-              valuation = { priceCents: onchainPrice, priceSource: 'ONCHAIN_PRICEFEED' };
-            }
-          } catch {
-            // best-effort fallback chain
-          }
-        }
-        if (valuation.priceCents === 0) {
-          let latest = null;
-          for (const fill of snapshot.fills) {
-            if (fill.symbol === listing.symbol) {
-              if (!latest) {
-                latest = fill;
-              } else if (fill.timestampMs > latest.timestampMs) {
-                latest = fill;
-              } else if (fill.timestampMs === latest.timestampMs && fill.blockNumber > latest.blockNumber) {
-                latest = fill;
-              }
-            }
-          }
-          let lastFillCents = 0;
-          if (latest) {
-            let latestPriceRaw = 0;
-            if (latest.priceCents) {
-              latestPriceRaw = latest.priceCents;
-            }
-            lastFillCents = Number(latestPriceRaw);
-          }
-          if (lastFillCents > 0) {
-            valuation = { priceCents: lastFillCents, priceSource: 'LAST_FILL' };
-          }
-        }
-      }
-      const priceCents = valuation.priceCents;
-      let currentValueWei = 0n;
-      if (priceCents > 0) {
-        currentValueWei = quoteAmountWei(balanceWei, priceCents);
-      }
-      let unmatchedCostWei = 0n;
-      if (priceCents > 0) {
-        unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, priceCents);
-      }
-      const effectiveCostBasisWei = usedCostWei + unmatchedCostWei;
-      let avgCostCents = 0;
-      if (balanceWei > 0n) {
-        avgCostCents = Number((effectiveCostBasisWei * 100n) / balanceWei);
-      }
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      let warnings = [];
+      let source = 'chain';
+      let degraded = false;
+      let aggregator = null;
+      let drift = null;
+      let chainId = 0;
+      let nativeSymbol = 'ETH';
+      let nativeEthWei = '0';
+      let positions = [];
+      let cashWei = 0n;
+      let stockValueWei = 0n;
+      let leveragedValueWei = 0n;
+      let totalValueWei = 0n;
+      let totalCostBasisWei = 0n;
       let realizedPnlWei = 0n;
-      const realizedFound = realizedBySymbol.get(listing.symbol);
-      if (realizedFound) {
-        realizedPnlWei = realizedFound;
-      }
-      const unrealizedPnlWei = currentValueWei - effectiveCostBasisWei;
-      let unrealizedPnlPct = null;
-      if (effectiveCostBasisWei > 0n) {
-        unrealizedPnlPct = Number(unrealizedPnlWei * 10000n / effectiveCostBasisWei) / 100;
-      }
-      if (!(balanceWei === 0n && realizedPnlWei === 0n)) {
-        const qtyValueWeiText = balanceWei.toString();
-        const qtyNegative = String(qtyValueWeiText).startsWith('-');
-        let qtyRaw = String(qtyValueWeiText);
-        if (qtyNegative) {
-          qtyRaw = String(qtyValueWeiText).slice(1);
-        }
-        const qtyPadded = qtyRaw.padStart(19, '0');
-        const qtyWhole = qtyPadded.slice(0, -18);
-        const qtyFraction = qtyPadded.slice(-18, -12);
-        let qtyNumber = Number(`${qtyWhole}.${qtyFraction}`);
-        if (qtyNegative) {
-          qtyNumber = -qtyNumber;
-        }
-        positions.push({
-          symbol: listing.symbol,
-          tokenAddress: listing.tokenAddress,
-          balanceWei: balanceWei.toString(),
-          qty: qtyNumber,
-          avgCostCents,
-          costBasisWei: effectiveCostBasisWei.toString(),
-          priceCents,
-          priceSource: valuation.priceSource,
-          currentValueWei: currentValueWei.toString(),
-          realizedPnlWei: realizedPnlWei.toString(),
-          unrealizedPnlWei: unrealizedPnlWei.toString(),
-          unrealizedPnlPct,
-          totalPnlWei: (realizedPnlWei + unrealizedPnlWei).toString(),
-          unmatchedQtyWei: unmatchedQtyWei.toString(),
-        });
-      }
-    }
-    positions.sort((a, b) => a.symbol.localeCompare(b.symbol));
-
-    let stockValueWei = 0n;
-    let totalCostBasisWei = 0n;
-    let realizedPnlWei = 0n;
-    let unrealizedPnlWei = 0n;
-    for (const p of positions) {
-      stockValueWei += BigInt(p.currentValueWei);
-      totalCostBasisWei += BigInt(p.costBasisWei);
-      realizedPnlWei += BigInt(p.realizedPnlWei);
-      unrealizedPnlWei += BigInt(p.unrealizedPnlWei);
-    }
-    let leveragedValueWei = 0n;
-    if (deployments.leveragedTokenFactory && deployments.leveragedProductRouter) {
-      const countData = leveragedFactoryInterface.encodeFunctionData('productCount', []);
-      const countResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedTokenFactory, data: countData }, 'latest']);
-      const [countRaw] = leveragedFactoryInterface.decodeFunctionResult('productCount', countResult);
-      const count = Number(countRaw);
-      for (let i = 0; i < count; i += 1) {
-        const itemData = leveragedFactoryInterface.encodeFunctionData('getProductAt', [i]);
-        const itemResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedTokenFactory, data: itemData }, 'latest']);
-        const [item] = leveragedFactoryInterface.decodeFunctionResult('getProductAt', itemResult);
-        const positionData = leveragedRouterInterface.encodeFunctionData('positions', [wallet, item.token]);
-        const positionResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedProductRouter, data: positionData }, 'latest']);
-        const [qtyWeiRaw] = leveragedRouterInterface.decodeFunctionResult('positions', positionResult);
-        const qtyWei = qtyWeiRaw.toString();
-        if (BigInt(qtyWei) > 0n) {
-          const quoteData = leveragedRouterInterface.encodeFunctionData('previewUnwind', [wallet, item.token, BigInt(qtyWei)]);
-          const quoteResult = await hardhatRpc('eth_call', [{ to: deployments.leveragedProductRouter, data: quoteData }, 'latest']);
-          const [ttokenOutWeiRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', quoteResult);
-          leveragedValueWei += BigInt(ttokenOutWeiRaw.toString());
-        }
-      }
-    }
-    const totalValueWei = cashWei + stockValueWei + leveragedValueWei;
-    const gasSummary = await computeOverallGasForWallet(snapshot, wallet);
-
-    let aggregator = null;
-    let drift = null;
-    if (deployments.portfolioAggregator) {
+      let unrealizedPnlWei = 0n;
+      let overallGasUsedUnits = 0n;
+      let overallGasCostWei = 0n;
       try {
-        const aggData = aggregatorInterface.encodeFunctionData('getPortfolioSummary', [wallet]);
-        const aggResult = await hardhatRpc('eth_call', [{ to: deployments.portfolioAggregator, data: aggData }, 'latest']);
-        const [cashValueWei, stockValueWeiOnchain, totalValueWeiOnchain] = aggregatorInterface.decodeFunctionResult('getPortfolioSummary', aggResult);
-        aggregator = {
-          cashValueWei: cashValueWei.toString(),
-          stockValueWei: stockValueWeiOnchain.toString(),
-          totalValueWei: totalValueWeiOnchain.toString(),
-        };
-        const cashDeltaWei = BigInt(aggregator.cashValueWei) - cashWei;
-        const stockDeltaWei = BigInt(aggregator.stockValueWei) - stockValueWei;
-        const totalDeltaWei = BigInt(aggregator.totalValueWei) - totalValueWei;
-        const toleranceWei = 1n;
-        let cashAbs = cashDeltaWei;
-        if (cashDeltaWei < 0n) {
-          cashAbs = -cashDeltaWei;
+        let snapshot = readIndexerSnapshot();
+        try {
+          await withTimeout(waitForIndexerSyncBounded(), 3500, 'indexer sync timeout');
+          snapshot = readIndexerSnapshot();
+        } catch (syncErr) {
+          warnings.push(`indexer stale snapshot: ${toUserErrorMessage(syncErr.message)}`);
+          source = 'stale_indexer';
         }
-        let stockAbs = stockDeltaWei;
-        if (stockDeltaWei < 0n) {
-          stockAbs = -stockDeltaWei;
+        const deployments = loadDeployments();
+        const chainIdHex = await withTimeout(hardhatRpc('eth_chainId', []), 1500, 'chainId timeout');
+        chainId = parseRpcInt(chainIdHex);
+        if (chainId === 11155111) {
+          nativeSymbol = 'SepoliaETH';
         }
-        let totalAbs = totalDeltaWei;
-        if (totalDeltaWei < 0n) {
-          totalAbs = -totalDeltaWei;
-        }
-        const cashWithin = cashAbs <= toleranceWei;
-        const stockWithin = stockAbs <= toleranceWei;
-        const totalWithin = totalAbs <= toleranceWei;
-        drift = {
-          cashDeltaWei: cashDeltaWei.toString(),
-          stockDeltaWei: stockDeltaWei.toString(),
-          totalDeltaWei: totalDeltaWei.toString(),
-          toleranceWei: toleranceWei.toString(),
-          withinTolerance: cashWithin && stockWithin && totalWithin,
-        };
-      } catch {
-        aggregator = null;
-        drift = null;
-      }
-    }
 
+        const nativeEthWeiHex = await withTimeout(
+          hardhatRpc('eth_getBalance', [wallet, 'latest']),
+          1500,
+          'native balance timeout'
+        );
+        nativeEthWei = BigInt(nativeEthWeiHex).toString();
+
+        const ttokenAddr = deployments.ttoken;
+        const ttokenData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+        const ttokenResult = await withTimeout(
+          hardhatRpc('eth_call', [{ to: ttokenAddr, data: ttokenData }, 'latest']),
+          1500,
+          'ttoken balance timeout'
+        );
+        const [cashWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', ttokenResult);
+        cashWei = BigInt(cashWeiRaw.toString());
+
+        positions = await withTimeout(
+          buildPortfolioPositions(snapshot, wallet, deployments, { disableCache }),
+          3000,
+          'portfolio positions timeout'
+        );
+        lastKnownPortfolioPositionsByWallet.set(wallet.toLowerCase(), positions);
+        for (let i = 0; i < positions.length; i += 1) {
+          const position = positions[i];
+          stockValueWei += BigInt(position.currentValueWei);
+          totalCostBasisWei += BigInt(position.costBasisWei);
+          realizedPnlWei += BigInt(position.realizedPnlWei);
+          unrealizedPnlWei += BigInt(position.unrealizedPnlWei);
+        }
+        if (positions.length > 0 && totalCostBasisWei === 0n) {
+          let hasNonZeroHoldings = false;
+          for (let i = 0; i < positions.length; i += 1) {
+            const position = positions[i];
+            const balanceWei = toBigIntSafe(position.balanceWei);
+            if (balanceWei > 0n) {
+              hasNonZeroHoldings = true;
+              break;
+            }
+          }
+          if (hasNonZeroHoldings && Array.isArray(snapshot.fills) && snapshot.fills.length === 0) {
+            warnings.push('cost basis unavailable until fill history is indexed');
+            source = 'stale_indexer';
+          }
+        }
+
+        leveragedValueWei = await withTimeout(
+          computeLeveragedValueWei(snapshot, wallet, deployments),
+          2000,
+          'leveraged value timeout'
+        );
+        totalValueWei = cashWei + stockValueWei + leveragedValueWei;
+
+        const gasSummary = await withTimeout(
+          getPortfolioGasSummary(snapshot, wallet, includeGas),
+          2000,
+          'gas summary timeout'
+        );
+        overallGasUsedUnits = gasSummary.gasUsedUnits;
+        overallGasCostWei = gasSummary.gasCostWei;
+        if (overallGasUsedUnits === 0n && Array.isArray(snapshot.fills) && snapshot.fills.length === 0) {
+          warnings.push('gas summary incomplete until wallet transaction history is indexed');
+          source = 'stale_indexer';
+        }
+
+        if (includeAggregator && deployments.portfolioAggregator) {
+          try {
+            const aggData = aggregatorInterface.encodeFunctionData('getPortfolioSummary', [wallet]);
+            const aggResult = await withTimeout(
+              hardhatRpc('eth_call', [{ to: deployments.portfolioAggregator, data: aggData }, 'latest']),
+              1500,
+              'aggregator timeout'
+            );
+            const [cashValueWei, stockValueWeiOnchain, totalValueWeiOnchain] = aggregatorInterface.decodeFunctionResult('getPortfolioSummary', aggResult);
+            aggregator = {
+              cashValueWei: cashValueWei.toString(),
+              stockValueWei: stockValueWeiOnchain.toString(),
+              totalValueWei: totalValueWeiOnchain.toString(),
+            };
+            const cashDeltaWei = BigInt(aggregator.cashValueWei) - cashWei;
+            const stockDeltaWei = BigInt(aggregator.stockValueWei) - stockValueWei;
+            const totalDeltaWei = BigInt(aggregator.totalValueWei) - totalValueWei;
+            const toleranceWei = 1n;
+            let cashAbs = cashDeltaWei;
+            if (cashAbs < 0n) {
+              cashAbs = -cashAbs;
+            }
+            let stockAbs = stockDeltaWei;
+            if (stockAbs < 0n) {
+              stockAbs = -stockAbs;
+            }
+            let totalAbs = totalDeltaWei;
+            if (totalAbs < 0n) {
+              totalAbs = -totalAbs;
+            }
+            drift = {
+              cashDeltaWei: cashDeltaWei.toString(),
+              stockDeltaWei: stockDeltaWei.toString(),
+              totalDeltaWei: totalDeltaWei.toString(),
+              toleranceWei: toleranceWei.toString(),
+              withinTolerance: cashAbs <= toleranceWei && stockAbs <= toleranceWei && totalAbs <= toleranceWei,
+            };
+          } catch (err) {
+            warnings.push(`aggregator unavailable: ${toUserErrorMessage(err.message)}`);
+          }
+        }
+      } catch (err) {
+        degraded = true;
+        warnings.push(`summary degraded: ${toUserErrorMessage(err.message)}`);
+      }
+
+      if (degraded) {
+        stockValueWei = 0n;
+        totalCostBasisWei = 0n;
+        realizedPnlWei = 0n;
+        unrealizedPnlWei = 0n;
+        const fallbackPositions = lastKnownPortfolioPositionsByWallet.get(wallet.toLowerCase());
+        if (Array.isArray(fallbackPositions)) {
+          positions = fallbackPositions;
+        }
+        let hasCashFallback = false;
+        try {
+          const deployments = loadDeployments();
+          if (deployments.ttoken) {
+            const ttokenData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+            const ttokenResult = await withTimeout(
+              hardhatRpc('eth_call', [{ to: deployments.ttoken, data: ttokenData }, 'latest']),
+              1200,
+              'ttoken fallback timeout'
+            );
+            const [cashWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', ttokenResult);
+            cashWei = BigInt(cashWeiRaw.toString());
+            source = 'ttoken_fallback';
+            hasCashFallback = true;
+          }
+        } catch {
+        }
+        if (!hasCashFallback) {
+          const lastKnown = lastKnownPortfolioSummaryByWallet.get(wallet.toLowerCase());
+          if (lastKnown && typeof lastKnown === 'object') {
+            source = 'last_known';
+            const lastKnownWarnings = Array.isArray(lastKnown.warnings) ? lastKnown.warnings : [];
+            return {
+              ...lastKnown,
+              degraded: true,
+              source,
+              warnings: lastKnownWarnings.concat(warnings),
+            };
+          }
+        }
+        for (let i = 0; i < positions.length; i += 1) {
+          const position = positions[i];
+          stockValueWei += BigInt(position.currentValueWei);
+          totalCostBasisWei += BigInt(position.costBasisWei);
+          realizedPnlWei += BigInt(position.realizedPnlWei);
+          unrealizedPnlWei += BigInt(position.unrealizedPnlWei);
+        }
+        totalValueWei = cashWei + stockValueWei + leveragedValueWei;
+      }
+
+      const nextPayload = {
+        wallet,
+        chainId,
+        nativeSymbol,
+        nativeEthWei,
+        positions,
+        cashValueWei: cashWei.toString(),
+        stockValueWei: stockValueWei.toString(),
+        leveragedValueWei: leveragedValueWei.toString(),
+        totalValueWei: totalValueWei.toString(),
+        totalCostBasisWei: totalCostBasisWei.toString(),
+        realizedPnlWei: realizedPnlWei.toString(),
+        unrealizedPnlWei: unrealizedPnlWei.toString(),
+        overallGasUsedUnits: overallGasUsedUnits.toString(),
+        overallGasCostWei: overallGasCostWei.toString(),
+        aggregator,
+        drift,
+        source,
+        degraded,
+        warnings,
+      };
+      lastKnownPortfolioSummaryByWallet.set(wallet.toLowerCase(), nextPayload);
+      if (!disableCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
+  } catch (err) {
+    const lastKnown = lastKnownPortfolioSummaryByWallet.get(wallet.toLowerCase());
+    if (lastKnown) {
+      const lastKnownWarnings = Array.isArray(lastKnown.warnings) ? lastKnown.warnings : [];
+      return res.json({
+        ...lastKnown,
+        degraded: true,
+        source: 'last_known',
+        warnings: lastKnownWarnings.concat([`summary unavailable: ${toUserErrorMessage(err.message)}`]),
+      });
+    }
     res.json({
       wallet,
-      chainId,
-      nativeSymbol,
-      nativeEthWei,
-      cashValueWei: cashWei.toString(),
-      stockValueWei: stockValueWei.toString(),
-      leveragedValueWei: leveragedValueWei.toString(),
-      totalValueWei: totalValueWei.toString(),
-      totalCostBasisWei: totalCostBasisWei.toString(),
-      realizedPnlWei: realizedPnlWei.toString(),
-      unrealizedPnlWei: unrealizedPnlWei.toString(),
-      overallGasUsedUnits: gasSummary.gasUsedUnits.toString(),
-      overallGasCostWei: gasSummary.gasCostWei.toString(),
-      aggregator,
-      drift,
+      chainId: 0,
+      nativeSymbol: 'ETH',
+      nativeEthWei: '0',
+      positions: [],
+      cashValueWei: '0',
+      stockValueWei: '0',
+      leveragedValueWei: '0',
+      totalValueWei: '0',
+      totalCostBasisWei: '0',
+      realizedPnlWei: '0',
+      unrealizedPnlWei: '0',
+      overallGasUsedUnits: '0',
+      overallGasCostWei: '0',
+      aggregator: null,
+      drift: null,
+      source: 'empty_fallback',
+      degraded: true,
+      warnings: [`summary unavailable: ${toUserErrorMessage(err.message)}`],
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
 });
 
@@ -7180,7 +8675,9 @@ app.get('/api/portfolio/rebuild-audit', async (req, res) => {
       }
       if (relatedToWallet) {
         let side = '';
-        if (fill.makerTrader === walletNorm) {
+        if (fill.side) {
+          side = String(fill.side).toUpperCase();
+        } else if (fill.makerTrader === walletNorm) {
           const makerOrder = snapshot.orders[String(fill.makerId)];
           if (makerOrder) {
             side = makerOrder.side;
@@ -7612,14 +9109,22 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
     }
 
     const latestBlockHex = await hardhatRpc('eth_blockNumber', []);
-    const holders = await collectHolderCandidatesFromChain(tokenAddress, latestBlockHex);
+    const holderScan = await collectHolderCandidatesFromChain(tokenAddress, latestBlockHex);
+    const holders = Array.isArray(holderScan.holders) ? holderScan.holders : [];
+    const touchedHolders = Array.isArray(holderScan.touchedHolders) ? holderScan.touchedHolders : [];
+    const cachedNonZeroHolders = Array.isArray(holderScan.cachedNonZeroHolders) ? holderScan.cachedNonZeroHolders : [];
+    let holdersForBalanceCheck = normalizeHolderArray(cachedNonZeroHolders.concat(touchedHolders));
+    if (holdersForBalanceCheck.length === 0) {
+      holdersForBalanceCheck = holders;
+    }
 
     const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
     const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
     const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
     const nextEpochId = Number(countRaw) + 1;
 
-    const claimRows = await mapWithConcurrency(holders, 4, async (account) => {
+    const holderReadConcurrency = NETWORK_NAME === 'sepolia' ? 8 : 4;
+    const claimRows = await mapWithConcurrency(holdersForBalanceCheck, holderReadConcurrency, async (account) => {
       const balData = equityTokenSnapshotInterface.encodeFunctionData('balanceOfAt', [account, BigInt(snapshotId)]);
       const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
       const [balanceRaw] = equityTokenSnapshotInterface.decodeFunctionResult('balanceOfAt', balResult);
@@ -7721,6 +9226,7 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       symbol,
       tokenAddress,
       snapshotId,
+      snapshotTxHash,
       merkleRoot: root,
       totalEntitledWei: totalEntitledWei.toString(),
       contentHash,
@@ -7738,6 +9244,25 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       merkleRoot: root,
       claims,
     });
+    const holderScanState = readMerkleHolderScanState();
+    if (!holderScanState.tokens || typeof holderScanState.tokens !== 'object') {
+      holderScanState.tokens = {};
+    }
+    const tokenKey = tokenAddress.toLowerCase();
+    const currentTokenState = holderScanState.tokens[tokenKey] || {};
+    const nonZeroHolders = [];
+    for (let i = 0; i < claims.length; i += 1) {
+      const account = normalizeAddress(claims[i].account);
+      if (account) {
+        nonZeroHolders.push(account);
+      }
+    }
+    holderScanState.tokens[tokenKey] = {
+      ...currentTokenState,
+      nonZeroHolders: normalizeHolderArray(nonZeroHolders),
+      updatedAtMs: Date.now(),
+    };
+    writeMerkleHolderScanState(holderScanState);
 
     res.json({
       txHash: declareTxHash,
@@ -7745,6 +9270,7 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       symbol,
       tokenAddress,
       snapshotId,
+      snapshotTxHash,
       divPerShareWei: divPerShareWei.toString(),
       merkleRoot: root,
       totalEntitledWei: totalEntitledWei.toString(),
@@ -8122,140 +9648,184 @@ app.get('/api/dividends/claimables', async (req, res) => {
     return res.status(400).json({ error: 'wallet is required' });
   }
   try {
-    const deployments = loadDeployments();
-    if (!deployments.dividends) {
-      return res.json({ wallet, claimables: [] });
-    }
-    const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const listResult = await hardhatRpc('eth_call', [{ to: deployments.listingsRegistry, data: listData }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
-    const listings = [];
-    for (const symbol of symbols) {
-      const token = await getListingBySymbol(deployments.listingsRegistry, symbol);
-      const hasToken = Boolean(token);
-      const isNonZero = token !== ethers.ZeroAddress;
-      if (hasToken && isNonZero) {
-        listings.push({ symbol, tokenAddress: token });
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const cacheKey = makeUiReadCacheKey('dividends-claimables', { wallet });
+    if (!disableCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_CLAIMABLES_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
       }
     }
-    const claimables = [];
 
-    for (const listing of listings) {
-      const countData = dividendsInterface.encodeFunctionData('epochCount', [listing.tokenAddress]);
-      const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: countData }, 'latest']);
-      const [countRaw] = dividendsInterface.decodeFunctionResult('epochCount', countResult);
-      const count = Number(countRaw);
-      for (let epochId = 1; epochId <= count; epochId++) {
-        const previewData = dividendsInterface.encodeFunctionData('previewClaim', [listing.tokenAddress, epochId, wallet]);
-        const previewResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: previewData }, 'latest']);
-        const [claimableWeiRaw] = dividendsInterface.decodeFunctionResult('previewClaim', previewResult);
-        const claimableWei = claimableWeiRaw.toString();
-        const claimedData = dividendsInterface.encodeFunctionData('isClaimed', [listing.tokenAddress, epochId, wallet]);
-        const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: claimedData }, 'latest']);
-        const [claimed] = dividendsInterface.decodeFunctionResult('isClaimed', claimedResult);
-        claimables.push({
-          claimType: 'SNAPSHOT',
-          symbol: listing.symbol,
-          tokenAddress: listing.tokenAddress,
-          epochId,
-          claimableWei,
-          claimed,
-          canClaim: (() => {
-            let canClaim = false;
-            if (BigInt(claimableWei) > 0n) {
-              if (!claimed) {
-                canClaim = true;
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      const warnings = [];
+      let source = 'chain';
+      let degraded = false;
+      let claimables = [];
+      try {
+        const deployments = loadDeployments();
+        if (!deployments.dividends) {
+          source = 'no_contract';
+        } else {
+          const listings = [];
+          const indexedListings = await withTimeout(
+            getIndexedListings(deployments.listingsRegistry),
+            5000,
+            'listings for claimables timeout'
+          );
+          for (let i = 0; i < indexedListings.length; i += 1) {
+            const row = indexedListings[i];
+            const symbol = String(row.symbol || '').toUpperCase();
+            const tokenAddress = normalizeAddress(row.tokenAddress);
+            if (symbol && tokenAddress && tokenAddress !== ethers.ZeroAddress) {
+              listings.push({ symbol, tokenAddress });
+            }
+          }
+          const snapshotRows = await mapWithConcurrency(
+            listings,
+            3,
+            async (listing) => {
+              const oneListingRows = [];
+              const countData = dividendsInterface.encodeFunctionData('epochCount', [listing.tokenAddress]);
+              const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: countData }, 'latest']);
+              const [countRaw] = dividendsInterface.decodeFunctionResult('epochCount', countResult);
+              const count = Number(countRaw);
+              for (let epochId = 1; epochId <= count; epochId += 1) {
+                const epochData = dividendsInterface.encodeFunctionData('epochs', [listing.tokenAddress, epochId]);
+                const epochResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: epochData }, 'latest']);
+                const [, , declaredAtRaw] = dividendsInterface.decodeFunctionResult('epochs', epochResult);
+                const declaredAtMs = Number(declaredAtRaw) * 1000;
+                const previewData = dividendsInterface.encodeFunctionData('previewClaim', [listing.tokenAddress, epochId, wallet]);
+                const previewResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: previewData }, 'latest']);
+                const [claimableWeiRaw] = dividendsInterface.decodeFunctionResult('previewClaim', previewResult);
+                const claimableWei = claimableWeiRaw.toString();
+                const claimedData = dividendsInterface.encodeFunctionData('isClaimed', [listing.tokenAddress, epochId, wallet]);
+                const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividends, data: claimedData }, 'latest']);
+                const [claimed] = dividendsInterface.decodeFunctionResult('isClaimed', claimedResult);
+                let canClaim = false;
+                if (BigInt(claimableWei) > 0n && !claimed) {
+                  canClaim = true;
+                }
+                oneListingRows.push({
+                  claimType: 'SNAPSHOT',
+                  symbol: listing.symbol,
+                  tokenAddress: listing.tokenAddress,
+                  epochId,
+                  declaredAtMs,
+                  claimableWei,
+                  claimed,
+                  canClaim,
+                });
+              }
+              return oneListingRows;
+            }
+          );
+          for (let i = 0; i < snapshotRows.length; i += 1) {
+            const rows = snapshotRows[i];
+            if (Array.isArray(rows) && rows.length > 0) {
+              for (let j = 0; j < rows.length; j += 1) {
+                claimables.push(rows[j]);
               }
             }
-            return canClaim;
-          })(),
-        });
-      }
-    }
-
-    if (deployments.dividendsMerkle) {
-      const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
-      const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
-      const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
-      const count = Number(countRaw);
-      for (let epochId = 1; epochId <= count; epochId += 1) {
-        const tree = readMerkleTree(epochId);
-        const claimsPayload = readMerkleClaims(epochId);
-        let rows = [];
-        if (Array.isArray(claimsPayload.claims)) {
-          rows = claimsPayload.claims;
-        }
-        for (let i = 0; i < rows.length; i += 1) {
-          const row = rows[i];
-          let accountText = '';
-          if (row.account) {
-            accountText = String(row.account);
           }
-          const account = normalizeAddress(accountText);
-          if (account === wallet) {
-            let amountWei = '0';
-            if (row.amountWei) {
-              amountWei = String(row.amountWei);
-            }
-            const leafIndex = Number(row.leafIndex);
-            let proof = [];
-            if (Array.isArray(row.proof)) {
-              proof = row.proof;
-            }
-            const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
-            const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
-            const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
-            let treeSymbol = '';
-            if (tree.symbol) {
-              treeSymbol = String(tree.symbol);
-            }
-            let treeTokenAddress = '';
-            if (tree.tokenAddress) {
-              treeTokenAddress = String(tree.tokenAddress);
-            }
-            let treeMerkleRoot = '';
-            if (tree.merkleRoot) {
-              treeMerkleRoot = String(tree.merkleRoot);
-            }
-            let treeContentHash = ethers.ZeroHash;
-            if (tree.contentHash) {
-              treeContentHash = String(tree.contentHash);
-            }
-            let treeClaimsUri = '';
-            if (tree.claimsUri) {
-              treeClaimsUri = String(tree.claimsUri);
-            }
-            claimables.push({
-              claimType: 'MERKLE',
-              symbol: treeSymbol,
-              tokenAddress: treeTokenAddress,
-              epochId,
-              claimableWei: amountWei,
-              amountWei,
-              leafIndex,
-              proof,
-              claimed,
-              canClaim: (() => {
-                let canClaim = false;
-                if (BigInt(amountWei) > 0n) {
-                  if (!claimed) {
-                    canClaim = true;
-                  }
+
+          if (deployments.dividendsMerkle) {
+            const countData = dividendsMerkleInterface.encodeFunctionData('merkleEpochCount', []);
+            const countResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: countData }, 'latest']);
+            const [countRaw] = dividendsMerkleInterface.decodeFunctionResult('merkleEpochCount', countResult);
+            const count = Number(countRaw);
+            for (let epochId = 1; epochId <= count; epochId += 1) {
+              const tree = readMerkleTree(epochId);
+              const claimsPayload = readMerkleClaims(epochId);
+              let rows = [];
+              if (Array.isArray(claimsPayload.claims)) {
+                rows = claimsPayload.claims;
+              }
+              for (let i = 0; i < rows.length; i += 1) {
+                const row = rows[i];
+                const account = normalizeAddress(String(row.account || ''));
+                if (account !== wallet) {
+                  continue;
                 }
-                return canClaim;
-              })(),
-              merkleRoot: treeMerkleRoot,
-              contentHash: treeContentHash,
-              claimsUri: treeClaimsUri,
-            });
+                const amountWei = String(row.amountWei || '0');
+                const leafIndex = Number(row.leafIndex);
+                let proof = [];
+                if (Array.isArray(row.proof)) {
+                  proof = row.proof;
+                }
+                const claimedData = dividendsMerkleInterface.encodeFunctionData('isClaimed', [BigInt(epochId), BigInt(leafIndex)]);
+                const claimedResult = await hardhatRpc('eth_call', [{ to: deployments.dividendsMerkle, data: claimedData }, 'latest']);
+                const [claimed] = dividendsMerkleInterface.decodeFunctionResult('isClaimed', claimedResult);
+                let canClaim = false;
+                if (BigInt(amountWei) > 0n && !claimed) {
+                  canClaim = true;
+                }
+                let declaredAtMs = Number(tree.declaredAtMs);
+                if (!Number.isFinite(declaredAtMs) || declaredAtMs <= 0) {
+                  declaredAtMs = Number(tree.declaredAt) * 1000;
+                }
+                claimables.push({
+                  claimType: 'MERKLE',
+                  symbol: String(tree.symbol || ''),
+                  tokenAddress: String(tree.tokenAddress || ''),
+                  epochId,
+                  declaredAtMs,
+                  claimableWei: amountWei,
+                  amountWei,
+                  leafIndex,
+                  proof,
+                  claimed,
+                  canClaim,
+                  merkleRoot: String(tree.merkleRoot || ''),
+                  contentHash: String(tree.contentHash || ethers.ZeroHash),
+                  claimsUri: String(tree.claimsUri || ''),
+                });
+              }
+            }
           }
         }
+        lastKnownClaimablesByWallet.set(wallet.toLowerCase(), claimables);
+      } catch (err) {
+        degraded = true;
+        warnings.push(`claimables degraded: ${toUserErrorMessage(err.message)}`);
+        source = 'last_known';
+        const lastKnown = lastKnownClaimablesByWallet.get(wallet.toLowerCase());
+        if (Array.isArray(lastKnown)) {
+          claimables = lastKnown;
+        } else {
+          claimables = [];
+          source = 'empty_fallback';
+        }
       }
-    }
-
-    res.json({ wallet, claimables });
+      const nextPayload = {
+        wallet,
+        claimables,
+        source,
+        degraded,
+        warnings,
+      };
+      if (!disableCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const lastKnown = lastKnownClaimablesByWallet.get(wallet.toLowerCase());
+    let claimables = [];
+    let source = 'empty_fallback';
+    if (Array.isArray(lastKnown)) {
+      claimables = lastKnown;
+      source = 'last_known';
+    }
+    res.json({
+      wallet,
+      claimables,
+      source,
+      degraded: true,
+      warnings: [`claimables unavailable: ${toUserErrorMessage(err.message)}`],
+    });
   }
 });
 
@@ -8905,35 +10475,20 @@ app.post('/api/award/claim', async (req, res) => {
 
 app.get('/api/award/current', async (_req, res) => {
   try {
-    const deployments = loadDeployments();
-    if (!deployments.award) {
+    const snapshot = await getAwardStatusSnapshot();
+    if (!snapshot.available) {
       return res.json({ available: false });
     }
-    let selfBaseUrl = `http://127.0.0.1:${PORT}`;
-    if (process.env.SERVER_BASE_URL) {
-      selfBaseUrl = String(process.env.SERVER_BASE_URL);
-    }
-    const statusRes = await fetch(`${selfBaseUrl}/api/award/status`);
-    const statusData = await statusRes.json();
-    if (!statusRes.ok) {
-      let reason = 'failed to load status';
-      if (statusData.error) {
-        reason = statusData.error;
-      }
-      return res.status(500).json({ error: reason });
-    }
-    const leaderboardRes = await fetch(`${selfBaseUrl}/api/award/leaderboard?epochId=${Math.max(0, statusData.currentEpoch - 1)}`);
-    const leaderboardData = await leaderboardRes.json();
+    const previousEpoch = Math.max(0, snapshot.currentEpoch - 1);
+    const leaderboard = await buildAwardLeaderboardForEpoch(snapshot.deployments.award, previousEpoch);
     let topRow = null;
-    if (leaderboardData.items) {
-      if (leaderboardData.items.length > 0) {
-        topRow = leaderboardData.items[0];
-      }
+    if (Array.isArray(leaderboard.items) && leaderboard.items.length > 0) {
+      topRow = leaderboard.items[0];
     }
     res.json({
       available: true,
-      currentEpoch: statusData.currentEpoch,
-      previousEpoch: Math.max(0, statusData.currentEpoch - 1),
+      currentEpoch: snapshot.currentEpoch,
+      previousEpoch,
       topTrader: (() => {
         let topTrader = ethers.ZeroAddress;
         if (topRow) {
@@ -9518,94 +11073,66 @@ app.get('/api/leveraged/positions', async (req, res) => {
         const [ttokenOutWeiRaw, navCentsRaw] = leveragedRouterInterface.decodeFunctionResult('previewUnwind', quoteResult);
         const currentValueWei = ttokenOutWeiRaw.toString();
         const navCents = navCentsRaw.toString();
-        const costBasisWei = (BigInt(qtyWei) / BigInt(Number(item.leverage))).toString();
+        const avgEntryPriceCentsBig = BigInt(avgEntryPriceCents);
+        const costBasisWei = ((BigInt(qtyWei) * avgEntryPriceCentsBig) / 100n).toString();
         const unrealizedPnlWei = (BigInt(currentValueWei) - BigInt(costBasisWei)).toString();
         const currentPriceWei = ((BigInt(currentValueWei) * 1000000000000000000n) / BigInt(qtyWei)).toString();
         let basePriceCents = 0;
         let baseChangePct = Number.NaN;
         try {
-          const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
-          let yahooPriceRaw = 0;
-          if (quote.regularMarketPrice) {
-            yahooPriceRaw = quote.regularMarketPrice;
-          } else if (quote.price) {
-            yahooPriceRaw = quote.price;
+          const fmpShort = await fetchFmpJson(getFmpUrl('quote', { symbol: String(item.baseSymbol).toUpperCase() }));
+          let first = null;
+          if (Array.isArray(fmpShort) && fmpShort.length > 0) {
+            first = fmpShort[0];
+          } else if (fmpShort && typeof fmpShort === 'object') {
+            first = fmpShort;
           }
-          const yahooPrice = Number(yahooPriceRaw);
-          if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
-            basePriceCents = Math.round(yahooPrice * 100);
-          }
-          const yahooOpen = Number(quote.regularMarketOpen);
-          if (
-            Number.isFinite(yahooOpen)
-            && yahooOpen > 0
-            && Number.isFinite(yahooPrice)
-            && yahooPrice > 0
-          ) {
-            baseChangePct = ((yahooPrice - yahooOpen) / yahooOpen) * 100;
-          }
-          const yahooChangeRaw = Number(quote.regularMarketChangePercent);
-          if (Number.isFinite(yahooChangeRaw) && (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001)) {
-            if (Math.abs(yahooChangeRaw) <= 1) {
-              baseChangePct = yahooChangeRaw * 100;
-            } else {
-              baseChangePct = yahooChangeRaw;
+          if (first) {
+            const fmpPrice = Number(first.price);
+            if (Number.isFinite(fmpPrice) && fmpPrice > 0) {
+              basePriceCents = Math.round(fmpPrice * 100);
             }
-          }
-          const yahooPrevClose = Number(quote.regularMarketPreviousClose);
-          if (
-            Number.isFinite(yahooPrevClose)
-            && yahooPrevClose > 0
-            && Number.isFinite(yahooPrice)
-            && yahooPrice > 0
-            && (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001)
-          ) {
-            baseChangePct = ((yahooPrice - yahooPrevClose) / yahooPrevClose) * 100;
+            const fmpPrevClose = Number(first.previousClose);
+            if (Number.isFinite(fmpPrevClose) && fmpPrevClose > 0 && Number.isFinite(fmpPrice) && fmpPrice > 0) {
+              baseChangePct = ((fmpPrice - fmpPrevClose) / fmpPrevClose) * 100;
+            } else {
+              let fmpPctRaw = Number.NaN;
+              if (first.changePercent !== undefined && first.changePercent !== null) {
+                fmpPctRaw = Number(first.changePercent);
+              } else if (first.changesPercentage !== undefined && first.changesPercentage !== null) {
+                fmpPctRaw = Number(first.changesPercentage);
+              }
+              if (Number.isFinite(fmpPctRaw)) {
+                if (Math.abs(fmpPctRaw) <= 1) {
+                  baseChangePct = fmpPctRaw * 100;
+                } else {
+                  baseChangePct = fmpPctRaw;
+                }
+              }
+            }
           }
         } catch {
-        }
-        if (!(basePriceCents > 0) || !Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001) {
           try {
-            const fmpShort = await fetchFmpJson(getFmpUrl('quote', { symbol: String(item.baseSymbol).toUpperCase() }));
-            let first = null;
-            if (Array.isArray(fmpShort) && fmpShort.length > 0) {
-              first = fmpShort[0];
-            } else if (fmpShort && typeof fmpShort === 'object') {
-              first = fmpShort;
+            const quote = await fetchQuote(String(item.baseSymbol).toUpperCase());
+            const yahooPrice = Number(quote.regularMarketPrice || quote.price || 0);
+            if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
+              basePriceCents = Math.round(yahooPrice * 100);
             }
-            if (first) {
-              let fmpPriceRaw = 0;
-              if (first.price) {
-                fmpPriceRaw = first.price;
-              }
-              const fmpPrice = Number(fmpPriceRaw);
-              if (Number.isFinite(fmpPrice) && fmpPrice > 0) {
-                basePriceCents = Math.round(fmpPrice * 100);
-              }
-              const fmpOpen = Number(first.open);
-              if (
-                Number.isFinite(fmpOpen)
-                && fmpOpen > 0
-                && Number.isFinite(fmpPrice)
-                && fmpPrice > 0
-              ) {
-                baseChangePct = ((fmpPrice - fmpOpen) / fmpOpen) * 100;
-              }
-              if (!Number.isFinite(baseChangePct) || Math.abs(baseChangePct) < 0.0001) {
-                let fmpPctRaw = Number.NaN;
-                if (first.changePercent !== undefined && first.changePercent !== null) {
-                  fmpPctRaw = first.changePercent;
-                } else if (first.changesPercentage !== undefined && first.changesPercentage !== null) {
-                  fmpPctRaw = first.changesPercentage;
-                }
-                const fmpPct = Number(fmpPctRaw);
-                if (Number.isFinite(fmpPct) && Math.abs(fmpPct) >= 0.0001) {
-                  baseChangePct = fmpPct;
+            const yahooPrevClose = Number(quote.regularMarketPreviousClose);
+            if (
+              Number.isFinite(yahooPrevClose)
+              && yahooPrevClose > 0
+              && Number.isFinite(yahooPrice)
+              && yahooPrice > 0
+            ) {
+              baseChangePct = ((yahooPrice - yahooPrevClose) / yahooPrevClose) * 100;
+            } else {
+              const yahooChangeRaw = Number(quote.regularMarketChangePercent);
+              if (Number.isFinite(yahooChangeRaw)) {
+                if (Math.abs(yahooChangeRaw) <= 1) {
+                  baseChangePct = yahooChangeRaw * 100;
                 } else {
-                  const fmpPrevClose = Number(first.previousClose);
-                  if (Number.isFinite(fmpPrevClose) && fmpPrevClose > 0 && Number.isFinite(fmpPrice) && fmpPrice > 0) {
-                    baseChangePct = ((fmpPrice - fmpPrevClose) / fmpPrevClose) * 100;
-                  }
+                  baseChangePct = yahooChangeRaw;
                 }
               }
             }
@@ -9653,6 +11180,7 @@ app.post('/api/admin/symbols/freeze', async (req, res) => {
       return res.status(400).json({ error: 'symbol is required' });
     }
     const entry = setSymbolLifecycleStatus(symbol, 'FROZEN');
+    invalidateListingsCaches();
     res.json({ symbol, status: 'FROZEN', entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -9670,6 +11198,7 @@ app.post('/api/admin/symbols/unfreeze', async (req, res) => {
       return res.status(400).json({ error: 'symbol is required' });
     }
     const entry = setSymbolLifecycleStatus(symbol, 'ACTIVE');
+    invalidateListingsCaches();
     res.json({ symbol, status: 'ACTIVE', entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -9687,6 +11216,7 @@ app.post('/api/admin/symbols/delist', async (req, res) => {
       return res.status(400).json({ error: 'symbol is required' });
     }
     const entry = setSymbolLifecycleStatus(symbol, 'DELISTED');
+    invalidateListingsCaches();
     res.json({ symbol, status: 'DELISTED', entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -9704,6 +11234,7 @@ app.post('/api/admin/symbols/list', async (req, res) => {
       return res.status(400).json({ error: 'symbol is required' });
     }
     const entry = setSymbolLifecycleStatus(symbol, 'ACTIVE');
+    invalidateListingsCaches();
     res.json({ symbol, status: 'ACTIVE', entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -9712,7 +11243,35 @@ app.post('/api/admin/symbols/list', async (req, res) => {
 
 app.get('/api/admin/symbols/status', async (_req, res) => {
   try {
-    const symbols = await listAllSymbolsFromRegistry();
+    const symbols = [];
+    const seen = new Set();
+    try {
+      const deployments = loadDeployments();
+      const registryAddr = normalizeAddress(deployments.listingsRegistry);
+      const registryDeployed = await ensureContract(registryAddr);
+      if (registryDeployed) {
+        const indexedListings = await getIndexedListings(registryAddr);
+        for (let i = 0; i < indexedListings.length; i += 1) {
+          const symbol = String(indexedListings[i].symbol || '').toUpperCase();
+          if (!symbol || seen.has(symbol)) {
+            continue;
+          }
+          seen.add(symbol);
+          symbols.push(symbol);
+        }
+      }
+    } catch {
+    }
+    const state = readSymbolStatusState();
+    const stateRows = state && state.symbols ? Object.keys(state.symbols) : [];
+    for (let i = 0; i < stateRows.length; i += 1) {
+      const symbol = String(stateRows[i] || '').toUpperCase();
+      if (!symbol || seen.has(symbol)) {
+        continue;
+      }
+      seen.add(symbol);
+      symbols.push(symbol);
+    }
     const rows = [];
     for (let i = 0; i < symbols.length; i += 1) {
       const symbol = symbols[i];
@@ -9729,7 +11288,7 @@ app.get('/api/admin/symbols/status', async (_req, res) => {
     rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
     res.json({ symbols: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json({ symbols: [] });
   }
 });
 
@@ -10517,12 +12076,32 @@ app.post('/api/equity/create', async (req, res) => {
   }
 
   try {
+    const waitReceiptRaw = req.query.waitReceipt;
+    let waitReceipt = false;
+    if (String(waitReceiptRaw || '').toLowerCase() === '1') {
+      waitReceipt = true;
+    }
+    if (String(waitReceiptRaw || '').toLowerCase() === 'true') {
+      waitReceipt = true;
+    }
     const deployments = loadDeployments();
     const factoryAddr = deployments.equityTokenFactory;
+    const registryAddr = deployments.listingsRegistry;
     const admin = deployments.admin;
     const factoryDeployed = await ensureContract(factoryAddr);
     if (!factoryDeployed) {
       return res.status(500).json({ error: '' });
+    }
+    const registryDeployed = await ensureContract(registryAddr);
+    if (!registryDeployed) {
+      return res.status(500).json({ error: '' });
+    }
+
+    const lookupData = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
+    const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
+    const [listedTokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
+    if (listedTokenAddr !== ethers.ZeroAddress) {
+      return res.status(409).json({ error: 'symbol already listed' });
     }
 
     const data = equityFactoryInterface.encodeFunctionData('createEquityToken', [symbol, name]);
@@ -10531,9 +12110,19 @@ app.post('/api/equity/create', async (req, res) => {
       to: factoryAddr,
       data,
     }]);
-    res.json({ txHash });
+    if (waitReceipt) {
+      await waitForReceipt(txHash);
+      invalidateListingsCaches();
+      return res.json({ txHash, status: 'confirmed' });
+    }
+    invalidateListingsCaches();
+    res.json({ txHash, status: 'submitted' });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    const message = toUserErrorMessage(err.message);
+    if (String(message).toLowerCase().includes('symbol already listed')) {
+      return res.status(409).json({ error: 'symbol already listed' });
+    }
+    res.status(502).json({ error: message });
   }
 });
 // mint equity token
@@ -10562,6 +12151,14 @@ app.post('/api/equity/mint', async (req, res) => {
   }
 
   try {
+    const waitReceiptRaw = req.query.waitReceipt;
+    let waitReceipt = false;
+    if (String(waitReceiptRaw || '').toLowerCase() === '1') {
+      waitReceipt = true;
+    }
+    if (String(waitReceiptRaw || '').toLowerCase() === 'true') {
+      waitReceipt = true;
+    }
     const deployments = loadDeployments();
     const registryAddr = deployments.listingsRegistry;
     let minter = deployments.admin;
@@ -10587,23 +12184,40 @@ app.post('/api/equity/mint', async (req, res) => {
       to: tokenAddr,
       data: mintData,
     }]);
-    const receipt = await waitForReceipt(txHash);
-    const blockNumber = parseRpcInt(receipt.blockNumber);
-    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
-    appendManualMintActivity({
+    const entryPriceCents = await resolveEntryPriceCentsForSymbol(symbol, deployments);
+    if (waitReceipt) {
+      const receipt = await waitForReceipt(txHash);
+      const blockNumber = parseRpcInt(receipt.blockNumber);
+      const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+      appendManualMintActivity({
+        wallet: to,
+        tokenAddress: tokenAddr,
+        symbol,
+        assetType: 'EQUITY',
+        amountWei: amountWei.toString(),
+        priceCents: entryPriceCents,
+        reason: 'MINT_EQUITY',
+        txHash,
+        blockNumber,
+        timestampMs,
+      });
+      invalidatePortfolioCachesForWallet(to);
+      return res.json({ txHash, tokenAddress: tokenAddr, status: 'confirmed' });
+    }
+    appendManualMintActivityAfterReceipt({
       wallet: to,
       tokenAddress: tokenAddr,
       symbol,
       assetType: 'EQUITY',
       amountWei: amountWei.toString(),
+      priceCents: entryPriceCents,
       reason: 'MINT_EQUITY',
       txHash,
-      blockNumber,
-      timestampMs,
     });
-    res.json({ txHash, tokenAddress: tokenAddr });
+    invalidatePortfolioCachesForWallet(to);
+    res.json({ txHash, tokenAddress: tokenAddr, status: 'submitted' });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 // create and mint for equity tokens that was not deployed
@@ -10640,6 +12254,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
   }
 
   try {
+    const waitReceiptRaw = req.query.waitReceipt;
+    let waitReceipt = false;
+    if (String(waitReceiptRaw || '').toLowerCase() === '1') {
+      waitReceipt = true;
+    }
+    if (String(waitReceiptRaw || '').toLowerCase() === 'true') {
+      waitReceipt = true;
+    }
     const deployments = loadDeployments();
     const factoryAddr = deployments.equityTokenFactory;
     const registryAddr = deployments.listingsRegistry;
@@ -10673,19 +12295,15 @@ app.post('/api/equity/create-mint', async (req, res) => {
         to: factoryAddr,
         data: createData,
       }]);
-
-      for (let i = 0; i < 10; i++) {
-        const receipt = await hardhatRpc('eth_getTransactionReceipt', [createTx]);
-        if (receipt) {
-          break;
-        }
-        await new Promise((resolve) => {
-          setTimeout(resolve, 300);
-        });
+      const createReceipt = await waitForReceipt(createTx);
+      const createStatus = parseRpcInt(createReceipt.status);
+      if (createStatus === 0) {
+        return res.status(502).json({ error: 'create equity transaction reverted' });
       }
 
       lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookupData }, 'latest']);
       [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
+      invalidateListingsCaches();
     }
     if (tokenAddr === ethers.ZeroAddress) {
       return res.status(404).json({ error: `` });
@@ -10698,39 +12316,50 @@ app.post('/api/equity/create-mint', async (req, res) => {
       to: tokenAddr,
       data: mintData,
     }]);
-    const receipt = await waitForReceipt(mintTx);
-    const blockNumber = parseRpcInt(receipt.blockNumber);
-    const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
-    appendManualMintActivity({
+    const entryPriceCents = await resolveEntryPriceCentsForSymbol(symbol, deployments);
+    if (waitReceipt) {
+      const receipt = await waitForReceipt(mintTx);
+      const blockNumber = parseRpcInt(receipt.blockNumber);
+      const timestampMs = await getBlockTimestampMs(receipt.blockNumber);
+      appendManualMintActivity({
+        wallet: to,
+        tokenAddress: tokenAddr,
+        symbol,
+        assetType: 'EQUITY',
+        amountWei: amountWei.toString(),
+        priceCents: entryPriceCents,
+        reason: 'MINT_EQUITY',
+        txHash: mintTx,
+        blockNumber,
+        timestampMs,
+      });
+      invalidatePortfolioCachesForWallet(to);
+      return res.json({ createTx, mintTx, tokenAddress: tokenAddr, status: 'confirmed' });
+    }
+    appendManualMintActivityAfterReceipt({
       wallet: to,
       tokenAddress: tokenAddr,
       symbol,
       assetType: 'EQUITY',
       amountWei: amountWei.toString(),
+      priceCents: entryPriceCents,
       reason: 'MINT_EQUITY',
       txHash: mintTx,
-      blockNumber,
-      timestampMs,
     });
-    res.json({ createTx, mintTx, tokenAddress: tokenAddr });
+    invalidatePortfolioCachesForWallet(to);
+    res.json({ createTx, mintTx, tokenAddress: tokenAddr, status: 'submitted' });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
 // rest api to get all the listings and addresses
 app.get('/api/registry/listings', async (req, res) => {
   try {
-    const deployments = loadDeployments();
-    const registryAddr = deployments.listingsRegistry;
-    const registryDeployed = await ensureContract(registryAddr);
-    if (!registryDeployed) {
-      return res.json({ listings: [] });
+    let mode = String(req.query.mode || '').toLowerCase();
+    if (mode !== 'chain') {
+      mode = 'fast';
     }
-    const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
-
     let includeDelisted = false;
     let includeDelistedRaw = '';
     if (req.query.includeDelisted) {
@@ -10739,23 +12368,95 @@ app.get('/api/registry/listings', async (req, res) => {
     if (includeDelistedRaw === '1') {
       includeDelisted = true;
     }
-
-    const listings = [];
-    for (const symbol of symbols) {
-      const lookup = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
-      const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookup }, 'latest']);
-      const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
-      if (tokenAddr !== ethers.ZeroAddress) {
-        const lifecycle = getSymbolLifecycleStatus(symbol);
-        const shouldHide = lifecycle === 'DELISTED' && !includeDelisted;
-        if (!shouldHide) {
-          listings.push({ symbol, tokenAddress: tokenAddr, lifecycleStatus: lifecycle });
-        }
+    const disableCache = String(req.query.noCache || '').toLowerCase() === '1'
+      || String(req.query.noCache || '').toLowerCase() === 'true';
+    const deployments = loadDeployments();
+    const registryAddr = deployments.listingsRegistry;
+    const cacheKey = makeUiReadCacheKey('registry-listings', { mode, includeDelisted, registryAddr });
+    if (!disableCache) {
+      const cachedPayload = readUiReadCache(cacheKey, UI_LISTINGS_TTL_MS);
+      if (cachedPayload) {
+        return res.json(cachedPayload);
       }
     }
-    res.json({ listings });
+
+    const payload = await runUiCoalesced(cacheKey, async () => {
+      const warnings = [];
+      let degraded = false;
+      let source = mode === 'chain' ? 'chain' : 'indexer_fast';
+      let listings = [];
+      try {
+        const registryDeployed = await withTimeout(ensureContract(registryAddr), 4000, 'registry contract check timeout');
+        if (!registryDeployed) {
+          source = 'empty_fallback';
+        } else {
+          let indexedListings = [];
+          if (mode === 'chain') {
+            const listData = registryListInterface.encodeFunctionData('getAllSymbols', []);
+            const listResult = await withTimeout(
+              hardhatRpc('eth_call', [{ to: registryAddr, data: listData }, 'latest']),
+              5000,
+              'registry list timeout'
+            );
+            const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', listResult);
+            const resolved = await mapWithConcurrency(
+              symbols,
+              PORTFOLIO_RPC_CONCURRENCY,
+              async (symbol) => {
+                const tokenAddress = await getListingBySymbol(registryAddr, symbol);
+                if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+                  return null;
+                }
+                return {
+                  symbol: String(symbol),
+                  tokenAddress,
+                };
+              }
+            );
+            for (let i = 0; i < resolved.length; i += 1) {
+              if (resolved[i]) {
+                indexedListings.push(resolved[i]);
+              }
+            }
+          } else {
+            indexedListings = await getIndexedListings(registryAddr);
+          }
+
+          for (let i = 0; i < indexedListings.length; i += 1) {
+            const row = indexedListings[i];
+            const symbol = String(row.symbol || '').toUpperCase();
+            const tokenAddress = normalizeAddress(row.tokenAddress);
+            if (!symbol || !tokenAddress || tokenAddress === ethers.ZeroAddress) {
+              continue;
+            }
+            const lifecycle = getSymbolLifecycleStatus(symbol);
+            const shouldHide = lifecycle === 'DELISTED' && !includeDelisted;
+            if (!shouldHide) {
+              listings.push({ symbol, tokenAddress, lifecycleStatus: lifecycle });
+            }
+          }
+          listings.sort((a, b) => a.symbol.localeCompare(b.symbol));
+        }
+      } catch (err) {
+        degraded = true;
+        warnings.push(`listings degraded: ${toUserErrorMessage(err.message)}`);
+        listings = [];
+        source = 'empty_fallback';
+      }
+      const nextPayload = { listings, source, degraded, warnings };
+      if (!disableCache) {
+        writeUiReadCache(cacheKey, nextPayload);
+      }
+      return nextPayload;
+    });
+    res.json(payload);
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.json({
+      listings: [],
+      source: 'empty_fallback',
+      degraded: true,
+      warnings: [`listings unavailable: ${toUserErrorMessage(err.message)}`],
+    });
   }
 });
 
@@ -10770,25 +12471,32 @@ app.get('/api/equity/balances', async (req, res) => {
       return res.status(500).json({ error: '' });
     }
 
-    const data = registryListInterface.encodeFunctionData('getAllSymbols', []);
-    const result = await hardhatRpc('eth_call', [{ to: registryAddr, data }, 'latest']);
-    const [symbols] = registryListInterface.decodeFunctionResult('getAllSymbols', result);
-
-    const balances = [];
-    for (const symbol of symbols) {
-      const lookup = listingsRegistryInterface.encodeFunctionData('getListing', [symbol]);
-      const lookupResult = await hardhatRpc('eth_call', [{ to: registryAddr, data: lookup }, 'latest']);
-      const [tokenAddr] = listingsRegistryInterface.decodeFunctionResult('getListing', lookupResult);
-      if (tokenAddr !== ethers.ZeroAddress) {
+    const indexedListings = await getIndexedListings(registryAddr);
+    const balancesResolved = await mapWithConcurrency(
+      indexedListings,
+      PORTFOLIO_RPC_CONCURRENCY,
+      async (listing) => {
+        const tokenAddress = normalizeAddress(listing.tokenAddress);
+        const symbol = String(listing.symbol || '').toUpperCase();
+        if (!symbol || !tokenAddress || tokenAddress === ethers.ZeroAddress) {
+          return null;
+        }
         const balData = equityTokenInterface.encodeFunctionData('balanceOf', [address]);
-        const balResult = await hardhatRpc('eth_call', [{ to: tokenAddr, data: balData }, 'latest']);
+        const balResult = await hardhatRpc('eth_call', [{ to: tokenAddress, data: balData }, 'latest']);
         const [balanceWei] = equityTokenInterface.decodeFunctionResult('balanceOf', balResult);
-        balances.push({ symbol, tokenAddress: tokenAddr, balanceWei: balanceWei.toString() });
+        return { symbol, tokenAddress, balanceWei: balanceWei.toString() };
+      }
+    );
+    const balances = [];
+    for (let i = 0; i < balancesResolved.length; i += 1) {
+      if (balancesResolved[i]) {
+        balances.push(balancesResolved[i]);
       }
     }
+    balances.sort((a, b) => a.symbol.localeCompare(b.symbol));
     res.json({ balances });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
@@ -10844,6 +12552,7 @@ app.get('/api/candles', async (req, res) => {
   const range = rangeRaw;
   const cacheKey = `${symbol}|${date}|${interval}|${range}`;
   const cached = candleCache.get(cacheKey);
+  const endDate = date;
 
   const dateValid = /^\d{4}-\d{2}-\d{2}$/.test(date);
   if (!dateValid) {
@@ -10872,60 +12581,84 @@ app.get('/api/candles', async (req, res) => {
       return res.json(cached.data);
     }
 
-    const endDate = date;
-    let dates = [endDate];
-
-    if (range === '5d') {
-      const [y, m, d] = endDate.split('-').map(Number);
-      const dt = new Date(Date.UTC(y, m - 1, d));
-      const days = [];
-
-      while (days.length < 5) {
-        const cur = dt.toISOString().slice(0, 10);
-        if (isTradingDay(cur)) {
-          days.push(cur);
+    function buildDatesForRange(endDateText) {
+      let builtDates = [endDateText];
+      if (range === '5d') {
+        const [y, m, d] = endDateText.split('-').map(Number);
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        const days = [];
+        while (days.length < 5) {
+          const cur = dt.toISOString().slice(0, 10);
+          if (isTradingDay(cur)) {
+            days.push(cur);
+          }
+          dt.setUTCDate(dt.getUTCDate() - 1);
         }
-        dt.setUTCDate(dt.getUTCDate() - 1);
+        builtDates = days.reverse();
       }
-
-      dates = days.reverse();
-    }
-
-    if (range === '1m') {
-      const [y, m, d] = endDate.split('-').map(Number);
-      const end = new Date(Date.UTC(y, m - 1, d));
-      const start = new Date(end);
-      start.setUTCDate(start.getUTCDate() - 30);
-
-      const days = [];
-      const cur = new Date(start);
-      while (cur <= end) {
-        const ymd = cur.toISOString().slice(0, 10);
-        if (isTradingDay(ymd)) {
-          days.push(ymd);
+      if (range === '1m') {
+        const [y, m, d] = endDateText.split('-').map(Number);
+        const end = new Date(Date.UTC(y, m - 1, d));
+        const start = new Date(end);
+        start.setUTCDate(start.getUTCDate() - 30);
+        const days = [];
+        const cur = new Date(start);
+        while (cur <= end) {
+          const ymd = cur.toISOString().slice(0, 10);
+          if (isTradingDay(ymd)) {
+            days.push(ymd);
+          }
+          cur.setUTCDate(cur.getUTCDate() + 1);
         }
-        cur.setUTCDate(cur.getUTCDate() + 1);
+        builtDates = days;
       }
-      dates = days;
+      if (range === '3m') {
+        builtDates = tradingDaysInLastNDays(endDateText, 90);
+      }
+      if (range === '6m') {
+        builtDates = tradingDaysInLastNDays(endDateText, 180);
+      }
+      return builtDates;
     }
 
-    if (range === '3m') {
-      dates = tradingDaysInLastNDays(endDate, 90);
-    }
-    if (range === '6m') {
-      dates = tradingDaysInLastNDays(endDate, 180);
-    }
-
-    const baseCandles = [];
-
-    for (const day of dates) {
+    let dates = buildDatesForRange(endDate);
+    let baseCandles = [];
+    for (let i = 0; i < dates.length; i += 1) {
+      const day = dates[i];
       const dayCandles = await fetchIntradayCandles(symbol, '5m', day);
       baseCandles.push(...dayCandles);
     }
 
     if (baseCandles.length === 0) {
-      return res.status(404).json({
-        error: 'No candles',
+      const fallbackEndDate = previousTradingDay(endDate);
+      let hasFallbackDate = false;
+      if (fallbackEndDate && fallbackEndDate !== endDate) {
+        hasFallbackDate = true;
+      }
+      if (hasFallbackDate) {
+        dates = buildDatesForRange(fallbackEndDate);
+        baseCandles = [];
+        for (let i = 0; i < dates.length; i += 1) {
+          const day = dates[i];
+          const dayCandles = await fetchIntradayCandles(symbol, '5m', day);
+          baseCandles.push(...dayCandles);
+        }
+      }
+    }
+
+    if (baseCandles.length === 0) {
+      if (cached) {
+        return res.json({ ...cached.data, stale: true });
+      }
+      return res.json({
+        symbol,
+        date: endDate,
+        interval,
+        range,
+        dates,
+        candles: [],
+        degraded: true,
+        warnings: ['No candles'],
       });
     }
 
@@ -10949,18 +12682,31 @@ app.get('/api/candles', async (req, res) => {
     res.json(payload);
   } catch (err) {
     const msg = err.message;
-    let status = 502;
-    if (/future|No chart data|No quote data/i.test(msg)) {
-      status = 400;
-    }
     if (cached) {
       return res.json({ ...cached.data, stale: true });
     }
-    res.status(status).json({ error: msg });
+    res.json({
+      symbol,
+      date: endDate,
+      interval,
+      range,
+      dates: [endDate],
+      candles: [],
+      degraded: true,
+      warnings: [msg || 'candles unavailable'],
+    });
   }
 });
 
+try {
+  ensurePersistentDataRoot();
+  console.log(`[state] persistent root ready: ${PERSISTENT_DATA_ROOT_DIR}`);
+} catch (err) {
+  const message = err && err.message ? err.message : String(err);
+  console.warn(`[state] persistent root not writable: ${PERSISTENT_DATA_ROOT_DIR} (${message})`);
+}
 ensureIndexerDir();
+persistedGetLogsChunkSize = readPersistedGetLogsChunkSize();
 ensureIndexerSynced();
 ensureAutoTradeDir();
 ensureAdminDir();
@@ -11037,6 +12783,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running at http://localhost:${PORT}`);
   console.log(`RPC URL: ${HARDHAT_RPC_URL}`);
   console.log(`Deployments file: ${DEPLOYMENTS_FILE}`);
+  console.log(`Persistent data root: ${PERSISTENT_DATA_ROOT_DIR}`);
   console.log(`Signer keys loaded: ${RPC_SIGNERS.size}`);
   console.log(`Autotrade loop enabled: ${ENABLE_AUTOTRADE}`);
   console.log(`Autotrade interval ms: ${AUTOTRADE_POLL_INTERVAL_MS}`);

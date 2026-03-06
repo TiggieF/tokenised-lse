@@ -126,6 +126,18 @@
       background: rgba(148, 163, 184, 0.18);
     }
 
+    .nav a.nav-link-disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      background: rgba(15, 23, 42, 0.35);
+      color: #7c8aa5;
+      pointer-events: none;
+    }
+
+    .nav a.nav-link-disabled:hover {
+      background: rgba(15, 23, 42, 0.35);
+    }
+
     .nav-toggle-btn {
       margin-top: 6px;
       padding: 10px 14px;
@@ -153,6 +165,79 @@
 
     .nav-toggle-btn:hover {
       filter: brightness(1.05);
+    }
+
+    .notification-panel {
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.7);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .notification-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: #cbd5f5;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+    }
+
+    .notification-clear-btn {
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      background: transparent;
+      color: #94a3b8;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.7rem;
+      cursor: pointer;
+    }
+
+    .notification-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+      max-height: 230px;
+      overflow: auto;
+    }
+
+    .notification-item {
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: rgba(10, 17, 30, 0.7);
+    }
+
+    .notification-title {
+      color: #e2e8f0;
+      font-size: 0.76rem;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+
+    .notification-msg {
+      color: #94a3b8;
+      font-size: 0.72rem;
+      line-height: 1.25;
+      word-break: break-word;
+    }
+
+    .notification-time {
+      color: #6b7a91;
+      font-size: 0.66rem;
+      margin-top: 4px;
+    }
+
+    .notification-empty {
+      color: #7c8aa5;
+      font-size: 0.73rem;
     }
     .sidebar footer {
       margin-top: auto;
@@ -342,7 +427,7 @@
         <div class="wallet-text">
           <span class="wallet-label">Wallet</span>
           <span class="wallet-account" id="wallet-account">Not connected</span>
-          <span class="wallet-hint" id="wallet-hint">Click to connect</span>
+          <span class="wallet-hint" id="wallet-hint">Connect wallet to unlock all features</span>
         </div>
       </div>
       <nav class="nav">
@@ -353,9 +438,18 @@
         <a class="nav-link" href="#" data-page="trade">Trade</a>
         <a class="nav-link" href="#" data-page="award">Award</a>
         <a class="nav-link" href="#" data-page="gas">Gas</a>
-        <a id="admin-nav-link" class="nav-link" href="#" data-page="admin">Admin</a>
+        <a id="admin-nav-link" class="nav-link" href="#" data-page="admin" style="display:none;">Admin</a>
         <button id="live-updates-toggle" class="nav-toggle-btn enabled" type="button" style="display:none;">Live updates: Enabled</button>
       </nav>
+      <section class="notification-panel" aria-live="polite">
+        <div class="notification-head">
+          <span>Notifications</span>
+          <button id="notification-clear-btn" class="notification-clear-btn" type="button">Clear</button>
+        </div>
+        <ul id="notification-list" class="notification-list">
+          <li class="notification-empty">No notifications yet</li>
+        </ul>
+      </section>
     </aside>
 
     <main class="content">
@@ -389,12 +483,31 @@
     const adminNavLink = document.getElementById("admin-nav-link");
     const liveUpdatesToggle = document.getElementById("live-updates-toggle");
     const indexTapeTrack = document.getElementById("index-tape-track");
+    const notificationList = document.getElementById("notification-list");
+    const notificationClearBtn = document.getElementById("notification-clear-btn");
     const LAST_PAGE_KEY = "tlse_last_page";
+    const NOTIFY_EVENT_KEY = "tlse:notify";
+    const NOTIFY_STORE_KEY = "tlse:notifications";
+    const NOTIFY_LIMIT = 12;
     const INDEX_TICKER_ROLL_MS = 36000;
     let liveUpdatesEnabled = true;
     let activeEthereumProvider = null;
     let currentWalletAddress = "";
     let adminFeaturesEnabled = false;
+    let shellNotifications = [];
+    const NOTIFY_DUP_WINDOW_MS = 30000;
+    const ORDER_FILL_POLL_MS = 30000;
+    let orderFillPoller = null;
+    let walletOrderNotifyState = {
+      wallet: "",
+      initialized: false,
+      seenFillKeys: new Set(),
+      knownOrderInfoById: new Map(),
+    };
+
+    function hasConnectedWallet() {
+      return typeof currentWalletAddress === "string" && currentWalletAddress.trim().length > 0;
+    }
 
     function findEthereumProvider() {
       const rootProvider = window.ethereum;
@@ -445,12 +558,344 @@
       return "";
     }
 
+    function readNotificationStore() {
+      try {
+        const raw = localStorage.getItem(NOTIFY_STORE_KEY);
+        if (!raw) {
+          return [];
+        }
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) {
+          return [];
+        }
+        return dedupeNotificationRows(parsed);
+      } catch {
+        return [];
+      }
+    }
+
+    function writeNotificationStore(rows) {
+      try {
+        localStorage.setItem(NOTIFY_STORE_KEY, JSON.stringify(rows));
+      } catch {
+      }
+    }
+
+    function formatNotificationTime(timestampMs) {
+      const ms = Number(timestampMs);
+      if (!Number.isFinite(ms) || ms <= 0) {
+        return "";
+      }
+      try {
+        return new Date(ms).toLocaleString();
+      } catch {
+        return "";
+      }
+    }
+
+    function sanitizeNotificationMessage(rawMessage) {
+      let text = rawMessage ? String(rawMessage) : "";
+      text = text.replace(/\s*\|\s*tx\s+0x[a-fA-F0-9]{64}\b/gi, "");
+      text = text.replace(/\btx\s+0x[a-fA-F0-9]{64}\b/gi, "");
+      text = text.replace(/\b0x[a-fA-F0-9]{64}\b/g, "");
+      return text.trim();
+    }
+
+    function buildNotificationFingerprint(input) {
+      const title = input && input.title ? String(input.title).trim().toLowerCase() : "";
+      const message = input && input.message ? String(input.message).trim().toLowerCase() : "";
+      const wallet = input && input.wallet ? String(input.wallet).trim().toLowerCase() : "";
+      return `${title}|${message}|${wallet}`;
+    }
+
+    function dedupeNotificationRows(rows) {
+      const next = [];
+      const idSet = new Set();
+      const fpMap = new Map();
+      for (let i = 0; i < rows.length; i += 1) {
+        const rowRaw = rows[i];
+        if (!rowRaw || typeof rowRaw !== "object") {
+          continue;
+        }
+        const row = {
+          id: rowRaw.id ? String(rowRaw.id) : "",
+          title: rowRaw.title ? String(rowRaw.title) : "Notification",
+          message: sanitizeNotificationMessage(rowRaw.message),
+          wallet: rowRaw.wallet ? String(rowRaw.wallet) : "",
+          timestampMs: Number(rowRaw.timestampMs) || Date.now(),
+        };
+        if (row.id) {
+          if (idSet.has(row.id)) {
+            continue;
+          }
+          idSet.add(row.id);
+        }
+        const fp = buildNotificationFingerprint(row);
+        const prevTs = fpMap.get(fp);
+        if (typeof prevTs === "number") {
+          const diff = Math.abs(row.timestampMs - prevTs);
+          if (diff <= NOTIFY_DUP_WINDOW_MS) {
+            continue;
+          }
+        }
+        fpMap.set(fp, row.timestampMs);
+        next.push(row);
+        if (next.length >= NOTIFY_LIMIT) {
+          break;
+        }
+      }
+      return next;
+    }
+
+    function renderNotifications() {
+      if (!notificationList) {
+        return;
+      }
+      notificationList.innerHTML = "";
+      const visibleRows = [];
+      if (Array.isArray(shellNotifications) && hasConnectedWallet()) {
+        for (let i = 0; i < shellNotifications.length; i += 1) {
+          const row = shellNotifications[i];
+          const wallet = row && row.wallet ? String(row.wallet).toLowerCase() : "";
+          if (wallet && wallet === currentWalletAddress.toLowerCase()) {
+            visibleRows.push(row);
+          }
+        }
+      }
+      if (!Array.isArray(visibleRows) || visibleRows.length === 0) {
+        const empty = document.createElement("li");
+        empty.className = "notification-empty";
+        empty.textContent = "No notifications yet";
+        notificationList.appendChild(empty);
+        return;
+      }
+      for (let i = 0; i < visibleRows.length; i += 1) {
+        const row = visibleRows[i];
+        const item = document.createElement("li");
+        item.className = "notification-item";
+        const title = row.title ? String(row.title) : "Notification";
+        const message = row.message ? String(row.message) : "";
+        const timeText = formatNotificationTime(row.timestampMs);
+        item.innerHTML = `<div class="notification-title">${title}</div><div class="notification-msg">${message}</div><div class="notification-time">${timeText}</div>`;
+        notificationList.appendChild(item);
+      }
+    }
+
+    function refreshNotificationsFromStore() {
+      shellNotifications = readNotificationStore();
+      renderNotifications();
+    }
+
+    function pushShellNotification(input) {
+      if (!input || typeof input !== "object") {
+        return;
+      }
+      const rowIdRaw = input.id ? String(input.id) : "";
+      const row = {
+        id: rowIdRaw,
+        title: input.title ? String(input.title) : "Notification",
+        message: sanitizeNotificationMessage(input.message),
+        wallet: input.wallet ? String(input.wallet) : "",
+        timestampMs: Number(input.timestampMs) || Date.now(),
+      };
+      if (!row.wallet) {
+        return;
+      }
+      if (!hasConnectedWallet()) {
+        return;
+      }
+      if (row.wallet.toLowerCase() !== currentWalletAddress.toLowerCase()) {
+        return;
+      }
+      if (row.id) {
+        for (let i = 0; i < shellNotifications.length; i += 1) {
+          if (String(shellNotifications[i].id || "") === row.id) {
+            return;
+          }
+        }
+      }
+      const fp = buildNotificationFingerprint(row);
+      for (let i = 0; i < shellNotifications.length; i += 1) {
+        const existing = shellNotifications[i];
+        const existingFp = buildNotificationFingerprint(existing);
+        if (existingFp !== fp) {
+          continue;
+        }
+        const existingTs = Number(existing.timestampMs) || 0;
+        const nextTs = Number(row.timestampMs) || 0;
+        const diff = Math.abs(nextTs - existingTs);
+        if (diff <= NOTIFY_DUP_WINDOW_MS) {
+          return;
+        }
+      }
+      shellNotifications.unshift(row);
+      if (shellNotifications.length > NOTIFY_LIMIT) {
+        shellNotifications = shellNotifications.slice(0, NOTIFY_LIMIT);
+      }
+      shellNotifications = dedupeNotificationRows(shellNotifications);
+      writeNotificationStore(shellNotifications);
+      renderNotifications();
+    }
+
+    function toTokenAmountText(weiText) {
+      const value = Number(weiText) / 1e18;
+      if (!Number.isFinite(value)) {
+        return "0.00";
+      }
+      return value.toFixed(2);
+    }
+
+    function resetOrderFillWatcherState(wallet) {
+      walletOrderNotifyState = {
+        wallet: wallet ? String(wallet).toLowerCase() : "",
+        initialized: false,
+        seenFillKeys: new Set(),
+        knownOrderInfoById: new Map(),
+      };
+    }
+
+    async function pollOrderFillNotifications() {
+      if (!hasConnectedWallet()) {
+        return;
+      }
+      const wallet = currentWalletAddress.toLowerCase();
+      if (walletOrderNotifyState.wallet !== wallet) {
+        resetOrderFillWatcherState(wallet);
+      }
+      try {
+        const [ordersRes, fillsRes] = await Promise.all([
+          fetch(`/api/orders/open?wallet=${encodeURIComponent(currentWalletAddress)}`),
+          fetch(`/api/orderbook/fills?wallet=${encodeURIComponent(currentWalletAddress)}&limit=50&fast=1`),
+        ]);
+        if (!ordersRes.ok || !fillsRes.ok) {
+          return;
+        }
+        const ordersData = await ordersRes.json();
+        const fillsData = await fillsRes.json();
+        let openOrders = [];
+        if (Array.isArray(ordersData.orders)) {
+          openOrders = ordersData.orders;
+        }
+        let fills = [];
+        if (Array.isArray(fillsData.fills)) {
+          fills = fillsData.fills;
+        }
+
+        const openById = new Map();
+        for (let i = 0; i < openOrders.length; i += 1) {
+          const order = openOrders[i];
+          const id = Number(order.id);
+          if (!Number.isFinite(id) || id <= 0) {
+            continue;
+          }
+          openById.set(id, order);
+          walletOrderNotifyState.knownOrderInfoById.set(id, {
+            side: String(order.side || "").toUpperCase(),
+            symbol: String(order.symbol || "").toUpperCase(),
+          });
+        }
+
+        if (!walletOrderNotifyState.initialized) {
+          for (let i = 0; i < fills.length; i += 1) {
+            const row = fills[i];
+            const txHash = String(row.txHash || "");
+            const logIndex = Number(row.logIndex || 0);
+            const makerId = Number(row.makerId || 0);
+            const takerId = Number(row.takerId || 0);
+            if (makerId > 0) {
+              walletOrderNotifyState.seenFillKeys.add(`${txHash}:${logIndex}:maker:${makerId}`);
+            }
+            if (takerId > 0) {
+              walletOrderNotifyState.seenFillKeys.add(`${txHash}:${logIndex}:taker:${takerId}`);
+            }
+          }
+          walletOrderNotifyState.initialized = true;
+          return;
+        }
+
+        for (let i = fills.length - 1; i >= 0; i -= 1) {
+          const row = fills[i];
+          const txHash = String(row.txHash || "");
+          const logIndex = Number(row.logIndex || 0);
+          const symbol = String(row.symbol || "").toUpperCase();
+          const priceCents = Number(row.priceCents || 0);
+          const qtyText = toTokenAmountText(String(row.qty || "0"));
+          const makerTrader = String(row.makerTrader || "").toLowerCase();
+          const takerTrader = String(row.takerTrader || "").toLowerCase();
+          const makerId = Number(row.makerId || 0);
+          const takerId = Number(row.takerId || 0);
+          const events = [];
+          if (makerId > 0 && makerTrader === wallet) {
+            events.push({ role: "maker", orderId: makerId });
+          }
+          if (takerId > 0 && takerTrader === wallet) {
+            events.push({ role: "taker", orderId: takerId });
+          }
+          for (let j = 0; j < events.length; j += 1) {
+            const event = events[j];
+            const fillKey = `${txHash}:${logIndex}:${event.role}:${event.orderId}`;
+            if (walletOrderNotifyState.seenFillKeys.has(fillKey)) {
+              continue;
+            }
+            walletOrderNotifyState.seenFillKeys.add(fillKey);
+            const openOrder = openById.get(event.orderId);
+            const known = walletOrderNotifyState.knownOrderInfoById.get(event.orderId);
+            const side = openOrder
+              ? String(openOrder.side || "").toUpperCase()
+              : (known ? known.side : "");
+            const resolvedSymbol = symbol || (openOrder ? String(openOrder.symbol || "").toUpperCase() : (known ? known.symbol : ""));
+            const completionText = openOrder ? "partially completed" : "fully completed";
+            const priceText = Number.isFinite(priceCents) && priceCents > 0 ? `$${(priceCents / 100).toFixed(2)}` : "-";
+            const sideText = side ? `${side} ` : "";
+            pushShellNotification({
+              id: `fill:${fillKey}`,
+              title: `Order ${completionText}`,
+              message: `${resolvedSymbol} ${sideText}order #${event.orderId} ${completionText}: ${qtyText} filled at ${priceText}`,
+              wallet: currentWalletAddress,
+              timestampMs: Number(row.timestampMs) || Date.now(),
+            });
+          }
+        }
+      } catch {
+      }
+    }
+
+    function startOrderFillWatcher() {
+      if (orderFillPoller) {
+        clearInterval(orderFillPoller);
+        orderFillPoller = null;
+      }
+      if (!hasConnectedWallet()) {
+        return;
+      }
+      resetOrderFillWatcherState(currentWalletAddress);
+      pollOrderFillNotifications();
+      orderFillPoller = setInterval(pollOrderFillNotifications, ORDER_FILL_POLL_MS);
+    }
+
     function applyAdminFeatureVisibility() {
       if (adminNavLink) {
-        adminNavLink.style.display = adminFeaturesEnabled ? "inline-flex" : "none";
+        const shouldShowAdmin = adminFeaturesEnabled && hasConnectedWallet();
+        adminNavLink.style.display = shouldShowAdmin ? "inline-flex" : "none";
       }
       if (!adminFeaturesEnabled && pageFrame.title === "Admin") {
         loadPage("markets");
+      }
+    }
+
+    function applyWalletLockedNavigation() {
+      const connected = hasConnectedWallet();
+      for (let i = 0; i < navLinks.length; i++) {
+        const link = navLinks[i];
+        const page = String(link.dataset.page || "");
+        const isMarkets = page === "markets";
+        const isAdmin = page === "admin";
+        const shouldLock = !connected && !isMarkets;
+        const shouldHide = isAdmin && (!connected || !adminFeaturesEnabled);
+        link.classList.toggle("nav-link-disabled", shouldLock);
+        link.setAttribute("aria-disabled", shouldLock ? "true" : "false");
+        link.title = shouldLock ? "Connect wallet to unlock this page" : "";
+        link.style.display = shouldHide ? "none" : "inline-flex";
       }
     }
 
@@ -469,9 +914,10 @@
     }
 
     async function refreshUiPermissions() {
-      if (!currentWalletAddress) {
+      if (!hasConnectedWallet()) {
         adminFeaturesEnabled = false;
         applyAdminFeatureVisibility();
+        applyWalletLockedNavigation();
         return;
       }
       try {
@@ -486,6 +932,7 @@
         adminFeaturesEnabled = false;
       }
       applyAdminFeatureVisibility();
+      applyWalletLockedNavigation();
     }
 
     async function refreshWalletFromProvider() {
@@ -496,7 +943,7 @@
       );
       const account = chooseDisplayAccount(activeEthereumProvider, accounts);
       currentWalletAddress = account;
-      setWalletStatus(true, account);
+      setWalletStatus(hasConnectedWallet(), account);
       await refreshUiPermissions();
     }
 
@@ -516,7 +963,7 @@
       );
       const account = chooseDisplayAccount(activeEthereumProvider, accounts);
       currentWalletAddress = account;
-      setWalletStatus(true, account);
+      setWalletStatus(hasConnectedWallet(), account);
       await refreshUiPermissions();
     }
 
@@ -528,7 +975,7 @@
       } else {
         walletDot.classList.remove("connected");
         walletAccount.textContent = "Not connected";
-        walletHint.textContent = "Click to connect";
+        walletHint.textContent = "Connect wallet to unlock all features";
       }
     }
 
@@ -543,6 +990,9 @@
       let pageToStore = "markets";
       if (page) {
         pageToStore = String(page);
+      }
+      if (!hasConnectedWallet() && pageToStore !== "markets") {
+        pageToStore = "markets";
       }
       if (pageToStore === "admin" && !adminFeaturesEnabled) {
         pageToStore = "markets";
@@ -691,40 +1141,96 @@
       }
     }
 
+    function notifyCurrentPageWalletChanged() {
+      if (!pageFrame || !pageFrame.contentWindow) {
+        return;
+      }
+      pageFrame.contentWindow.postMessage(
+        {
+          type: "WALLET_CHANGED",
+          wallet: currentWalletAddress,
+        },
+        "*"
+      );
+    }
+
     for (let i = 0; i < navLinks.length; i++) {
       const link = navLinks[i];
       link.addEventListener("click", (event) => {
         event.preventDefault();
+        const targetPage = String(link.dataset.page || "");
+        if (!hasConnectedWallet() && targetPage !== "markets") {
+          return;
+        }
         loadPage(link.dataset.page);
       });
     }
+
+    window.addEventListener("storage", (event) => {
+      if (event.key === NOTIFY_EVENT_KEY && event.newValue) {
+        try {
+          const payload = JSON.parse(event.newValue);
+          pushShellNotification(payload);
+        } catch {
+        }
+      }
+      if (event.key === NOTIFY_STORE_KEY) {
+        shellNotifications = readNotificationStore();
+        renderNotifications();
+      }
+    });
+
+    window.addEventListener("message", (event) => {
+      const payload = event.data;
+      if (!payload || payload.type !== "SHELL_NOTIFY") {
+        return;
+      }
+      pushShellNotification(payload.payload || {});
+    });
+
+    notificationClearBtn.addEventListener("click", () => {
+      shellNotifications = [];
+      writeNotificationStore(shellNotifications);
+      renderNotifications();
+    });
 
     (async function () {
       try {
         // connction to wallet and listens for changes
         await refreshWalletFromProvider();
+        startOrderFillWatcher();
+        refreshNotificationsFromStore();
       } catch (err) {
         currentWalletAddress = "";
         setWalletStatus(false);
         await refreshUiPermissions();
+        refreshNotificationsFromStore();
       }
     })();
     activeEthereumProvider.on("accountsChanged", async (accounts) => {
       const account = chooseDisplayAccount(activeEthereumProvider, accounts);
       currentWalletAddress = account;
-      setWalletStatus(true, account);
+      setWalletStatus(hasConnectedWallet(), account);
       await refreshUiPermissions();
-      pageFrame.contentWindow.location.reload();
+      if (!hasConnectedWallet()) {
+        loadPage("markets");
+      }
+      startOrderFillWatcher();
+      refreshNotificationsFromStore();
+      notifyCurrentPageWalletChanged();
     });
     walletStatus.addEventListener("click", async () => {
       try {
         await reconnectWalletInteractive();
         await refreshUiPermissions();
-        pageFrame.contentWindow.location.reload();
+        startOrderFillWatcher();
+        refreshNotificationsFromStore();
+        notifyCurrentPageWalletChanged();
       } catch (err) {
         currentWalletAddress = "";
         setWalletStatus(false);
         await refreshUiPermissions();
+        refreshNotificationsFromStore();
       }
     });
     let startPage = localStorage.getItem(LAST_PAGE_KEY);
@@ -733,6 +1239,18 @@
     }
     loadPage(startPage);
     applyAdminFeatureVisibility();
+    applyWalletLockedNavigation();
+    shellNotifications = readNotificationStore();
+    renderNotifications();
+
+    window.addEventListener("focus", () => {
+      refreshNotificationsFromStore();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        refreshNotificationsFromStore();
+      }
+    });
 
     liveUpdatesToggle.addEventListener("click", () => {
       // Control moved to Admin page.

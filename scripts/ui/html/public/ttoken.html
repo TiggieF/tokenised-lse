@@ -185,6 +185,8 @@
     let equityAmount = 100;
     // default amount
     let currentAccount = "";
+    const SYMBOLS_SIGNAL_KEY = "tlse:symbols:refresh";
+    let lastSymbolsSignal = "";
 
     let listedStocks = [];
 
@@ -249,112 +251,58 @@
       return "";
     }
 
-    equityMinusBtn.addEventListener("click", function () {
-      let nextValue = equityAmount - STEP;
-      if (nextValue < 100) {
-        nextValue = 100;
-      }
-      equityAmount = nextValue;
-      renderEquityAmount();
-    });
-
-    equityPlusBtn.addEventListener("click", function () {
-      equityAmount += STEP;
-      renderEquityAmount();
-    });
-
-    async function airdrop() {
+    function signalPortfolioRefresh(reason) {
       try {
-        // ttoken mint api call
-        setStatus("Submitting airdrop");
-        const rawAmount = amountInput.value;
-        const parsedAmount = Number(rawAmount);
-        const ttokenAddressRes = await fetch("/api/ttoken-address");
-        const ttokenAddressData = await ttokenAddressRes.json();
-        const ttokenAddress = ttokenAddressData.address;
-        const res = await fetch("/api/ttoken/mint", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ to: currentAccount, amount: parsedAmount }),
-        });
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          let message = "Airdrop failed";
-          if (data && data.error) {
-            message = String(data.error);
-          }
-          throw new Error(message);
-        }
-
-        let txHash = "";
-        if (data.txHash) {
-          txHash = data.txHash;
-        }
-        if (txHash.length > 0) {
-          setStatus(`Airdrop sent: ${txHash}`);
-        } else {
-          setStatus("Airdrop sent: submitted");
-        }
-        importHint.style.display = "block";
-        importHint.textContent = `token address: ${ttokenAddress}`;
-      } catch (err) {
-        let message = "";
-        if (err.message) {
-          message = err.message;
-        }
-        setStatus(message, "error");
+        localStorage.setItem("tlse:portfolio:refresh", JSON.stringify({
+          reason: String(reason || "mint_update"),
+          wallet: currentAccount,
+          timestampMs: Date.now(),
+        }));
+      } catch {
       }
     }
 
-    airdropBtn.addEventListener("click", airdrop);
-
-    mintEquityBtn.addEventListener("click", async function () {
+    function signalShellNotification(title, message) {
+      const timestampMs = Date.now();
+      const payload = {
+        id: `mint:${currentAccount || ""}:${timestampMs}:${String(title || "")}`,
+        title: String(title || "Notification"),
+        message: String(message || ""),
+        wallet: currentAccount,
+        timestampMs,
+      };
       try {
-        // mint on click
-        setEquityStatus("Creating & minting equity");
-        const selectedName = equitySymbol.value;
-        const res = await fetch("/api/equity/create-mint", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            symbol: equitySymbol.value,
-            name: `${selectedName} Equity`,
-            to: currentAccount,
-            amount: equityAmount,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          let message = "Mint failed";
-          if (data && data.error) {
-            message = String(data.error);
-          }
-          throw new Error(message);
-        }
-        let mintHash = "";
-        if (data.mintTx) {
-          mintHash = data.mintTx;
-        }
-        if (!mintHash && data.txHash) {
-          mintHash = data.txHash;
-        }
-        setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value} Tx: ${mintHash}`);
-        equityImportHint.style.display = "block";
-        equityImportHint.textContent = `${equitySymbol.value} address: ${data.tokenAddress}`;
-      } catch (err) {
-        let message = "";
-        if (err.message) {
-          message = err.message;
-        }
-        setEquityStatus(message, "error");
+        localStorage.setItem("tlse:notify", JSON.stringify(payload));
+      } catch {
       }
-    });
+      if (window.parent && window.parent !== window) {
+        try {
+          window.parent.postMessage({ type: "SHELL_NOTIFY", payload }, "*");
+        } catch {
+        }
+      }
+    }
 
-    (async function () {
-      // on load get account and balance
-      renderEquityAmount();
+    function signalSymbolsRefresh(reason, symbol) {
       try {
-        const listingsRes = await fetch("/api/registry/listings");
+        const payload = JSON.stringify({
+          reason: String(reason || "symbols_update"),
+          symbol: String(symbol || "").toUpperCase(),
+          timestampMs: Date.now(),
+        });
+        localStorage.setItem(SYMBOLS_SIGNAL_KEY, payload);
+        lastSymbolsSignal = payload;
+      } catch {
+      }
+    }
+
+    async function loadListedStocks(forceFresh = true) {
+      try {
+        let listingsUrl = "/api/registry/listings";
+        if (forceFresh) {
+          listingsUrl = "/api/registry/listings?noCache=1";
+        }
+        const listingsRes = await fetch(listingsUrl);
         const listingsData = await listingsRes.json();
         let listings = [];
         if (Array.isArray(listingsData.listings)) {
@@ -380,6 +328,138 @@
         opt.textContent = stock.symbol;
         equitySymbol.appendChild(opt);
       }
+    }
+
+    equityMinusBtn.addEventListener("click", function () {
+      let nextValue = equityAmount - STEP;
+      if (nextValue < 100) {
+        nextValue = 100;
+      }
+      equityAmount = nextValue;
+      renderEquityAmount();
+    });
+
+    equityPlusBtn.addEventListener("click", function () {
+      equityAmount += STEP;
+      renderEquityAmount();
+    });
+
+    async function airdrop() {
+      try {
+        // ttoken mint api call
+        setStatus("Submitting airdrop");
+        const rawAmount = amountInput.value;
+        const parsedAmount = Number(rawAmount);
+        const ttokenAddressRes = await fetch("/api/ttoken-address");
+        const ttokenAddressData = await ttokenAddressRes.json();
+        const ttokenAddress = ttokenAddressData.address;
+        const res = await fetch("/api/ttoken/mint?waitReceipt=1", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ to: currentAccount, amount: parsedAmount }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          let message = "Airdrop failed";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
+
+        let txHash = "";
+        if (data.txHash) {
+          txHash = data.txHash;
+        }
+        let mintStatus = "submitted";
+        if (data && data.status) {
+          mintStatus = String(data.status);
+        }
+        if (txHash.length > 0) {
+          setStatus(`Airdrop sent: ${txHash}`);
+        } else {
+          setStatus("Airdrop sent: submitted");
+        }
+        if (mintStatus === "confirmed") {
+          signalShellNotification("TToken mint completed", `${parsedAmount} TToken minted`);
+        } else {
+          signalShellNotification("TToken mint submitted", `${parsedAmount} TToken mint submitted`);
+        }
+        signalPortfolioRefresh("ttoken_airdrop");
+        importHint.style.display = "block";
+        importHint.textContent = `token address: ${ttokenAddress}`;
+      } catch (err) {
+        let message = "";
+        if (err.message) {
+          message = err.message;
+        }
+        setStatus(message, "error");
+      }
+    }
+
+    airdropBtn.addEventListener("click", airdrop);
+
+    mintEquityBtn.addEventListener("click", async function () {
+      try {
+        // mint on click
+        setEquityStatus("Creating & minting equity");
+        const selectedName = equitySymbol.value;
+        const res = await fetch("/api/equity/create-mint?waitReceipt=1", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol: equitySymbol.value,
+            name: `${selectedName} Equity`,
+            to: currentAccount,
+            amount: equityAmount,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          let message = "Mint failed";
+          if (data && data.error) {
+            message = String(data.error);
+          }
+          throw new Error(message);
+        }
+        let mintHash = "";
+        if (data.mintTx) {
+          mintHash = data.mintTx;
+        }
+        if (!mintHash && data.txHash) {
+          mintHash = data.txHash;
+        }
+        let mintStatus = "submitted";
+        if (data && data.status) {
+          mintStatus = String(data.status);
+        }
+        if (mintStatus === "confirmed") {
+          signalShellNotification("Equity mint completed", `${equitySymbol.value} qty ${equityAmount}`);
+        } else {
+          signalShellNotification("Equity mint submitted", `${equitySymbol.value} qty ${equityAmount}`);
+        }
+        signalSymbolsRefresh("equity_mint", equitySymbol.value);
+        signalPortfolioRefresh("equity_mint");
+        if (mintStatus === "confirmed") {
+          setEquityStatus(`Minted ${equityAmount} ${equitySymbol.value} Tx: ${mintHash}`);
+        } else {
+          setEquityStatus(`Submitted ${equityAmount} ${equitySymbol.value} Tx: ${mintHash}`);
+        }
+        equityImportHint.style.display = "block";
+        equityImportHint.textContent = `${equitySymbol.value} address: ${data.tokenAddress}`;
+      } catch (err) {
+        let message = "";
+        if (err.message) {
+          message = err.message;
+        }
+        setEquityStatus(message, "error");
+      }
+    });
+
+    (async function () {
+      // on load get account and balance
+      renderEquityAmount();
+      await loadListedStocks();
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",
@@ -389,6 +469,16 @@
     })();
     window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
+    });
+    window.addEventListener("storage", async function (event) {
+      if (event.key !== SYMBOLS_SIGNAL_KEY) {
+        return;
+      }
+      if (!event.newValue || event.newValue === lastSymbolsSignal) {
+        return;
+      }
+      lastSymbolsSignal = event.newValue;
+      await loadListedStocks(true);
     });
   </script>
 </body>
