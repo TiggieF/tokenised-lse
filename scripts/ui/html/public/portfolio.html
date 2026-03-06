@@ -1027,7 +1027,7 @@
       let last = null;
       for (let i = 0; i < attempts; i += 1) {
         if (externalSignal && externalSignal.aborted) {
-          throw new Error("aborted");
+          return null;
         }
         try {
           const result = await fetchJsonWithTimeout(url, timeoutMs, externalSignal);
@@ -1035,7 +1035,11 @@
           if (result.res && result.res.ok && result.data && !result.data.error) {
             return result;
           }
-        } catch {
+        } catch (err) {
+          const message = String((err && err.message) || "");
+          if (message === "aborted" || message === "AbortError") {
+            return null;
+          }
         }
         if (i < attempts - 1) {
           const waitMs = 400 * (i + 1);

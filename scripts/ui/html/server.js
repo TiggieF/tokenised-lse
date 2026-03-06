@@ -409,6 +409,16 @@ const INDEXER_STALE_ALLOW_MS = (() => {
   }
   return 10000;
 })();
+const INDEXER_MAX_SYNC_BLOCKS_PER_RUN = (() => {
+  const raw = Number(process.env.INDEXER_MAX_SYNC_BLOCKS_PER_RUN || '');
+  if (Number.isFinite(raw) && raw >= 1) {
+    return Math.floor(raw);
+  }
+  if (NETWORK_NAME === 'sepolia') {
+    return 3000;
+  }
+  return 15000;
+})();
 const LISTINGS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
 const LEVERAGED_PRODUCTS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 15000 : 5000;
 const PORTFOLIO_HOLDINGS_CACHE_TTL_MS = NETWORK_NAME === 'sepolia' ? 5000 : 2000;
@@ -2967,6 +2977,14 @@ async function ensureIndexerSynced() {
         processedLogs: 0,
       };
     }
+    let syncEndBlock = latestBlock;
+    const maxSyncBlocks = INDEXER_MAX_SYNC_BLOCKS_PER_RUN;
+    if (Number.isFinite(maxSyncBlocks) && maxSyncBlocks >= 1) {
+      const cappedEnd = startBlock + maxSyncBlocks - 1;
+      if (cappedEnd < syncEndBlock) {
+        syncEndBlock = cappedEnd;
+      }
+    }
 
     const topics = [
       ethers.id('OrderPlaced(uint256,address,address,uint8,uint256,uint256)'),
@@ -2976,7 +2994,7 @@ async function ensureIndexerSynced() {
     const logs = await getLogsChunked({
       address: orderBookAddr,
       topics: [topics],
-    }, startBlock, latestBlock);
+    }, startBlock, syncEndBlock);
     logs.sort((a, b) => {
       const blockA = Number(a.blockNumber);
       const blockB = Number(b.blockNumber);
@@ -3021,7 +3039,7 @@ async function ensureIndexerSynced() {
       leveragedLogs = await getLogsChunked({
         address: leveragedRouterAddress,
         topics: [leveragedTopics],
-      }, startBlock, latestBlock);
+      }, startBlock, syncEndBlock);
       leveragedLogs.sort((a, b) => {
         const blockA = Number(a.blockNumber);
         const blockB = Number(b.blockNumber);
@@ -3040,7 +3058,7 @@ async function ensureIndexerSynced() {
         const part = await getLogsChunked({
           address: token,
           topics: [transferTopic],
-        }, startBlock, latestBlock);
+        }, startBlock, syncEndBlock);
         transferLogs.push(...part);
       }
       transferLogs.sort((a, b) => {
@@ -3400,7 +3418,7 @@ async function ensureIndexerSynced() {
       }
     }
 
-    state.lastIndexedBlock = latestBlock;
+    state.lastIndexedBlock = syncEndBlock;
     state.latestKnownBlock = latestBlock;
     state.lastSyncAtMs = Date.now();
 
@@ -3415,7 +3433,8 @@ async function ensureIndexerSynced() {
     return {
       synced: true,
       startBlock,
-      latestBlock,
+      latestBlock: syncEndBlock,
+      chainLatestBlock: latestBlock,
       processedLogs: logs.length,
       processedTransfers: transferLogs.length,
       processedLeveragedLogs: leveragedLogs.length,
@@ -7367,7 +7386,17 @@ app.get('/api/orderbook/fills', async (req, res) => {
 
 app.get('/api/indexer/status', async (_req, res) => {
   try {
-    const sync = await ensureIndexerSynced();
+    let sync = null;
+    try {
+      sync = await withTimeout(ensureIndexerSynced(), 4000, 'indexer status timeout');
+    } catch (syncErr) {
+      ensureIndexerSynced().catch(() => {});
+      sync = {
+        synced: false,
+        inProgress: true,
+        error: toUserErrorMessage(syncErr.message),
+      };
+    }
     const snapshot = readIndexerSnapshot();
     const orderIds = [];
     const orderValues = Object.values(snapshot.orders);
@@ -7428,7 +7457,17 @@ app.post('/api/indexer/rebuild', async (_req, res) => {
     writeJsonFile(INDEXER_CASHFLOWS_FILE, []);
     writeJsonFile(INDEXER_TRANSFERS_FILE, []);
     writeJsonFile(INDEXER_LEVERAGED_FILE, []);
-    const sync = await ensureIndexerSynced();
+    let sync = null;
+    try {
+      sync = await withTimeout(ensureIndexerSynced(), 5000, 'indexer rebuild timeout');
+    } catch (syncErr) {
+      ensureIndexerSynced().catch(() => {});
+      sync = {
+        synced: false,
+        inProgress: true,
+        error: toUserErrorMessage(syncErr.message),
+      };
+    }
     const snapshot = readIndexerSnapshot();
     const orderIds = [];
     const orderValues = Object.values(snapshot.orders);
