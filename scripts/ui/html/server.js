@@ -4635,7 +4635,10 @@ async function buildPortfolioPositions(snapshot, wallet, deployments, options) {
     }
     let unmatchedCostWei = 0n;
     if (unmatchedQtyWei > 0n) {
-      const unmatchedCostCents = getStableUnmatchedCostCents(snapshot, listing.symbol, usedQty, usedCostWei);
+      let unmatchedCostCents = getStableUnmatchedCostCents(snapshot, listing.symbol, usedQty, usedCostWei);
+      if (!(unmatchedCostCents > 0) && Number(valuation.priceCents) > 0) {
+        unmatchedCostCents = Number(valuation.priceCents);
+      }
       if (unmatchedCostCents > 0) {
         unmatchedCostWei = quoteAmountWei(unmatchedQtyWei, unmatchedCostCents);
       }
