@@ -24,7 +24,7 @@ const fmpDetailsCache = new Map();
 const FMP_DETAILS_TTL_MS = 30000;
 const fmpIndexTickerCache = new Map();
 const FMP_INDEX_TTL_MS = 2000;
-const FMP_INDEX_SNAPSHOT_TTL_MS = 10000;
+const FMP_INDEX_SNAPSHOT_TTL_MS = 2000;
 const INDEXER_SYNC_INTERVAL_MS = 5000;
 // fmp caches
 let FMP_API_KEY = 'TNQATNqowKe9Owu1zL9QurgZCXx9Q1BS';
@@ -8074,16 +8074,35 @@ app.get('/api/txs', async (req, res) => {
       includeFills = true;
     }
     if (includeFills) {
+      const walletLower = wallet.toLowerCase();
       for (const fill of fills) {
+        let makerTrader = '';
+        if (fill.makerTrader) {
+          makerTrader = String(fill.makerTrader).toLowerCase();
+        }
+        let takerTrader = '';
+        if (fill.takerTrader) {
+          takerTrader = String(fill.takerTrader).toLowerCase();
+        }
+        let isWalletInvolved = false;
+        if (makerTrader === walletLower) {
+          isWalletInvolved = true;
+        }
+        if (takerTrader === walletLower) {
+          isWalletInvolved = true;
+        }
+        if (!isWalletInvolved) {
+          continue;
+        }
         let side = '';
         if (fill.side) {
           side = String(fill.side).toUpperCase();
-        } else if (fill.makerTrader === wallet) {
+        } else if (makerTrader === walletLower) {
           const makerOrder = orders[String(fill.makerId)];
           if (makerOrder && makerOrder.side) {
             side = makerOrder.side;
           }
-        } else if (fill.takerTrader === wallet) {
+        } else if (takerTrader === walletLower) {
           const takerOrder = orders[String(fill.takerId)];
           if (takerOrder && takerOrder.side) {
             side = takerOrder.side;

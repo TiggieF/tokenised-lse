@@ -1455,7 +1455,7 @@
       if (!livePollingEnabled) {
         return;
       }
-      livePoller = setInterval(loadLivePrice, 10000);
+      livePoller = setInterval(loadLivePrice, 2000);
       liveTicker = setInterval(renderLiveUpdated, 1000);
     }
 
