@@ -77,6 +77,19 @@
       border: 1px solid rgba(16, 20, 24, 0.08);
     }
 
+    .summary-card-button {
+      cursor: pointer;
+      text-align: left;
+      width: 100%;
+      font-family: inherit;
+      color: inherit;
+    }
+
+    .summary-card-button:hover {
+      border-color: rgba(27, 139, 139, 0.45);
+      box-shadow: 0 6px 18px rgba(16, 20, 24, 0.08);
+    }
+
     .summary-label {
       font-size: 11px;
       color: var(--muted);
@@ -631,8 +644,19 @@
       ];
       summaryGrid.innerHTML = "";
       for (const [label, value] of cards) {
-        const card = document.createElement("div");
-        card.className = "summary-card";
+        let card = null;
+        if (label === "Cash") {
+          card = document.createElement("button");
+          card.type = "button";
+          card.className = "summary-card summary-card-button";
+          card.title = "Open cashflow statement";
+          card.addEventListener("click", function () {
+            window.location.href = "/transactions.html?type=CASHFLOW&from=portfolio_cash";
+          });
+        } else {
+          card = document.createElement("div");
+          card.className = "summary-card";
+        }
         card.innerHTML = `<div class="summary-label">${label}</div><div class="summary-value">${value}</div>`;
         summaryGrid.appendChild(card);
       }

@@ -238,6 +238,7 @@ const registryListInterface = new ethers.Interface([
 ]);
 const orderBookInterface = new ethers.Interface([
   'function placeLimitOrder(address equityToken, uint8 side, uint256 price, uint256 qty) returns (uint256)',
+  'function buyExactQuote(address equityToken, uint256 quoteWei, uint256 maxPriceCents) returns (uint256 qtyBoughtWei, uint256 quoteSpentWei)',
   'function cancelOrder(uint256 orderId)',
   'function getBuyOrders(address equityToken) view returns (tuple(uint256 id,address trader,uint8 side,uint256 price,uint256 qty,uint256 remaining,bool active)[])',
   'function getSellOrders(address equityToken) view returns (tuple(uint256 id,address trader,uint8 side,uint256 price,uint256 qty,uint256 remaining,bool active)[])',
@@ -4007,6 +4008,78 @@ function quoteAmountWei(qtyWei, priceCents) {
   return (BigInt(qtyWei) * BigInt(priceCents)) / 100n;
 }
 
+function estimateBuyQuoteFromSellOrders(sellOrders, takerWallet, qtyWei) {
+  const targetQtyWei = BigInt(qtyWei);
+  const taker = normalizeAddress(takerWallet);
+  const rows = [];
+  for (let i = 0; i < sellOrders.length; i += 1) {
+    const row = sellOrders[i];
+    if (row.active !== true) {
+      continue;
+    }
+    const remainingWei = BigInt(row.remaining.toString());
+    if (remainingWei <= 0n) {
+      continue;
+    }
+    const maker = normalizeAddress(row.trader);
+    if (maker && maker === taker) {
+      continue;
+    }
+    rows.push({
+      id: Number(row.id),
+      trader: maker,
+      priceCents: Number(row.price),
+      remainingWei,
+    });
+  }
+  rows.sort((a, b) => {
+    if (a.priceCents !== b.priceCents) {
+      return a.priceCents - b.priceCents;
+    }
+    return a.id - b.id;
+  });
+
+  let remainingQtyWei = targetQtyWei;
+  let requiredQuoteWei = 0n;
+  let filledQtyWei = 0n;
+  const levelsUsed = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    if (remainingQtyWei <= 0n) {
+      break;
+    }
+    const row = rows[i];
+    let consumeWei = row.remainingWei;
+    if (consumeWei > remainingQtyWei) {
+      consumeWei = remainingQtyWei;
+    }
+    if (consumeWei <= 0n) {
+      continue;
+    }
+    const quoteWei = quoteAmountWei(consumeWei, row.priceCents);
+    requiredQuoteWei += quoteWei;
+    filledQtyWei += consumeWei;
+    remainingQtyWei -= consumeWei;
+    levelsUsed.push({
+      orderId: row.id,
+      priceCents: row.priceCents,
+      qtyWei: consumeWei.toString(),
+      quoteWei: quoteWei.toString(),
+    });
+  }
+
+  let estimatedAvgPriceCents = 0;
+  if (filledQtyWei > 0n) {
+    estimatedAvgPriceCents = Number((requiredQuoteWei * 100n) / filledQtyWei);
+  }
+  return {
+    requiredQuoteWei,
+    filledQtyWei,
+    remainingQtyWei,
+    estimatedAvgPriceCents,
+    levelsUsed,
+  };
+}
+
 function getStableUnmatchedCostCents(snapshot, symbol, usedQty, usedCostWei) {
   if (usedQty > 0n && usedCostWei > 0n) {
     const avgKnown = Number((usedCostWei * 100n) / usedQty);
@@ -7525,6 +7598,102 @@ app.post('/api/orderbook/limit', async (req, res) => {
     res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
+
+app.post('/api/orderbook/buy-market-qty', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const symbol = String(body.symbol || '').toUpperCase();
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol is required' });
+    }
+    const ensurePriceResult = await ensureOnchainPriceForSymbol(symbol);
+    if (!ensurePriceResult.ok) {
+      return res.status(400).json({ error: ensurePriceResult.error });
+    }
+    const symbolLifecycle = getSymbolLifecycleStatus(symbol);
+    if (symbolLifecycle === 'FROZEN' || symbolLifecycle === 'DELISTED') {
+      return res.status(400).json({ error: `symbol ${symbol} is ${symbolLifecycle}` });
+    }
+    const qty = Number(body.qty);
+    if (!Number.isFinite(qty)) {
+      return res.status(400).json({ error: 'qty must be a number' });
+    }
+    if (!Number.isInteger(qty)) {
+      return res.status(400).json({ error: 'qty must be a whole number' });
+    }
+    if (qty < MIN_STOCK_QTY_UNITS) {
+      return res.status(400).json({ error: `qty must be at least ${MIN_STOCK_QTY_UNITS}` });
+    }
+    if (qty % MIN_STOCK_QTY_UNITS !== 0) {
+      return res.status(400).json({ error: `qty must be in steps of ${MIN_STOCK_QTY_UNITS}` });
+    }
+
+    const from = normalizeAddress(String(body.from || body.wallet || ''));
+    if (!from) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    const clientSign = wantsClientSign(body);
+    if (!clientSign) {
+      return res.status(400).json({ error: 'clientSign is required' });
+    }
+
+    const deployments = loadDeployments();
+    const registryAddr = deployments.listingsRegistry;
+    const orderBookAddr = deployments.orderBookDex;
+    const ttokenAddr = normalizeAddress(getTTokenAddressFromDeployments());
+    if (!orderBookAddr || !ttokenAddr || !registryAddr) {
+      return res.status(500).json({ error: 'deployments missing required contracts' });
+    }
+
+    const tokenAddr = await getListingBySymbol(registryAddr, symbol);
+    if (!tokenAddr || tokenAddr === ethers.ZeroAddress) {
+      return res.status(404).json({ error: 'symbol is not listed' });
+    }
+    const qtyWei = BigInt(qty) * (10n ** 18n);
+
+    const sellData = orderBookInterface.encodeFunctionData('getSellOrders', [tokenAddr]);
+    const sellResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: sellData }, 'latest']);
+    const [sellOrders] = orderBookInterface.decodeFunctionResult('getSellOrders', sellResult);
+    const estimate = estimateBuyQuoteFromSellOrders(sellOrders, from, qtyWei);
+    if (estimate.filledQtyWei < qtyWei) {
+      return res.status(400).json({ error: 'not enough sell liquidity for requested quantity' });
+    }
+    if (estimate.requiredQuoteWei <= 0n) {
+      return res.status(400).json({ error: 'not enough sell liquidity for requested quantity' });
+    }
+
+    const balanceData = equityTokenInterface.encodeFunctionData('balanceOf', [from]);
+    const balanceResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: balanceData }, 'latest']);
+    const [balanceRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balanceResult);
+    const balanceWei = BigInt(balanceRaw.toString());
+    if (balanceWei < estimate.requiredQuoteWei) {
+      return res.status(400).json({ error: 'fund not enough' });
+    }
+
+    const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, estimate.requiredQuoteWei]);
+    const buyData = orderBookInterface.encodeFunctionData('buyExactQuote', [
+      tokenAddr,
+      estimate.requiredQuoteWei,
+      ethers.MaxUint256,
+    ]);
+    return res.json({
+      clientSign: true,
+      txs: [
+        { label: 'approve_ttoken', from, to: ttokenAddr, data: approveData },
+        { label: 'buy_market_qty', from, to: orderBookAddr, data: buyData },
+      ],
+      preview: {
+        symbol,
+        qtyWei: qtyWei.toString(),
+        requiredQuoteWei: estimate.requiredQuoteWei.toString(),
+        estimatedAvgPriceCents: estimate.estimatedAvgPriceCents,
+        levelsUsed: estimate.levelsUsed,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
+  }
+});
 // get orders that's no filled
 app.get('/api/orderbook/open', async (_req, res) => {
   try {
@@ -8024,6 +8193,40 @@ app.get('/api/txs', async (req, res) => {
     const snapshot = readIndexerSnapshot();
     const { orders, fills, cancellations, cashflows, transfers, leveragedEvents } = snapshot;
     const items = [];
+    const walletLower = wallet.toLowerCase();
+    const fillByTxHashForWallet = new Map();
+    for (let i = 0; i < fills.length; i += 1) {
+      const fill = fills[i];
+      const txHash = String(fill.txHash || '').toLowerCase();
+      if (!txHash) {
+        continue;
+      }
+      const makerTrader = String(fill.makerTrader || '').toLowerCase();
+      const takerTrader = String(fill.takerTrader || '').toLowerCase();
+      if (makerTrader !== walletLower && takerTrader !== walletLower) {
+        continue;
+      }
+      let side = '';
+      if (fill.side) {
+        side = String(fill.side).toUpperCase();
+      } else if (makerTrader === walletLower) {
+        const makerOrder = orders[String(fill.makerId)];
+        if (makerOrder && makerOrder.side) {
+          side = String(makerOrder.side).toUpperCase();
+        }
+      } else if (takerTrader === walletLower) {
+        const takerOrder = orders[String(fill.takerId)];
+        if (takerOrder && takerOrder.side) {
+          side = String(takerOrder.side).toUpperCase();
+        }
+      }
+      fillByTxHashForWallet.set(txHash, {
+        symbol: String(fill.symbol || ''),
+        side,
+        priceCents: Number(fill.priceCents || 0),
+        qtyWei: String(fill.qtyWei || '0'),
+      });
+    }
 
     let includeOrders = false;
     if (type === 'ALL') {
@@ -8085,7 +8288,6 @@ app.get('/api/txs', async (req, res) => {
       includeFills = true;
     }
     if (includeFills) {
-      const walletLower = wallet.toLowerCase();
       for (const fill of fills) {
         let makerTrader = '';
         if (fill.makerTrader) {
@@ -8149,6 +8351,8 @@ app.get('/api/txs', async (req, res) => {
     if (includeCashflow) {
       for (const cashflow of cashflows) {
         if (cashflow.wallet === wallet) {
+          const txHashLower = String(cashflow.txHash || '').toLowerCase();
+          const fillContext = fillByTxHashForWallet.get(txHashLower);
           items.push({
             kind: 'CASHFLOW',
             wallet,
@@ -8160,6 +8364,10 @@ app.get('/api/txs', async (req, res) => {
             txHash: cashflow.txHash,
             blockNumber: cashflow.blockNumber,
             timestampMs: cashflow.timestampMs,
+            fillSymbol: fillContext ? fillContext.symbol : '',
+            fillSide: fillContext ? fillContext.side : '',
+            fillQtyWei: fillContext ? fillContext.qtyWei : '0',
+            fillPriceCents: fillContext ? fillContext.priceCents : 0,
           });
         }
       }
