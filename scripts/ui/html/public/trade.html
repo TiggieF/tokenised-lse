@@ -562,6 +562,14 @@
       return wei.toString();
     }
 
+    function weiToSharesText(wei, decimals = 2) {
+      const value = Number(wei) / 1e18;
+      if (!Number.isFinite(value)) {
+        return "0.00";
+      }
+      return value.toFixed(decimals);
+    }
+
     function getSelectedLeveragedSymbol() {
       const raw = String(levProduct.value).toUpperCase();
       levSymbolEl.textContent = raw;
@@ -991,8 +999,8 @@
       if (text.includes("fund not enough")) {
         return "fund not enough";
       }
-      if (text.includes("not enough sell liquidity for requested quantity")) {
-        return "not enough sell liquidity for requested quantity";
+      if (text.includes("no token on sale")) {
+        return "no token on sale";
       }
       if (text.includes("0xe450d38c") || text.includes("ERC20InsufficientBalance")) {
         return "Insufficient TToken balance";
@@ -1099,17 +1107,34 @@
         showStatus(instantBuyStatus, "Submitting");
         const result = await placeMarketBuyByQty(symbol, qty);
         signalPortfolioRefresh("instant_buy_submitted");
-        signalShellNotification("Buy submitted", `${symbol} qty ${qty}`);
+        let notifyMessage = `${symbol} qty ${qty}`;
         if (result.preview && result.preview.requiredQuoteWei) {
           const quoteApprox = Number(result.preview.requiredQuoteWei) / 1e18;
-          showStatus(instantBuyStatus, `Buy submitted ~${quoteApprox.toFixed(2)} TToken`);
+          const requestedQtyWei = String(result.preview.requestedQtyWei || "0");
+          const filledQtyWei = String(result.preview.filledQtyWei || result.preview.qtyWei || "0");
+          if (BigInt(filledQtyWei) < BigInt(requestedQtyWei)) {
+            notifyMessage = `${symbol} max available ${weiToSharesText(filledQtyWei)} shares`;
+            showStatus(
+              instantBuyStatus,
+              `Buy completed max available ${weiToSharesText(filledQtyWei)} shares (~${quoteApprox.toFixed(2)} TToken)`
+            );
+          } else {
+            notifyMessage = `${symbol} qty ${qty} (~${quoteApprox.toFixed(2)} TToken)`;
+            showStatus(instantBuyStatus, `Buy completed ~${quoteApprox.toFixed(2)} TToken`);
+          }
         } else {
-          showStatus(instantBuyStatus, "Buy submitted");
+          showStatus(instantBuyStatus, "Buy completed");
         }
+        signalShellNotification("Buy completed", notifyMessage);
         await loadTTokenBalance();
       } catch (err) {
-        showNoFunds(instantBuyStatus);
-        instantBuyStatus.textContent = prettyTxError(err.message);
+        const message = prettyTxError(err.message);
+        if (message === "fund not enough") {
+          showNoFunds(instantBuyStatus);
+          return;
+        }
+        instantBuyStatus.textContent = message;
+        instantBuyStatus.classList.add("status-error");
       }
     });
 
