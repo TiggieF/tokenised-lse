@@ -143,6 +143,7 @@
 <body>
   <div class="panel">
     <h1 class="title">Award</h1>
+    <div id="award-status" class="status">Ready</div>
     <div id="award-suspended" class="status error" style="display:none; font-size:18px; margin-bottom:16px;">Award suspended</div>
     <div id="award-active">
     <div class="cards">
@@ -194,9 +195,10 @@
     const leadingVolumeEl = document.getElementById("leading-volume");
     const leaderboardBody = document.getElementById("leaderboard-body");
     const claimableBody = document.getElementById("claimable-body");
+    const awardStatusEl = document.getElementById("award-status");
     const awardSuspendedEl = document.getElementById("award-suspended");
     const awardActiveEl = document.getElementById("award-active");
-    const CLAIMABLE_WINDOW = 50;
+    const CLAIMABLE_WINDOW = 5000;
     let currentWallet = "";
     let currentEpochId = 0;
     let liveSecondsRemaining = 0;
@@ -207,6 +209,15 @@
     let statusTicker = null;
     const AWARD_REFRESH_INTERVAL_MS = 60000;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+
+    function setAwardStatus(message, isError = false) {
+      awardStatusEl.textContent = String(message || "");
+      if (isError) {
+        awardStatusEl.classList.add("error");
+      } else {
+        awardStatusEl.classList.remove("error");
+      }
+    }
 
     async function ensureSepoliaNetwork() {
       const chainId = String(await window.ethereum.request({ method: "eth_chainId" })).toLowerCase();
@@ -334,9 +345,14 @@
         if (data.clientSign && Array.isArray(data.txs)) {
           await submitPreparedTxs(data.txs);
         }
+        setAwardStatus(`Claim submitted for epoch ${epochId}`);
         await refreshAward();
       } catch (err) {
-        
+        let message = "Claim failed";
+        if (err && err.message) {
+          message = err.message;
+        }
+        setAwardStatus(message, true);
       }
     }
 
@@ -432,6 +448,7 @@
         if (claimableRes && (!claimableRes.ok || claimableData.error)) {
           throw new Error(claimableData.error);
         }
+        setAwardStatus("Ready");
         let maxQtyWei = "0";
         if (leaderboardData.maxQtyWei) {
           maxQtyWei = leaderboardData.maxQtyWei;
@@ -499,6 +516,11 @@
         }
       } catch (err) {
         windowSecondsRemainingEl.textContent = "0";
+        let message = "Award refresh failed";
+        if (err && err.message) {
+          message = err.message;
+        }
+        setAwardStatus(message, true);
       }
     }
 
