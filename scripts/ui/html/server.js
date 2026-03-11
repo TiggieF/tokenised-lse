@@ -4027,11 +4027,11 @@ function estimateBuyQuoteFromSellOrders(sellOrders, takerWallet, qtyWei) {
     }
     rows.push({
       id: Number(row.id),
-      trader: maker,
       priceCents: Number(row.price),
       remainingWei,
     });
   }
+
   rows.sort((a, b) => {
     if (a.priceCents !== b.priceCents) {
       return a.priceCents - b.priceCents;
@@ -7632,8 +7632,7 @@ app.post('/api/orderbook/buy-market-qty', async (req, res) => {
     if (!from) {
       return res.status(400).json({ error: 'wallet is required' });
     }
-    const clientSign = wantsClientSign(body);
-    if (!clientSign) {
+    if (!wantsClientSign(body)) {
       return res.status(400).json({ error: 'clientSign is required' });
     }
 
@@ -7641,24 +7640,20 @@ app.post('/api/orderbook/buy-market-qty', async (req, res) => {
     const registryAddr = deployments.listingsRegistry;
     const orderBookAddr = deployments.orderBookDex;
     const ttokenAddr = normalizeAddress(getTTokenAddressFromDeployments());
-    if (!orderBookAddr || !ttokenAddr || !registryAddr) {
+    if (!registryAddr || !orderBookAddr || !ttokenAddr) {
       return res.status(500).json({ error: 'deployments missing required contracts' });
     }
-
     const tokenAddr = await getListingBySymbol(registryAddr, symbol);
     if (!tokenAddr || tokenAddr === ethers.ZeroAddress) {
       return res.status(404).json({ error: 'symbol is not listed' });
     }
-    const qtyWei = BigInt(qty) * (10n ** 18n);
 
+    const qtyWei = BigInt(qty) * (10n ** 18n);
     const sellData = orderBookInterface.encodeFunctionData('getSellOrders', [tokenAddr]);
     const sellResult = await hardhatRpc('eth_call', [{ to: orderBookAddr, data: sellData }, 'latest']);
     const [sellOrders] = orderBookInterface.decodeFunctionResult('getSellOrders', sellResult);
     const estimate = estimateBuyQuoteFromSellOrders(sellOrders, from, qtyWei);
-    if (estimate.filledQtyWei < qtyWei) {
-      return res.status(400).json({ error: 'not enough sell liquidity for requested quantity' });
-    }
-    if (estimate.requiredQuoteWei <= 0n) {
+    if (estimate.filledQtyWei < qtyWei || estimate.requiredQuoteWei <= 0n) {
       return res.status(400).json({ error: 'not enough sell liquidity for requested quantity' });
     }
 
@@ -7676,7 +7671,7 @@ app.post('/api/orderbook/buy-market-qty', async (req, res) => {
       estimate.requiredQuoteWei,
       ethers.MaxUint256,
     ]);
-    return res.json({
+    res.json({
       clientSign: true,
       txs: [
         { label: 'approve_ttoken', from, to: ttokenAddr, data: approveData },
@@ -8288,6 +8283,7 @@ app.get('/api/txs', async (req, res) => {
       includeFills = true;
     }
     if (includeFills) {
+      const walletLower = wallet.toLowerCase();
       for (const fill of fills) {
         let makerTrader = '';
         if (fill.makerTrader) {

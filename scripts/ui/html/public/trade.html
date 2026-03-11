@@ -256,7 +256,8 @@
     <div class="header">
       <h1 class="title">Trade</h1>
       <div class="mode-tabs">
-        <button class="mode-tab active" id="mode-buy" type="button">Buy</button>
+        <button class="mode-tab active" id="mode-limit" type="button">Limit Order</button>
+        <button class="mode-tab" id="mode-instant" type="button">Buy</button>
       </div>
     </div>
     <div id="admin-lock-banner" class="admin-lock"></div>
@@ -280,20 +281,40 @@
 
       <div class="stack-col">
         <div class="card" id="buy-panel">
-          <h2 class="card-title">Buy Quantity</h2>
+          <h2 class="card-title">Order size</h2>
+          <div class="input-row">
+            <label>Limit price (USD)</label>
+            <input type="text" id="buy-price" value="$395.00" />
+          </div>
           <div class="qty">
             <button type="button">-</button>
             <div>10</div>
             <button type="button">+</button>
           </div>
           <div class="stat-row">
-            <span class="muted">Estimated spend</span>
+            <span class="muted">Estimated cost</span>
             <strong id="estimated-cost">1,000 TToken</strong>
           </div>
           <div class="actions">
-            <button class="btn btn-buy" id="buy-btn" type="button">Buy</button>
+            <button class="btn btn-buy" id="buy-btn" type="button">Limit Order</button>
           </div>
           <div class="muted-note" id="buy-status">Ready</div>
+        </div>
+        <div class="card panel-hidden" id="instant-buy-panel">
+          <h2 class="card-title">Buy Quantity</h2>
+          <div class="qty">
+            <button type="button" id="instant-buy-minus">-</button>
+            <div id="instant-buy-qty">10</div>
+            <button type="button" id="instant-buy-plus">+</button>
+          </div>
+          <div class="stat-row">
+            <span class="muted">Estimated spend</span>
+            <strong id="instant-estimated-cost">-</strong>
+          </div>
+          <div class="actions">
+            <button class="btn btn-buy" id="instant-buy-btn" type="button">Buy</button>
+          </div>
+          <div class="muted-note" id="instant-buy-status">Ready</div>
         </div>
       </div>
     </div>
@@ -332,6 +353,11 @@
     const tradeWallet = document.getElementById("trade-wallet");
     const tradeSymbol = document.getElementById("trade-symbol");
     const tradeLivePriceEl = document.getElementById("trade-live-price");
+    const modeLimitTab = document.getElementById("mode-limit");
+    const modeInstantTab = document.getElementById("mode-instant");
+    const limitBuyPanel = document.getElementById("buy-panel");
+    const instantBuyPanel = document.getElementById("instant-buy-panel");
+    const buyPriceInput = document.getElementById("buy-price");
     const buyStatus = document.getElementById("buy-status");
     const buyButton = document.getElementById("buy-btn");
     const ttokenBalanceEl = document.getElementById("ttoken-balance");
@@ -341,6 +367,12 @@
     const buyMinusButton = buyQtyButtons[0];
     const buyPlusButton = buyQtyButtons[1];
     const estimatedCostEl = document.getElementById("estimated-cost");
+    const instantBuyMinusButton = document.getElementById("instant-buy-minus");
+    const instantBuyPlusButton = document.getElementById("instant-buy-plus");
+    const instantBuyQtyValue = document.getElementById("instant-buy-qty");
+    const instantEstimatedCostEl = document.getElementById("instant-estimated-cost");
+    const instantBuyButton = document.getElementById("instant-buy-btn");
+    const instantBuyStatus = document.getElementById("instant-buy-status");
     const adminLockBanner = document.getElementById("admin-lock-banner");
     const levProduct = document.getElementById("lev-product");
     const levSymbolEl = document.getElementById("lev-symbol");
@@ -354,6 +386,7 @@
     let ttokenBalance = 0;
     let leveragedProducts = [];
     let lifecycleBySymbol = {};
+    let buyLimitPriceTouched = false;
     let latestLivePrice = 0;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
     const SYMBOLS_SIGNAL_KEY = "tlse:symbols:refresh";
@@ -527,26 +560,6 @@
       }
       const wei = (BigInt(whole) * 1000000000000000000n) + BigInt(fraction);
       return wei.toString();
-    }
-
-    function formatTokenFromWei(valueWei, maxDecimals) {
-      let decimals = Number(maxDecimals);
-      if (!Number.isFinite(decimals) || decimals < 0) {
-        decimals = 2;
-      }
-      try {
-        const raw = String(valueWei);
-        const padded = raw.padStart(19, "0");
-        const whole = padded.slice(0, -18).replace(/^0+/, "") || "0";
-        let fraction = padded.slice(-18, -18 + decimals);
-        fraction = fraction.replace(/0+$/, "");
-        if (!fraction) {
-          return whole;
-        }
-        return `${whole}.${fraction}`;
-      } catch {
-        return "0";
-      }
     }
 
     function getSelectedLeveragedSymbol() {
@@ -730,6 +743,23 @@
       return String(tradeSymbol.value).toUpperCase();
     }
 
+    function setTradeMode(mode) {
+      const useInstant = mode === "instant";
+      modeLimitTab.classList.toggle("active", !useInstant);
+      modeInstantTab.classList.toggle("active", useInstant);
+      limitBuyPanel.classList.toggle("panel-hidden", useInstant);
+      instantBuyPanel.classList.toggle("panel-hidden", !useInstant);
+      updateLifecycleUi();
+    }
+
+    function parsePriceToCents(text) {
+      const cleaned = text.replace("$", "").replace(",", "");
+      const value = Number(cleaned);
+      const cents = Math.round(value * 100);
+      return cents;
+      // cent
+    }
+
     function updateBuyQty(nextValue) {
       let value = Number(nextValue);
       if (Number.isNaN(value)) {
@@ -743,16 +773,52 @@
       updateEstimatedCost(value);
     }
 
-    function updateEstimatedCost(qty) {
-      if (!(latestLivePrice > 0)) {
-        estimatedCostEl.textContent = "-";
-        return;
+    function updateInstantBuyQty(nextValue) {
+      let value = Number(nextValue);
+      if (Number.isNaN(value)) {
+        value = 10;
       }
-      const totalCost = latestLivePrice * Number(qty);
-      estimatedCostEl.textContent = totalCost.toLocaleString("en-US", {
+      value = Math.floor(value);
+      if (value < 10) {
+        value = 10;
+      }
+      instantBuyQtyValue.textContent = String(value);
+      updateInstantEstimatedCost(value);
+    }
+
+    function updateEstimatedCost(qty) {
+      // estimated price update
+      const priceText = buyPriceInput.value;
+      const priceCents = parsePriceToCents(priceText);
+      const priceDollars = priceCents / 100;
+      const totalCost = priceDollars * qty;
+      const costText = totalCost.toLocaleString("en-US", {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
-      }) + " TToken";
+      });
+      estimatedCostEl.textContent = `${costText} TToken`;
+    }
+
+    function applyDefaultLimitPricesFromLive(livePrice) {
+      const formattedLivePrice = formatUsd(livePrice);
+      if (!buyLimitPriceTouched) {
+        buyPriceInput.value = formattedLivePrice;
+      }
+      const currentValue = Number(buyQtyValue.textContent);
+      updateEstimatedCost(currentValue);
+    }
+
+    function updateInstantEstimatedCost(qty) {
+      if (!Number.isFinite(latestLivePrice) || latestLivePrice <= 0) {
+        instantEstimatedCostEl.textContent = "-";
+        return;
+      }
+      const totalCost = Number(qty) * latestLivePrice;
+      const costText = totalCost.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+      instantEstimatedCostEl.textContent = `${costText} TToken`;
     }
 
     async function loadTradeLivePrice() {
@@ -772,18 +838,51 @@
         if (Number.isFinite(livePrice) && livePrice > 0) {
           latestLivePrice = livePrice;
           tradeLivePriceEl.textContent = formatUsd(livePrice);
-          const currentValue = Number(buyQtyValue.textContent);
-          updateEstimatedCost(currentValue);
+          applyDefaultLimitPricesFromLive(livePrice);
+          updateInstantEstimatedCost(Number(instantBuyQtyValue.textContent));
           return;
         }
         latestLivePrice = 0;
-        estimatedCostEl.textContent = "-";
+        updateInstantEstimatedCost(Number(instantBuyQtyValue.textContent));
         tradeLivePriceEl.textContent = "-";
       } catch {
         latestLivePrice = 0;
-        estimatedCostEl.textContent = "-";
+        updateInstantEstimatedCost(Number(instantBuyQtyValue.textContent));
         tradeLivePriceEl.textContent = "-";
       }
+    }
+
+    async function placeLimitOrder(symbol, side, priceCents, qty) {
+      // limit order through api
+      const payload = {
+        symbol: symbol,
+        side: side,
+        priceCents: priceCents,
+        qty: qty,
+        from: currentAccount,
+      };
+      const res = await fetch(
+        "/api/orderbook/limit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, clientSign: true }),
+        }
+      );
+      const data = await res.json(
+      );
+      if (!res.ok) {
+        let message = "Order failed";
+        if (data && data.error) {
+          message = String(data.error);
+        }
+        throw new Error(message);
+      }
+      if (data.clientSign && Array.isArray(data.txs)) {
+        const txHash = await submitPreparedTxs(data.txs);
+        return txHash;
+      }
+      return data.txHash;
     }
 
     async function placeMarketBuyByQty(symbol, qty) {
@@ -800,8 +899,7 @@
           body: JSON.stringify({ ...payload, clientSign: true }),
         }
       );
-      const data = await res.json(
-      );
+      const data = await res.json();
       if (!res.ok) {
         let message = "Order failed";
         if (data && data.error) {
@@ -809,12 +907,15 @@
         }
         throw new Error(message);
       }
-      let txHash = data.txHash;
       if (data.clientSign && Array.isArray(data.txs)) {
-        txHash = await submitPreparedTxs(data.txs);
+        const txHash = await submitPreparedTxs(data.txs);
+        return {
+          txHash,
+          preview: data.preview || null,
+        };
       }
       return {
-        txHash,
+        txHash: data.txHash,
         preview: data.preview || null,
       };
     }
@@ -850,11 +951,8 @@
         adminLockBanner.style.display = "none";
         adminLockBanner.textContent = "";
       }
-      let displayMode = "block";
-      if (blocked) {
-        displayMode = "none";
-      }
-      buyButton.style.display = displayMode;
+      buyButton.disabled = blocked;
+      instantBuyButton.disabled = blocked;
     }
 
     async function loadLifecycleStatuses() {
@@ -879,6 +977,7 @@
     function showNoFunds(messageEl) {
       messageEl.textContent = "fund not enough";
       messageEl.classList.add("status-error");
+      // error for no fund
     }
 
     function showStatus(messageEl, message) {
@@ -889,6 +988,12 @@
 
     function prettyTxError(rawMessage) {
       const text = String(rawMessage);
+      if (text.includes("fund not enough")) {
+        return "fund not enough";
+      }
+      if (text.includes("not enough sell liquidity for requested quantity")) {
+        return "not enough sell liquidity for requested quantity";
+      }
       if (text.includes("0xe450d38c") || text.includes("ERC20InsufficientBalance")) {
         return "Insufficient TToken balance";
       }
@@ -896,10 +1001,6 @@
         return "TToken allowance is not enough";
       }
       switch (true) {
-        case text.includes("fund not enough"):
-          return "fund not enough";
-        case text.includes("not enough sell liquidity for requested quantity"):
-          return "not enough sell liquidity for requested quantity";
         case text.includes("price unavailable"):
           return "Base price unavailable please wait for oracle update";
         case text.includes("product not found"):
@@ -922,7 +1023,61 @@
       updateBuyQty(nextValue);
     });
 
+    instantBuyMinusButton.addEventListener("click", function () {
+      const currentValue = Number(instantBuyQtyValue.textContent);
+      const nextValue = currentValue - 10;
+      updateInstantBuyQty(nextValue);
+    });
+
+    instantBuyPlusButton.addEventListener("click", function () {
+      const currentValue = Number(instantBuyQtyValue.textContent);
+      const nextValue = currentValue + 10;
+      updateInstantBuyQty(nextValue);
+    });
+
+    buyPriceInput.addEventListener("input", function () {
+      buyLimitPriceTouched = true;
+      const currentValue = Number(buyQtyValue.textContent);
+      updateEstimatedCost(currentValue);
+    });
+
     buyButton.addEventListener("click", async () => {
+      const symbol = getSymbolFromSelect();
+      const lifecycleRow = lifecycleBySymbol[String(symbol).toUpperCase()];
+      let lifecycle = "ACTIVE";
+      if (lifecycleRow && lifecycleRow.status) {
+        lifecycle = String(lifecycleRow.status).toUpperCase();
+      }
+      let blocked = false;
+      if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+        blocked = true;
+      }
+      if (blocked) {
+        showNoFunds(buyStatus);
+        buyStatus.textContent = `${symbol} is ${lifecycle} by admin`;
+        return;
+      }
+      if (!symbol) {
+        showNoFunds(buyStatus);
+        buyStatus.textContent = "No listed symbol selected";
+        return;
+      }
+      const priceCents = parsePriceToCents(buyPriceInput.value);
+      const qtyText = document.querySelector("#buy-panel .qty div").textContent;
+      const qty = Number(qtyText);
+      if (qty > ttokenBalance) {
+        showNoFunds(buyStatus);
+        return;
+      }
+      showStatus(buyStatus, "Submitting");
+      await placeLimitOrder(symbol, "BUY", priceCents, qty);
+      signalPortfolioRefresh("buy_order_placed");
+      signalShellNotification("Limit order submitted", `${symbol} qty ${qty} at $${(priceCents / 100).toFixed(2)}`);
+      showStatus(buyStatus, "Order placed");
+      await loadTTokenBalance();
+    });
+
+    instantBuyButton.addEventListener("click", async () => {
       try {
         const symbol = getSymbolFromSelect();
         const lifecycleRow = lifecycleBySymbol[String(symbol).toUpperCase()];
@@ -930,42 +1085,40 @@
         if (lifecycleRow && lifecycleRow.status) {
           lifecycle = String(lifecycleRow.status).toUpperCase();
         }
-        let blocked = false;
         if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
-          blocked = true;
-        }
-        if (blocked) {
-          showNoFunds(buyStatus);
-          buyStatus.textContent = `${symbol} is ${lifecycle} by admin`;
+          showNoFunds(instantBuyStatus);
+          instantBuyStatus.textContent = `${symbol} is ${lifecycle} by admin`;
           return;
         }
         if (!symbol) {
-          showNoFunds(buyStatus);
-          buyStatus.textContent = "No listed symbol selected";
+          showNoFunds(instantBuyStatus);
+          instantBuyStatus.textContent = "No listed symbol selected";
           return;
         }
-        const qtyText = document.querySelector("#buy-panel .qty div").textContent;
-        const qty = Number(qtyText);
-        showStatus(buyStatus, "Submitting");
+        const qty = Number(instantBuyQtyValue.textContent);
+        showStatus(instantBuyStatus, "Submitting");
         const result = await placeMarketBuyByQty(symbol, qty);
-        signalPortfolioRefresh("buy_order_placed");
-        signalShellNotification("Buy completed", `${symbol} qty ${qty}`);
+        signalPortfolioRefresh("instant_buy_submitted");
+        signalShellNotification("Buy submitted", `${symbol} qty ${qty}`);
         if (result.preview && result.preview.requiredQuoteWei) {
-          const quoteApprox = formatTokenFromWei(result.preview.requiredQuoteWei, 4);
-          showStatus(buyStatus, `Bought qty ${qty}, spend ~${quoteApprox} TToken`);
+          const quoteApprox = Number(result.preview.requiredQuoteWei) / 1e18;
+          showStatus(instantBuyStatus, `Buy submitted ~${quoteApprox.toFixed(2)} TToken`);
         } else {
-          showStatus(buyStatus, "Buy completed");
+          showStatus(instantBuyStatus, "Buy submitted");
         }
         await loadTTokenBalance();
       } catch (err) {
-        const message = prettyTxError(err.message);
-        if (message === "fund not enough") {
-          showNoFunds(buyStatus);
-          return;
-        }
-        buyStatus.textContent = message;
-        buyStatus.classList.add("status-error");
+        showNoFunds(instantBuyStatus);
+        instantBuyStatus.textContent = prettyTxError(err.message);
       }
+    });
+
+    modeLimitTab.addEventListener("click", function () {
+      setTradeMode("limit");
+    });
+
+    modeInstantTab.addEventListener("click", function () {
+      setTradeMode("instant");
     });
 
     levProduct.addEventListener("change", async function () {
@@ -974,6 +1127,7 @@
       await loadLeveragedBaseQuote();
     });
     tradeSymbol.addEventListener("change", function () {
+      buyLimitPriceTouched = false;
       updateLifecycleUi();
       loadTradeLivePrice();
     });
@@ -1028,6 +1182,8 @@
       await loadLeveragedProducts();
       await loadTradeLivePrice();
       updateBuyQty(10);
+      updateInstantBuyQty(10);
+      setTradeMode("limit");
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",
