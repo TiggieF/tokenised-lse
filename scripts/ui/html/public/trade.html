@@ -256,9 +256,7 @@
     <div class="header">
       <h1 class="title">Trade</h1>
       <div class="mode-tabs">
-        <button class="mode-tab active" id="mode-buy" type="button">Buy</button>
-        <button class="mode-tab" id="mode-auto" type="button">Auto Buy</button>
-        <!-- auto buy placeholder -->
+        <button class="mode-tab active" id="mode-buy" type="button">Limit Order</button>
       </div>
     </div>
     <div id="admin-lock-banner" class="admin-lock"></div>
@@ -297,29 +295,10 @@
             <strong id="estimated-cost">1,000 TToken</strong>
           </div>
           <div class="actions">
-            <button class="btn btn-buy" id="buy-btn" type="button">Buy</button>
+            <button class="btn btn-buy" id="buy-btn" type="button">Limit Order</button>
           </div>
           <div class="muted-note" id="buy-status">Ready</div>
         </div>
-
-        <div class="card panel-hidden" id="auto-panel">
-          <h2 class="card-title">Auto buy setup</h2>
-          <div class="input-row">
-            <label>Target buy price</label>
-            <input type="text" id="auto-price" value="$395.00" />
-          </div>
-          <div class="input-row">
-            <label>Order size</label>
-            <input type="text" id="auto-qty" value="10" />
-          </div>
-        <div class="actions">
-            <button class="btn btn-buy" id="auto-buy-btn" type="button">Set Auto Buy</button>
-          </div>
-          <div class="muted-note" id="auto-rules-title">Auto buy rules</div>
-          <div id="auto-rules-list"></div>
-          <div class="muted-note" id="auto-status">Ready</div>
-        </div>
-
       </div>
     </div>
 
@@ -367,12 +346,7 @@
     const buyMinusButton = buyQtyButtons[0];
     const buyPlusButton = buyQtyButtons[1];
     const estimatedCostEl = document.getElementById("estimated-cost");
-    const autoPriceInput = document.getElementById("auto-price");
-    const autoQtyInput = document.getElementById("auto-qty");
-    const autoStatus = document.getElementById("auto-status");
-    const autoButton = document.getElementById("auto-buy-btn");
     const adminLockBanner = document.getElementById("admin-lock-banner");
-    const autoRulesList = document.getElementById("auto-rules-list");
     const levProduct = document.getElementById("lev-product");
     const levSymbolEl = document.getElementById("lev-symbol");
     const levBasePriceEl = document.getElementById("lev-base-price");
@@ -386,7 +360,6 @@
     let leveragedProducts = [];
     let lifecycleBySymbol = {};
     let buyLimitPriceTouched = false;
-    let autoLimitPriceTouched = false;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
     const SYMBOLS_SIGNAL_KEY = "tlse:symbols:refresh";
     let lastSymbolsSignal = "";
@@ -781,9 +754,6 @@
       if (!buyLimitPriceTouched) {
         buyPriceInput.value = formattedLivePrice;
       }
-      if (!autoLimitPriceTouched) {
-        autoPriceInput.value = formattedLivePrice;
-      }
       const currentValue = Number(buyQtyValue.textContent);
       updateEstimatedCost(currentValue);
     }
@@ -859,54 +829,6 @@
       ttokenBalanceEl.textContent = balance.toFixed(2);
     }
 
-    async function loadAutoRules() {
-      if (!currentAccount) {
-        autoRulesList.innerHTML = "";
-        return;
-      }
-      try {
-        const res = await fetch(`/api/autotrade/rules?wallet=${encodeURIComponent(currentAccount)}`);
-        const data = await res.json();
-        autoRulesList.innerHTML = "";
-        let rows = [];
-        if (Array.isArray(data.rules)) {
-          rows = data.rules;
-        }
-        for (let i = 0; i < rows.length; i += 1) {
-          const row = rows[i];
-          let isBuySide = false;
-          if (String(row.side).toUpperCase() === "BUY") {
-            isBuySide = true;
-          }
-          if (isBuySide) {
-            const block = document.createElement("div");
-            block.className = "stat-row";
-            const left = document.createElement("span");
-            left.className = "muted";
-            left.textContent = `${row.symbol} <= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
-            const rightButton = document.createElement("button");
-            rightButton.className = "btn btn-buy";
-            rightButton.style.padding = "6px 10px";
-            rightButton.style.fontSize = "12px";
-            rightButton.textContent = "Cancel";
-            rightButton.addEventListener("click", async () => {
-              await fetch("/api/autotrade/rules/delete", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ ruleId: row.id }),
-              });
-              await loadAutoRules();
-            });
-            block.appendChild(left);
-            block.appendChild(rightButton);
-            autoRulesList.appendChild(block);
-          }
-        }
-      } catch {
-        autoRulesList.innerHTML = "";
-      }
-    }
-
     function updateLifecycleUi() {
       const symbol = getSymbolFromSelect();
       const row = lifecycleBySymbol[String(symbol).toUpperCase()];
@@ -930,7 +852,6 @@
         displayMode = "none";
       }
       buyButton.style.display = displayMode;
-      autoButton.style.display = displayMode;
     }
 
     async function loadLifecycleStatuses() {
@@ -983,34 +904,6 @@
       return text;
     }
 
-    const modeBuy = document.getElementById("mode-buy");
-    const modeAuto = document.getElementById("mode-auto");
-    const buyPanel = document.getElementById("buy-panel");
-    const autoPanel = document.getElementById("auto-panel");
-
-    function setMode(mode) {
-      // switches between buy and auto panel
-      if (mode === "buy") {
-        modeBuy.classList.add("active");
-        modeAuto.classList.remove("active");
-        buyPanel.classList.remove("panel-hidden");
-        autoPanel.classList.add("panel-hidden");
-        return;
-      }
-      modeBuy.classList.remove("active");
-      modeAuto.classList.add("active");
-      buyPanel.classList.add("panel-hidden");
-      autoPanel.classList.remove("panel-hidden");
-    }
-
-    modeBuy.addEventListener("click", function () {
-      setMode("buy");
-    });
-
-    modeAuto.addEventListener("click", function () {
-      setMode("auto");
-    });
-
     buyMinusButton.addEventListener("click", function () {
       const currentValue = Number(buyQtyValue.textContent);
       const nextValue = currentValue - 10;
@@ -1027,9 +920,6 @@
       buyLimitPriceTouched = true;
       const currentValue = Number(buyQtyValue.textContent);
       updateEstimatedCost(currentValue);
-    });
-    autoPriceInput.addEventListener("input", function () {
-      autoLimitPriceTouched = true;
     });
 
     buyButton.addEventListener("click", async () => {
@@ -1063,72 +953,9 @@
       showStatus(buyStatus, "Submitting");
       await placeLimitOrder(symbol, "BUY", priceCents, qty);
       signalPortfolioRefresh("buy_order_placed");
-      signalShellNotification("Buy order submitted", `${symbol} qty ${qty} at $${(priceCents / 100).toFixed(2)}`);
+      signalShellNotification("Limit order submitted", `${symbol} qty ${qty} at $${(priceCents / 100).toFixed(2)}`);
       showStatus(buyStatus, "Order placed");
       await loadTTokenBalance();
-    });
-
-    autoButton.addEventListener("click", async () => {
-      const symbol = getSymbolFromSelect();
-      const lifecycleRow = lifecycleBySymbol[String(symbol).toUpperCase()];
-      let lifecycle = "ACTIVE";
-      if (lifecycleRow && lifecycleRow.status) {
-        lifecycle = String(lifecycleRow.status).toUpperCase();
-      }
-      let blocked = false;
-      if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
-        blocked = true;
-      }
-      if (blocked) {
-        showNoFunds(autoStatus);
-        autoStatus.textContent = `${symbol} is ${lifecycle} by admin`;
-        return;
-      }
-      if (!symbol) {
-        showNoFunds(autoStatus);
-        autoStatus.textContent = "No listed symbol selected";
-        return;
-      }
-      const priceCents = parsePriceToCents(autoPriceInput.value);
-      const autoQtyRaw = Number(autoQtyInput.value);
-      const autoQty = Math.floor(autoQtyRaw);
-      if (!Number.isFinite(autoQty) || autoQty < 10) {
-        showNoFunds(autoStatus);
-        autoStatus.textContent = "Order size must be at least 10";
-        return;
-      }
-      if (autoQty % 10 !== 0) {
-        showNoFunds(autoStatus);
-        autoStatus.textContent = "Order size must be in steps of 10";
-        return;
-      }
-      const qtyWei = tokenTextToWei(String(autoQty));
-      showStatus(autoStatus, "Submitting");
-      const res = await fetch("/api/autotrade/rules/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          wallet: currentAccount,
-          symbol,
-          side: "BUY",
-          triggerPriceCents: priceCents,
-          qtyWei,
-          maxSlippageBps: 0,
-          enabled: true,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        showNoFunds(autoStatus);
-        let message = "Rule create failed";
-        if (data.error) {
-          message = data.error;
-        }
-        autoStatus.textContent = message;
-        return;
-      }
-      showStatus(autoStatus, "Auto buy rule set");
-      await loadAutoRules();
     });
 
     levProduct.addEventListener("change", async function () {
@@ -1138,7 +965,6 @@
     });
     tradeSymbol.addEventListener("change", function () {
       buyLimitPriceTouched = false;
-      autoLimitPriceTouched = false;
       updateLifecycleUi();
       loadTradeLivePrice();
     });
@@ -1200,13 +1026,11 @@
       );
       setWalletAddress(chooseDisplayAccount(accounts));
       await loadTTokenBalance();
-      await loadAutoRules();
       await loadLeveragedBaseQuote();
     })();
     window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
       loadTTokenBalance();
-      loadAutoRules();
       loadLeveragedBaseQuote();
     });
     window.ethereum.on("chainChanged", function () {
@@ -1214,7 +1038,6 @@
       loadLifecycleStatuses();
       loadTradeLivePrice();
       loadTTokenBalance();
-      loadAutoRules();
       loadLeveragedBaseQuote();
     });
     window.addEventListener("storage", async function (event) {

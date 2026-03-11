@@ -12242,6 +12242,13 @@ app.post('/api/equity/mint', async (req, res) => {
 // create and mint for equity tokens that was not deployed
 app.post('/api/equity/create-mint', async (req, res) => {
   const body = req.body;
+  const wallet = normalizeAddress(String(body.wallet || ''));
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  if (!isAdminWallet(wallet)) {
+    return res.status(403).json({ error: 'admin wallet required' });
+  }
   const symbol = String(body.symbol).toUpperCase();
   const name = String(body.name).trim();
   const to = String(body.to);

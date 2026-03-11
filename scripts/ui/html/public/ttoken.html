@@ -145,7 +145,7 @@
     </div>
   </div>
 
-  <div class="panel" style="margin-top: 24px;">
+  <div class="panel" id="equity-factory-panel" style="margin-top: 24px; display:none;">
     <div class="title">Equity Token Factory</div>
     <div class="center-wrap">
       <div style="display:flex; flex-direction:column; gap: 16px; align-items:center;">
@@ -170,6 +170,7 @@
     const airdropBtn = document.getElementById("airdrop-btn");
     const statusText = document.getElementById("status-text");
     const importHint = document.getElementById("import-hint");
+    const equityFactoryPanel = document.getElementById("equity-factory-panel");
     const equitySymbol = document.getElementById("equity-symbol");
     const equityMinusBtn = document.getElementById("equity-minus-btn");
     const equityPlusBtn = document.getElementById("equity-plus-btn");
@@ -189,6 +190,7 @@
     let lastSymbolsSignal = "";
 
     let listedStocks = [];
+    let equityFactoryVisible = false;
 
     function renderEquityAmount() {
       equityAmountValue.textContent = String(equityAmount);
@@ -297,6 +299,10 @@
     }
 
     async function loadListedStocks(forceFresh = true) {
+      if (!equityFactoryVisible) {
+        equitySymbol.innerHTML = "";
+        return;
+      }
       try {
         let listingsUrl = "/api/registry/listings";
         if (forceFresh) {
@@ -327,6 +333,29 @@
         opt.value = stock.symbol;
         opt.textContent = stock.symbol;
         equitySymbol.appendChild(opt);
+      }
+    }
+
+    async function loadUiPermissions() {
+      if (!currentAccount) {
+        equityFactoryVisible = false;
+        equityFactoryPanel.style.display = "none";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/ui/permissions?wallet=${encodeURIComponent(currentAccount)}`);
+        const data = await res.json();
+        const isAdmin = Boolean(data && data.isAdmin);
+        equityFactoryVisible = isAdmin;
+        if (isAdmin) {
+          equityFactoryPanel.style.display = "block";
+          await loadListedStocks();
+          return;
+        }
+        equityFactoryPanel.style.display = "none";
+      } catch {
+        equityFactoryVisible = false;
+        equityFactoryPanel.style.display = "none";
       }
     }
 
@@ -408,6 +437,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            wallet: currentAccount,
             symbol: equitySymbol.value,
             name: `${selectedName} Equity`,
             to: currentAccount,
@@ -459,16 +489,17 @@
     (async function () {
       // on load get account and balance
       renderEquityAmount();
-      await loadListedStocks();
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",
         }
       );
       setWalletAddress(chooseDisplayAccount(accounts));
+      await loadUiPermissions();
     })();
     window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
+      loadUiPermissions();
     });
     window.addEventListener("storage", async function (event) {
       if (event.key !== SYMBOLS_SIGNAL_KEY) {
