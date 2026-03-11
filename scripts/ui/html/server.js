@@ -7323,7 +7323,15 @@ app.post('/api/ttoken/mint', async (req, res) => {
   if (!recipientValid) {
     return res.status(400).json({ error: 'invalid recipient address' });
   }
-  if (!Number.isFinite(amount) || !(amount > 0)) {
+  const amountIsNumber = Number.isFinite(amount);
+  let invalidAmount = false;
+  if (!amountIsNumber) {
+    invalidAmount = true;
+  }
+  if (!(amount > 0)) {
+    invalidAmount = true;
+  }
+  if (invalidAmount) {
     return res.status(400).json({ error: 'amount must be greater than 0' });
   }
 
@@ -7860,7 +7868,14 @@ app.get('/api/orders/:orderId', async (req, res) => {
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
-  if (!Number.isFinite(orderId) || orderId <= 0) {
+  let invalidOrderId = false;
+  if (!Number.isFinite(orderId)) {
+    invalidOrderId = true;
+  }
+  if (orderId <= 0) {
+    invalidOrderId = true;
+  }
+  if (invalidOrderId) {
     return res.status(400).json({ error: 'invalid order id' });
   }
 
@@ -7868,7 +7883,14 @@ app.get('/api/orders/:orderId', async (req, res) => {
     await waitForIndexerSyncBounded();
     const { orders } = readIndexerSnapshot();
     const order = orders[String(orderId)];
-    if (!order || order.trader !== wallet) {
+    let missingOrder = false;
+    if (!order) {
+      missingOrder = true;
+    }
+    if (order && order.trader !== wallet) {
+      missingOrder = true;
+    }
+    if (missingOrder) {
       return res.status(404).json({ error: 'order not found' });
     }
     res.json({ order });
@@ -7878,7 +7900,10 @@ app.get('/api/orders/:orderId', async (req, res) => {
 });
 
 app.post('/api/orders/cancel', async (req, res) => {
-  const body = req.body || {};
+  let body = {};
+  if (req.body) {
+    body = req.body;
+  }
   let walletRaw = '';
   if (body.wallet) {
     walletRaw = String(body.wallet);
@@ -7888,7 +7913,14 @@ app.post('/api/orders/cancel', async (req, res) => {
   if (!wallet) {
     return res.status(400).json({ error: 'wallet is required' });
   }
-  if (!Number.isFinite(orderId) || orderId <= 0) {
+  let invalidCancelOrderId = false;
+  if (!Number.isFinite(orderId)) {
+    invalidCancelOrderId = true;
+  }
+  if (orderId <= 0) {
+    invalidCancelOrderId = true;
+  }
+  if (invalidCancelOrderId) {
     return res.status(400).json({ error: 'invalid order id' });
   }
 
@@ -7902,7 +7934,18 @@ app.post('/api/orders/cancel', async (req, res) => {
     if (order.trader !== wallet) {
       return res.status(403).json({ error: 'cannot cancel another wallet order' });
     }
-    if (order.status !== 'OPEN' && order.status !== 'PARTIAL') {
+    let isCancellable = false;
+    let openOrPartial = false;
+    if (order.status === 'OPEN') {
+      openOrPartial = true;
+    }
+    if (order.status === 'PARTIAL') {
+      openOrPartial = true;
+    }
+    if (openOrPartial) {
+      isCancellable = true;
+    }
+    if (!isCancellable) {
       return res.status(400).json({ error: 'order is not cancellable' });
     }
 
@@ -8796,7 +8839,14 @@ app.get('/api/dividends/epochs', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let missingEpochTokenAddress = false;
+    if (!tokenAddress) {
+      missingEpochTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingEpochTokenAddress = true;
+    }
+    if (missingEpochTokenAddress) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
 
@@ -8827,7 +8877,10 @@ app.get('/api/dividends/epochs', async (req, res) => {
 
 app.post('/api/dividends/merkle/declare', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     const wallet = normalizeAddress(String(body.wallet || ''));
     if (!wallet) {
       return res.status(400).json({ error: 'wallet is required' });
@@ -8861,7 +8914,17 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
       claims = body.claims;
     }
 
-    if (!symbol || !merkleRoot || !totalEntitledWei) {
+    let hasMissingInput = false;
+    if (!symbol) {
+      hasMissingInput = true;
+    }
+    if (!merkleRoot) {
+      hasMissingInput = true;
+    }
+    if (!totalEntitledWei) {
+      hasMissingInput = true;
+    }
+    if (hasMissingInput) {
       return res.status(400).json({ error: 'symbol, merkleRoot, totalEntitledWei are required' });
     }
     if (!/^0x[a-fA-F0-9]{64}$/.test(merkleRoot)) {
@@ -8880,7 +8943,14 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
     }
 
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let tokenAddressMissing = false;
+    if (!tokenAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddressMissing) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
 
@@ -8960,7 +9030,21 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
       if (Array.isArray(row.proof)) {
         proof = row.proof;
       }
-      if (account && BigInt(amountWei) > 0n && Number.isFinite(leafIndex) && leafIndex >= 0) {
+      let canUseClaim = true;
+      if (!account || !(BigInt(amountWei) > 0n)) {
+        canUseClaim = false;
+      }
+      let invalidLeafIndex = false;
+      if (!Number.isFinite(leafIndex)) {
+        invalidLeafIndex = true;
+      }
+      if (leafIndex < 0) {
+        invalidLeafIndex = true;
+      }
+      if (invalidLeafIndex) {
+        canUseClaim = false;
+      }
+      if (canUseClaim) {
         normalizedClaims.push({
           account,
           amountWei,
@@ -9001,7 +9085,10 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
 
 app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     const wallet = normalizeAddress(String(body.wallet || ''));
     if (!wallet) {
       return res.status(400).json({ error: 'wallet is required' });
@@ -9022,7 +9109,14 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
     if (body.claimsUri) {
       claimsUri = String(body.claimsUri);
     }
-    if (!symbol || !divPerShareText) {
+    let missingDeclareAutoInput = false;
+    if (!symbol) {
+      missingDeclareAutoInput = true;
+    }
+    if (!divPerShareText) {
+      missingDeclareAutoInput = true;
+    }
+    if (missingDeclareAutoInput) {
       return res.status(400).json({ error: 'symbol and divPerShare are required' });
     }
     const divPerShareWei = ethers.parseUnits(divPerShareText, 18);
@@ -9035,7 +9129,14 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
       return res.status(400).json({ error: 'dividends merkle contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let missingTokenAddress = false;
+    if (!tokenAddress) {
+      missingTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingTokenAddress = true;
+    }
+    if (missingTokenAddress) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
 
@@ -9282,7 +9383,14 @@ app.get('/api/dividends/merkle/epochs', async (req, res) => {
 
 app.get('/api/dividends/merkle/tree', async (req, res) => {
   const epochId = Number(req.query.epochId);
-  if (!Number.isFinite(epochId) || epochId <= 0) {
+  let invalidMerkleEpochId = false;
+  if (!Number.isFinite(epochId)) {
+    invalidMerkleEpochId = true;
+  }
+  if (epochId <= 0) {
+    invalidMerkleEpochId = true;
+  }
+  if (invalidMerkleEpochId) {
     return res.status(400).json({ error: 'epochId is required' });
   }
   try {
@@ -9484,7 +9592,10 @@ app.get('/api/dividends/merkle/claimable', async (req, res) => {
 
 app.post('/api/dividends/merkle/claim', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     let walletText = '';
     if (body.wallet) {
       walletText = String(body.wallet);
@@ -9506,16 +9617,40 @@ app.post('/api/dividends/merkle/claim', async (req, res) => {
       proof = body.proof;
     }
 
-    if (!wallet || !account || wallet !== account) {
+    let invalidWalletAccountPair = false;
+    if (!wallet) {
+      invalidWalletAccountPair = true;
+    }
+    if (!account) {
+      invalidWalletAccountPair = true;
+    }
+    if (wallet !== account) {
+      invalidWalletAccountPair = true;
+    }
+    if (invalidWalletAccountPair) {
       return res.status(400).json({ error: 'wallet and account must match and be valid address' });
     }
-    if (!Number.isFinite(epochId) || epochId <= 0) {
+    let invalidClaimEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidClaimEpochId = true;
+    }
+    if (epochId <= 0) {
+      invalidClaimEpochId = true;
+    }
+    if (invalidClaimEpochId) {
       return res.status(400).json({ error: 'epochId must be > 0' });
     }
     if (!(BigInt(amountWei) > 0n)) {
       return res.status(400).json({ error: 'amountWei must be > 0' });
     }
-    if (!Number.isFinite(leafIndex) || leafIndex < 0) {
+    let invalidClaimLeafIndex = false;
+    if (!Number.isFinite(leafIndex)) {
+      invalidClaimLeafIndex = true;
+    }
+    if (leafIndex < 0) {
+      invalidClaimLeafIndex = true;
+    }
+    if (invalidClaimLeafIndex) {
       return res.status(400).json({ error: 'leafIndex must be >= 0' });
     }
 
@@ -9815,7 +9950,14 @@ app.post('/api/dividends/declare', async (req, res) => {
     }
     const symbol = String(body.symbol).toUpperCase();
     const divPerShare = String(body.divPerShare);
-    if (!symbol || !divPerShare) {
+    let missingDeclareInput = false;
+    if (!symbol) {
+      missingDeclareInput = true;
+    }
+    if (!divPerShare) {
+      missingDeclareInput = true;
+    }
+    if (missingDeclareInput) {
       return res.status(400).json({ error: 'symbol and divPerShare are required' });
     }
     const deployments = loadDeployments();
@@ -9823,7 +9965,14 @@ app.post('/api/dividends/declare', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let tokenAddressMissing = false;
+    if (!tokenAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      tokenAddressMissing = true;
+    }
+    if (tokenAddressMissing) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
     const dividendsAddr = deployments.dividends;
@@ -9895,7 +10044,20 @@ app.post('/api/dividends/claim', async (req, res) => {
     const wallet = normalizeAddress(String(body.wallet));
     const symbol = String(body.symbol).toUpperCase();
     const epochId = Number(body.epochId);
-    if (!wallet || !symbol || !Number.isFinite(epochId) || epochId <= 0) {
+    let invalidClaimInput = false;
+    if (!wallet) {
+      invalidClaimInput = true;
+    }
+    if (!symbol) {
+      invalidClaimInput = true;
+    }
+    if (!Number.isFinite(epochId)) {
+      invalidClaimInput = true;
+    }
+    if (epochId <= 0) {
+      invalidClaimInput = true;
+    }
+    if (invalidClaimInput) {
       return res.status(400).json({ error: 'wallet, symbol, epochId are required' });
     }
     const deployments = loadDeployments();
@@ -9903,7 +10065,14 @@ app.post('/api/dividends/claim', async (req, res) => {
       return res.status(400).json({ error: 'dividends contract not deployed' });
     }
     const tokenAddress = await getListingBySymbol(deployments.listingsRegistry, symbol);
-    if (!tokenAddress || tokenAddress === ethers.ZeroAddress) {
+    let missingClaimTokenAddress = false;
+    if (!tokenAddress) {
+      missingClaimTokenAddress = true;
+    }
+    if (tokenAddress === ethers.ZeroAddress) {
+      missingClaimTokenAddress = true;
+    }
+    if (missingClaimTokenAddress) {
       return res.status(404).json({ error: 'symbol not listed' });
     }
     const dividendsAddr = deployments.dividends;
@@ -10189,7 +10358,14 @@ app.get('/api/award/leaderboard', async (req, res) => {
     const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
     const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
     const currentEpoch = Number(currentEpochRaw);
-    if (!Number.isFinite(epochId) || epochId < 0) {
+    let invalidEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidEpochId = true;
+    }
+    if (epochId < 0) {
+      invalidEpochId = true;
+    }
+    if (invalidEpochId) {
       epochId = Math.max(0, currentEpoch - 1);
     }
 
@@ -10307,7 +10483,14 @@ app.post('/api/award/claim', async (req, res) => {
     if (!wallet) {
       return res.status(400).json({ error: 'wallet is required' });
     }
-    if (!Number.isFinite(epochId) || epochId < 0) {
+    let invalidEpochId = false;
+    if (!Number.isFinite(epochId)) {
+      invalidEpochId = true;
+    }
+    if (epochId < 0) {
+      invalidEpochId = true;
+    }
+    if (invalidEpochId) {
       return res.status(400).json({ error: 'epochId is required' });
     }
 
@@ -10467,7 +10650,14 @@ app.post('/api/leveraged/products/create', async (req, res) => {
     }
     const baseSymbol = String(body.baseSymbol).toUpperCase();
     const leverage = Number(body.leverage);
-    if (!baseSymbol || !Number.isFinite(leverage)) {
+    let invalidProductInput = false;
+    if (!baseSymbol) {
+      invalidProductInput = true;
+    }
+    if (!Number.isFinite(leverage)) {
+      invalidProductInput = true;
+    }
+    if (invalidProductInput) {
       return res.status(400).json({ error: 'baseSymbol and leverage are required' });
     }
 
@@ -10564,7 +10754,17 @@ app.post('/api/leveraged/mint', async (req, res) => {
     if (body.minOutWei) {
       minOutWei = BigInt(String(body.minOutWei));
     }
-    if (!wallet || !productSymbol || ttokenInWei <= 0n) {
+    let invalidMintInput = false;
+    if (!wallet) {
+      invalidMintInput = true;
+    }
+    if (!productSymbol) {
+      invalidMintInput = true;
+    }
+    if (ttokenInWei <= 0n) {
+      invalidMintInput = true;
+    }
+    if (invalidMintInput) {
       return res.status(400).json({ error: 'wallet, productSymbol, ttokenInWei are required' });
     }
 
@@ -10572,7 +10772,17 @@ app.post('/api/leveraged/mint', async (req, res) => {
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
     const ttokenAddress = getTTokenAddressFromDeployments();
-    if (!factoryAddress || !routerAddress || !ttokenAddress) {
+    let missingLeveragedDeployment = false;
+    if (!factoryAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (!routerAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (!ttokenAddress) {
+      missingLeveragedDeployment = true;
+    }
+    if (missingLeveragedDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -10580,7 +10790,14 @@ app.post('/api/leveraged/mint', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingProductToken = false;
+    if (!productToken) {
+      missingProductToken = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingProductToken = true;
+    }
+    if (missingProductToken) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -10639,7 +10856,17 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     if (body.minOutWei) {
       minOutWei = BigInt(String(body.minOutWei));
     }
-    if (!wallet || !productSymbol || qtyWei <= 0n) {
+    let invalidUnwindInput = false;
+    if (!wallet) {
+      invalidUnwindInput = true;
+    }
+    if (!productSymbol) {
+      invalidUnwindInput = true;
+    }
+    if (qtyWei <= 0n) {
+      invalidUnwindInput = true;
+    }
+    if (invalidUnwindInput) {
       return res.status(400).json({ error: 'wallet, productSymbol, qtyWei are required' });
     }
 
@@ -10647,7 +10874,17 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
     const ttokenAddress = getTTokenAddressFromDeployments();
-    if (!factoryAddress || !routerAddress || !ttokenAddress) {
+    let missingUnwindDeployment = false;
+    if (!factoryAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (!routerAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (!ttokenAddress) {
+      missingUnwindDeployment = true;
+    }
+    if (missingUnwindDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -10655,7 +10892,14 @@ app.post('/api/leveraged/unwind', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingUnwindProductToken = false;
+    if (!productToken) {
+      missingUnwindProductToken = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingUnwindProductToken = true;
+    }
+    if (missingUnwindProductToken) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -10721,7 +10965,14 @@ app.get('/api/leveraged/quote', async (req, res) => {
     const deployments = loadDeployments();
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
-    if (!factoryAddress || !routerAddress) {
+    let missingQuoteDeployment = false;
+    if (!factoryAddress) {
+      missingQuoteDeployment = true;
+    }
+    if (!routerAddress) {
+      missingQuoteDeployment = true;
+    }
+    if (missingQuoteDeployment) {
       return res.status(400).json({ error: 'leveraged contracts not deployed' });
     }
 
@@ -10729,7 +10980,14 @@ app.get('/api/leveraged/quote', async (req, res) => {
     const lookupResult = await hardhatRpc('eth_call', [{ to: factoryAddress, data: lookupData }, 'latest']);
     const [productTokenRaw] = leveragedFactoryInterface.decodeFunctionResult('getProductBySymbol', lookupResult);
     const productToken = normalizeAddress(productTokenRaw);
-    if (!productToken || productToken === ethers.ZeroAddress) {
+    let missingQuoteProduct = false;
+    if (!productToken) {
+      missingQuoteProduct = true;
+    }
+    if (productToken === ethers.ZeroAddress) {
+      missingQuoteProduct = true;
+    }
+    if (missingQuoteProduct) {
       return res.status(404).json({ error: 'product not found' });
     }
 
@@ -10793,7 +11051,14 @@ app.post('/api/leveraged/price-adjust', async (req, res) => {
     }
     const productSymbol = productSymbolText.toUpperCase();
     const changePct = Number(body.changePct);
-    if (!productSymbol || !Number.isFinite(changePct)) {
+    let invalidPriceAdjustInput = false;
+    if (!productSymbol) {
+      invalidPriceAdjustInput = true;
+    }
+    if (!Number.isFinite(changePct)) {
+      invalidPriceAdjustInput = true;
+    }
+    if (invalidPriceAdjustInput) {
       return res.status(400).json({ error: 'productSymbol and changePct are required' });
     }
 
@@ -10840,7 +11105,14 @@ app.get('/api/leveraged/positions', async (req, res) => {
     const deployments = loadDeployments();
     const factoryAddress = deployments.leveragedTokenFactory;
     const routerAddress = deployments.leveragedProductRouter;
-    if (!factoryAddress || !routerAddress) {
+    let missingPositionsDeployment = false;
+    if (!factoryAddress) {
+      missingPositionsDeployment = true;
+    }
+    if (!routerAddress) {
+      missingPositionsDeployment = true;
+    }
+    if (missingPositionsDeployment) {
       return res.json({ wallet, positions: [] });
     }
 
@@ -11196,7 +11468,10 @@ app.get('/api/admin/live-updates', async (_req, res) => {
 
 app.post('/api/admin/live-updates', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     let walletText = '';
     if (body.wallet) {
       walletText = String(body.wallet);
@@ -11296,7 +11571,10 @@ app.get('/api/admin/award/session', async (_req, res) => {
 
 app.post('/api/admin/award/session', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     const wallet = normalizeAddress(String(body.wallet || ''));
     if (!wallet) {
       return res.status(400).json({ error: 'wallet is required' });
@@ -11311,7 +11589,17 @@ app.post('/api/admin/award/session', async (req, res) => {
 
     const nextAwardWindowSecRaw = Number(body.nextAwardWindowSec);
     const terminateNextSessionRaw = Boolean(body.terminateNextSession);
-    if (!Number.isFinite(nextAwardWindowSecRaw) || nextAwardWindowSecRaw <= 0 || nextAwardWindowSecRaw > 3600) {
+    let nextAwardWindowSecInvalid = false;
+    if (!Number.isFinite(nextAwardWindowSecRaw)) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecRaw <= 0) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecRaw > 3600) {
+      nextAwardWindowSecInvalid = true;
+    }
+    if (nextAwardWindowSecInvalid) {
       return res.status(400).json({ error: 'nextAwardWindowSec must be between 1 and 3600' });
     }
 
@@ -11499,7 +11787,14 @@ app.post('/api/gas/baseline/accept', async (_req, res) => {
   if (!isAdminWallet(wallet)) {
     return res.status(403).json({ error: 'admin wallet required' });
   }
-  if (!gasRuntimeState.latest || !Array.isArray(gasRuntimeState.latest.rows)) {
+  let missingLatestGasState = false;
+  if (!gasRuntimeState.latest) {
+    missingLatestGasState = true;
+  }
+  if (!Array.isArray(gasRuntimeState.latest.rows)) {
+    missingLatestGasState = true;
+  }
+  if (missingLatestGasState) {
     return res.status(400).json({ error: 'no latest gas report available' });
   }
   const next = {};
@@ -11518,7 +11813,10 @@ app.post('/api/gas/baseline/accept', async (_req, res) => {
 
 app.post('/api/autotrade/rules/create', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     let walletText = '';
     if (body.wallet) {
       walletText = String(body.wallet);
@@ -11565,7 +11863,14 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
     if (side !== 'BUY' && side !== 'SELL') {
       return res.status(400).json({ error: 'side must be BUY or SELL' });
     }
-    if (!Number.isFinite(triggerPriceCents) || triggerPriceCents <= 0) {
+    let invalidTriggerPrice = false;
+    if (!Number.isFinite(triggerPriceCents)) {
+      invalidTriggerPrice = true;
+    }
+    if (triggerPriceCents <= 0) {
+      invalidTriggerPrice = true;
+    }
+    if (invalidTriggerPrice) {
       return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
     }
     const qtyWeiBig = BigInt(qtyWei);
@@ -11637,9 +11942,19 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
 
 app.post('/api/autotrade/rules/update', async (req, res) => {
   try {
-    const body = req.body || {};
+    let body = {};
+    if (req.body) {
+      body = req.body;
+    }
     const ruleId = Number(body.ruleId);
-    if (!Number.isFinite(ruleId) || ruleId <= 0) {
+    let invalidRuleId = false;
+    if (!Number.isFinite(ruleId)) {
+      invalidRuleId = true;
+    }
+    if (ruleId <= 0) {
+      invalidRuleId = true;
+    }
+    if (invalidRuleId) {
       return res.status(400).json({ error: 'ruleId is required' });
     }
     const state = readAutoTradeState();
@@ -11655,7 +11970,14 @@ app.post('/api/autotrade/rules/update', async (req, res) => {
 
     if ('triggerPriceCents' in body) {
       const nextTriggerPrice = Number(body.triggerPriceCents);
-      if (!Number.isFinite(nextTriggerPrice) || nextTriggerPrice <= 0) {
+      let invalidNextTriggerPrice = false;
+      if (!Number.isFinite(nextTriggerPrice)) {
+        invalidNextTriggerPrice = true;
+      }
+      if (nextTriggerPrice <= 0) {
+        invalidNextTriggerPrice = true;
+      }
+      if (invalidNextTriggerPrice) {
         return res.status(400).json({ error: 'triggerPriceCents must be > 0' });
       }
       rule.triggerPriceCents = nextTriggerPrice;
@@ -11888,7 +12210,14 @@ app.post('/api/equity/create', async (req, res) => {
   }
   const symbol = String(body.symbol).toUpperCase();
   const name = String(body.name).trim();
-  if (!symbol || !name) {
+  let missingCreateFields = false;
+  if (symbol.length === 0) {
+    missingCreateFields = true;
+  }
+  if (name.length === 0) {
+    missingCreateFields = true;
+  }
+  if (missingCreateFields) {
     return res.status(400).json({ error: '' });
   }
 
@@ -11962,7 +12291,15 @@ app.post('/api/equity/mint', async (req, res) => {
   if (!recipientValid) {
     return res.status(400).json({ error: '' });
   }
-  if (!Number.isFinite(amount) || amount < 100) {
+  const amountIsNumber = Number.isFinite(amount);
+  let invalidAmount = false;
+  if (!amountIsNumber) {
+    invalidAmount = true;
+  }
+  if (amount < 100) {
+    invalidAmount = true;
+  }
+  if (invalidAmount) {
     return res.status(400).json({ error: '' });
   }
 
@@ -12050,14 +12387,29 @@ app.post('/api/equity/create-mint', async (req, res) => {
   const name = String(body.name).trim();
   const to = String(body.to);
   const amount = Number(body.amount);
-  if (!symbol || !name) {
+  let missingCreateMintFields = false;
+  if (symbol.length === 0) {
+    missingCreateMintFields = true;
+  }
+  if (name.length === 0) {
+    missingCreateMintFields = true;
+  }
+  if (missingCreateMintFields) {
     return res.status(400).json({ error: '' });
   }
   const recipientValid = isValidAddress(to);
   if (!recipientValid) {
     return res.status(400).json({ error: '' });
   }
-  if (!Number.isFinite(amount) || amount < 100) {
+  const amountIsNumber = Number.isFinite(amount);
+  let invalidCreateMintAmount = false;
+  if (!amountIsNumber) {
+    invalidCreateMintAmount = true;
+  }
+  if (amount < 100) {
+    invalidCreateMintAmount = true;
+  }
+  if (invalidCreateMintAmount) {
     return res.status(400).json({ error: '' });
   }
 
@@ -12080,7 +12432,14 @@ app.post('/api/equity/create-mint', async (req, res) => {
     }
     const factoryDeployed = await ensureContract(factoryAddr);
     const registryDeployed = await ensureContract(registryAddr);
-    if (!factoryDeployed || !registryDeployed) {
+    let missingCoreDeployment = false;
+    if (!factoryDeployed) {
+      missingCoreDeployment = true;
+    }
+    if (!registryDeployed) {
+      missingCoreDeployment = true;
+    }
+    if (missingCoreDeployment) {
       return res.status(500).json({ error: '' });
     }
 
