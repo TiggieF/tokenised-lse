@@ -7734,6 +7734,17 @@ app.get('/api/indexer/status', async (_req, res) => {
 
 app.post('/api/indexer/rebuild', async (_req, res) => {
   try {
+    let walletText = '';
+    if (_req.body && _req.body.wallet) {
+      walletText = String(_req.body.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     ensureIndexerDir();
     writeJsonFile(INDEXER_STATE_FILE, { lastIndexedBlock: -1, latestKnownBlock: -1, lastSyncAtMs: 0 });
     writeJsonFile(INDEXER_ORDERS_FILE, {});
@@ -8870,6 +8881,13 @@ app.post('/api/dividends/merkle/declare', async (req, res) => {
     if (req.body) {
       body = req.body;
     }
+    const wallet = normalizeAddress(String(body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     let symbolText = '';
     if (body.symbol) {
       symbolText = String(body.symbol);
@@ -9070,6 +9088,13 @@ app.post('/api/dividends/merkle/declare-auto', async (req, res) => {
     let body = {};
     if (req.body) {
       body = req.body;
+    }
+    const wallet = normalizeAddress(String(body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
     }
     let symbolText = '';
     if (body.symbol) {
@@ -9916,6 +9941,13 @@ app.get('/api/dividends/claimable', async (req, res) => {
 app.post('/api/dividends/declare', async (req, res) => {
   try {
     const body = req.body;
+    const wallet = normalizeAddress(String(body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     const symbol = String(body.symbol).toUpperCase();
     const divPerShare = String(body.divPerShare);
     let missingDeclareInput = false;
@@ -10378,11 +10410,11 @@ app.get('/api/award/claimable', async (req, res) => {
     const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
     const currentEpoch = Number(currentEpochRaw);
 
-    let limitRaw = 50;
+    let limitRaw = 5000;
     if (req.query.limit) {
       limitRaw = Number(req.query.limit);
     }
-    const limit = Math.min(200, Math.max(1, Number(limitRaw)));
+    const limit = Math.min(50000, Math.max(1, Number(limitRaw)));
     const startEpoch = Math.max(0, currentEpoch - limit);
     const cacheKey = `${wallet.toLowerCase()}:${currentEpoch}:${limit}`;
     const cached = readAwardCacheEntry(awardCache.claimable, cacheKey);
@@ -10609,6 +10641,13 @@ app.get('/api/aggregator/summary', async (req, res) => {
 app.post('/api/leveraged/products/create', async (req, res) => {
   try {
     const body = req.body;
+    const wallet = normalizeAddress(String(body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     const baseSymbol = String(body.baseSymbol).toUpperCase();
     const leverage = Number(body.leverage);
     let invalidProductInput = false;
@@ -10999,6 +11038,13 @@ app.get('/api/leveraged/quote', async (req, res) => {
 app.post('/api/leveraged/price-adjust', async (req, res) => {
   try {
     const body = req.body;
+    const wallet = normalizeAddress(String(body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     let productSymbolText = '';
     if (body.productSymbol) {
       productSymbolText = String(body.productSymbol);
@@ -11190,6 +11236,13 @@ app.get('/api/leveraged/positions', async (req, res) => {
 
 app.post('/api/admin/symbols/freeze', async (req, res) => {
   try {
+    const wallet = normalizeAddress(String(req.body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     let symbolText = '';
     if (req.body.symbol) {
       symbolText = String(req.body.symbol);
@@ -11208,6 +11261,13 @@ app.post('/api/admin/symbols/freeze', async (req, res) => {
 
 app.post('/api/admin/symbols/unfreeze', async (req, res) => {
   try {
+    const wallet = normalizeAddress(String(req.body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     let symbolText = '';
     if (req.body.symbol) {
       symbolText = String(req.body.symbol);
@@ -11226,6 +11286,13 @@ app.post('/api/admin/symbols/unfreeze', async (req, res) => {
 
 app.post('/api/admin/symbols/delist', async (req, res) => {
   try {
+    const wallet = normalizeAddress(String(req.body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     let symbolText = '';
     if (req.body.symbol) {
       symbolText = String(req.body.symbol);
@@ -11244,6 +11311,13 @@ app.post('/api/admin/symbols/delist', async (req, res) => {
 
 app.post('/api/admin/symbols/list', async (req, res) => {
   try {
+    const wallet = normalizeAddress(String(req.body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     let symbolText = '';
     if (req.body.symbol) {
       symbolText = String(req.body.symbol);
@@ -11313,6 +11387,13 @@ app.get('/api/admin/symbols/status', async (_req, res) => {
 
 app.post('/api/admin/price/set', async (req, res) => {
   try {
+    const wallet = normalizeAddress(String(req.body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     let symbolText = '';
     if (req.body.symbol) {
       symbolText = String(req.body.symbol);
@@ -11340,6 +11421,13 @@ app.post('/api/admin/price/set', async (req, res) => {
 
 app.post('/api/admin/price-set', async (req, res) => {
   try {
+    const wallet = normalizeAddress(String(req.body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     let symbolText = '';
     if (req.body.symbol) {
       symbolText = String(req.body.symbol);
@@ -11409,6 +11497,17 @@ app.post('/api/admin/live-updates', async (req, res) => {
 
 app.get('/api/admin/award/session', async (_req, res) => {
   try {
+    let walletText = '';
+    if (_req.query && _req.query.wallet) {
+      walletText = String(_req.query.wallet);
+    }
+    const wallet = normalizeAddress(walletText);
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     const snapshot = await getAwardStatusSnapshot();
     const state = readAwardSessionState();
     res.json({
@@ -11476,6 +11575,13 @@ app.post('/api/admin/award/session', async (req, res) => {
     if (req.body) {
       body = req.body;
     }
+    const wallet = normalizeAddress(String(body.wallet || ''));
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet is required' });
+    }
+    if (!isAdminWallet(wallet)) {
+      return res.status(403).json({ error: 'admin wallet required' });
+    }
     const snapshot = await getAwardStatusSnapshot();
     if (!snapshot.available) {
       return res.status(400).json({ error: 'award contract not deployed' });
@@ -11524,6 +11630,13 @@ app.post('/api/admin/award/session', async (req, res) => {
 });
 
 app.post('/api/gas/run', async (req, res) => {
+  const wallet = normalizeAddress(String((req.body && req.body.wallet) || ''));
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  if (!isAdminWallet(wallet)) {
+    return res.status(403).json({ error: 'admin wallet required' });
+  }
   let suite = 'core';
   if (req.body && req.body.suite) {
     suite = String(req.body.suite).toLowerCase();
@@ -11667,6 +11780,13 @@ app.get('/api/gas/baseline', async (_req, res) => {
 });
 
 app.post('/api/gas/baseline/accept', async (_req, res) => {
+  const wallet = normalizeAddress(String((_req.body && _req.body.wallet) || ''));
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  if (!isAdminWallet(wallet)) {
+    return res.status(403).json({ error: 'admin wallet required' });
+  }
   let missingLatestGasState = false;
   if (!gasRuntimeState.latest) {
     missingLatestGasState = true;
@@ -12081,6 +12201,13 @@ app.post('/api/autotrade/listener/stop', async (_req, res) => {
 // create equity token
 app.post('/api/equity/create', async (req, res) => {
   const body = req.body;
+  const wallet = normalizeAddress(String(body.wallet || ''));
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  if (!isAdminWallet(wallet)) {
+    return res.status(403).json({ error: 'admin wallet required' });
+  }
   const symbol = String(body.symbol).toUpperCase();
   const name = String(body.name).trim();
   let missingCreateFields = false;
@@ -12147,6 +12274,13 @@ app.post('/api/equity/create', async (req, res) => {
 // mint equity token
 app.post('/api/equity/mint', async (req, res) => {
   const body = req.body;
+  const wallet = normalizeAddress(String(body.wallet || ''));
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet is required' });
+  }
+  if (!isAdminWallet(wallet)) {
+    return res.status(403).json({ error: 'admin wallet required' });
+  }
   const symbol = String(body.symbol).toUpperCase();
   const to = String(body.to);
   const amount = Number(body.amount);

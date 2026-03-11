@@ -1019,6 +1019,10 @@
 
     async function changeSymbolLifecycle(action) {
       try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
         const symbol = String(lifecycleSymbol.value).toUpperCase();
         if (!symbol) {
           setLifecycleStatus("Select symbol first", true);
@@ -1028,7 +1032,7 @@
         const res = await fetch(`/api/admin/symbols/${action}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ symbol }),
+          body: JSON.stringify({ wallet, symbol }),
         });
         const data = await res.json();
         let failed = false;
@@ -1099,8 +1103,13 @@
 
     async function distributeDividend() {
       try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
         setDivStatus("Submitting distribution");
         const payload = {
+          wallet,
           symbol: divSymbol.value,
           divPerShare: divPerShare.value,
         };
@@ -1133,10 +1142,15 @@
 
     async function declareMerkleDividendAuto() {
       try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
         setMerkleDivStatus("Building snapshot and merkle tree");
         const symbol = String(merkleDivSymbol.value).toUpperCase();
         const divPerShare = String(merkleDivPerShare.value).trim();
         const payload = {
+          wallet,
           symbol,
           divPerShare,
           claimsUri: "",
@@ -1251,6 +1265,10 @@
 
     async function createListing() {
       try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
         let listStockValue = "";
         if (listStock.value) {
           listStockValue = String(listStock.value);
@@ -1288,14 +1306,14 @@
           res = await fetch("/api/admin/symbols/list", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ symbol }),
+            body: JSON.stringify({ wallet, symbol }),
           });
         } else {
           setListStatus("Listing symbol");
           res = await fetch("/api/equity/create?waitReceipt=1", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ symbol, name }),
+            body: JSON.stringify({ wallet, symbol, name }),
           });
         }
         const data = await res.json();
@@ -1330,13 +1348,17 @@
 
     async function createLeveragedProduct() {
       try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
         const baseSymbol = String(levAdminSymbol.value).toUpperCase();
         const leverage = Number(levAdminLeverage.value);
         setLeveragedStatus("Creating leveraged token");
         const res = await fetch("/api/leveraged/products/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ baseSymbol, leverage }),
+          body: JSON.stringify({ wallet, baseSymbol, leverage }),
         });
         const data = await res.json();
         let leveragedCreateFailed = false;
@@ -1362,7 +1384,11 @@
 
     async function loadAwardSessionControl() {
       try {
-        const res = await fetch("/api/admin/award/session");
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
+        const res = await fetch(`/api/admin/award/session?wallet=${encodeURIComponent(wallet)}`);
         const data = await res.json();
         let loadAwardSessionFailed = false;
         if (!res.ok || data.error) {
@@ -1406,13 +1432,17 @@
 
     async function saveAwardSessionControl() {
       try {
+        const wallet = await getCurrentWallet();
+        if (!wallet) {
+          throw new Error("Connect wallet first");
+        }
         const nextAwardWindowSec = Number(awardNextWindow.value);
         const terminateNextSession = awardTerminateNext.value === "true";
         setAwardSessionStatus("Saving next session controls");
         const res = await fetch("/api/admin/award/session", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ nextAwardWindowSec, terminateNextSession }),
+          body: JSON.stringify({ wallet, nextAwardWindowSec, terminateNextSession }),
         });
         const data = await res.json();
         let saveAwardSessionFailed = false;
