@@ -11001,7 +11001,7 @@ app.get('/api/award/history', async (req, res) => {
 });
 
 app.post('/api/award/finalize', async (_req, res) => {
-  return res.status(400).json({ error: 'finalize removed in stage 13.5 use /api/award/claim' });
+  return res.status(400).json({ error: 'finalize removed use /api/award/claim' });
 });
 
 app.get('/api/aggregator/summary', async (req, res) => {
