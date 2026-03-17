@@ -2147,6 +2147,15 @@ function toUserErrorMessage(messageRaw) {
   if (messageRaw) {
     message = String(messageRaw);
   }
+  if (message.includes('orderbook: order inactive')) {
+    return 'Order is no longer open and cannot be cancelled';
+  }
+  if (message.includes('orderbook: order not found')) {
+    return 'Order does not exist on the current order book';
+  }
+  if (message.includes('orderbook: not order owner')) {
+    return 'You can only cancel your own order';
+  }
   if (message.includes('leveragedrouter: price unavailable')) {
     return 'Base price is not available yet please wait for oracle update';
   }
@@ -3774,6 +3783,15 @@ async function waitForIndexerSyncBounded() {
     ensureIndexerSynced(),
     new Promise((resolve) => setTimeout(resolve, INDEXER_SYNC_WAIT_MS)),
   ]);
+}
+
+async function previewCancelOrderOnChain(orderBookAddr, wallet, orderId) {
+  const data = orderBookInterface.encodeFunctionData('cancelOrder', [BigInt(orderId)]);
+  await hardhatRpc('eth_call', [{
+    from: wallet,
+    to: orderBookAddr,
+    data,
+  }, 'latest']);
 }
 
 function readIndexerSnapshot() {
@@ -8215,6 +8233,7 @@ app.post('/api/orders/cancel', async (req, res) => {
 
     const deployments = loadDeployments();
     const orderBookAddr = deployments.orderBookDex;
+    await previewCancelOrderOnChain(orderBookAddr, wallet, orderId);
     const data = orderBookInterface.encodeFunctionData('cancelOrder', [BigInt(orderId)]);
     const clientSign = wantsClientSign(body);
     if (clientSign) {
@@ -8239,7 +8258,7 @@ app.post('/api/orders/cancel', async (req, res) => {
     }
     res.json({ txHash, order: nextOrder });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: toUserErrorMessage(err.message) });
   }
 });
 
