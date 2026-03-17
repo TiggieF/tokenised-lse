@@ -279,9 +279,9 @@
       <thead>
         <tr>
           <th>Product</th>
-          <th>Product Price</th>
-          <th>Product P/L %</th>
-          <th>Avg Entry / Unit</th>
+          <th>Base Price</th>
+          <th>Leveraged P/L %</th>
+          <th>Avg Base Entry</th>
           <th>Total Position Value</th>
           <th>Action</th>
         </tr>
@@ -437,7 +437,17 @@
     }
 
     function getDisplayLeveragedValues(item) {
+      const leverage = Number(item && item.leverage);
       let livePriceCents = Number(item && item.navCents);
+      let baseLivePriceCents = Number(item && item.basePriceCents);
+      const liveQuote = liveQuoteBySymbol[String(item && item.baseSymbol ? item.baseSymbol : "").toUpperCase()];
+      if (liveQuote && Number.isFinite(Number(liveQuote.priceCents)) && Number(liveQuote.priceCents) > 0) {
+        baseLivePriceCents = Number(liveQuote.priceCents);
+      }
+      if (Number.isFinite(baseLivePriceCents) && baseLivePriceCents > 0) {
+        livePriceCents = baseLivePriceCents;
+      }
+
       let changePct = null;
       const livePrice = Number(livePriceCents) / 100;
       const avgEntry = Number(item && item.avgEntryPriceCents) / 100;
@@ -446,8 +456,10 @@
         && livePrice > 0
         && Number.isFinite(avgEntry)
         && avgEntry > 0
+        && Number.isFinite(leverage)
+        && leverage > 0
       ) {
-        changePct = ((livePrice - avgEntry) / avgEntry) * 100;
+        changePct = (((livePrice - avgEntry) / avgEntry) * leverage) * 100;
       }
 
       let currentValueWei = toBigIntOrZero(item && item.currentValueWei);
