@@ -121,7 +121,7 @@ http://localhost:3000
 ### 3.10 End summary
 - Show progress and identify missing pieces:
   - Cost basis and PnL are placeholders.
-  - Auto buy and auto sell are UI only.
+  - Auto sell has been removed.
   - Dividends not wired.
   - No indexer or database.
 
@@ -179,4 +179,3 @@ GET /api/orderbook/fills
 - Live price and candle chart shown
 - Buy and sell orders placed
 - Admin open and completed tables populated
-

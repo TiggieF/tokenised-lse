@@ -570,6 +570,36 @@
       return value.toFixed(decimals);
     }
 
+    function formatPriceFromCents(cents) {
+      const num = Number(cents);
+      if (!Number.isFinite(num)) {
+        return "$0.00";
+      }
+      return `$${(num / 100).toFixed(2)}`;
+    }
+
+    function makeLevelSplitText(levelsInput) {
+      let levels = [];
+      if (Array.isArray(levelsInput)) {
+        levels = levelsInput;
+      }
+      if (levels.length === 0) {
+        return "";
+      }
+      const maxShown = 3;
+      const parts = [];
+      for (let i = 0; i < levels.length && i < maxShown; i += 1) {
+        const row = levels[i];
+        const qtyText = weiToSharesText(String(row.qtyWei || "0"));
+        const priceText = formatPriceFromCents(Number(row.priceCents || 0));
+        parts.push(`${qtyText} @ ${priceText}`);
+      }
+      if (levels.length > maxShown) {
+        parts.push(`+${levels.length - maxShown} more`);
+      }
+      return parts.join(", ");
+    }
+
     function getSelectedLeveragedSymbol() {
       const raw = String(levProduct.value).toUpperCase();
       levSymbolEl.textContent = raw;
@@ -1108,18 +1138,28 @@
         const result = await placeMarketBuyByQty(symbol, qty);
         signalPortfolioRefresh("instant_buy_submitted");
         let notifyMessage = `${symbol} qty ${qty}`;
+        let levelSplitText = "";
+        if (result.preview && Array.isArray(result.preview.levelsUsed)) {
+          levelSplitText = makeLevelSplitText(result.preview.levelsUsed);
+        }
         if (result.preview && result.preview.requiredQuoteWei) {
           const quoteApprox = Number(result.preview.requiredQuoteWei) / 1e18;
           const requestedQtyWei = String(result.preview.requestedQtyWei || "0");
           const filledQtyWei = String(result.preview.filledQtyWei || result.preview.qtyWei || "0");
           if (BigInt(filledQtyWei) < BigInt(requestedQtyWei)) {
             notifyMessage = `${symbol} max available ${weiToSharesText(filledQtyWei)} shares`;
+            if (levelSplitText) {
+              notifyMessage += ` (${levelSplitText})`;
+            }
             showStatus(
               instantBuyStatus,
               `Buy completed max available ${weiToSharesText(filledQtyWei)} shares (~${quoteApprox.toFixed(2)} TToken)`
             );
           } else {
             notifyMessage = `${symbol} qty ${qty} (~${quoteApprox.toFixed(2)} TToken)`;
+            if (levelSplitText) {
+              notifyMessage += ` (${levelSplitText})`;
+            }
             showStatus(instantBuyStatus, `Buy completed ~${quoteApprox.toFixed(2)} TToken`);
           }
         } else {

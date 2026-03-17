@@ -2898,9 +2898,13 @@ async function runGasPackGuarded(suite) {
   }
 }
 function addCashflow(cashflows, input) {
+  const wallet = normalizeAddress(input.wallet);
+  if (!wallet) {
+    return;
+  }
   cashflows.push({
-    id: `${input.txHash}:${input.logIndex}:${input.wallet}:${input.reason}`,
-    wallet: input.wallet,
+    id: `${input.txHash}:${input.logIndex}:${wallet}:${input.reason}`,
+    wallet,
     assetType: input.assetType,
     assetSymbol: input.assetSymbol,
     direction: input.direction,
@@ -3421,10 +3425,89 @@ async function ensureIndexerSynced() {
         const qtyWei = parsed.args.qty.toString();
         const equityToken = normalizeAddress(parsed.args.equityToken);
         const symbol = await lookupSymbolByToken(registryAddr, equityToken);
-        const makerOrder = orders[String(makerId)];
+        const makerOrder = orders[String(makerId)] || null;
         let takerOrder = null;
         if (takerId > 0) {
-          takerOrder = orders[String(takerId)];
+          takerOrder = orders[String(takerId)] || null;
+        }
+
+        let makerTrader = '';
+        if (makerOrder) {
+          makerTrader = makerOrder.trader;
+        }
+        let takerTrader = '';
+        if (takerId > 0 && takerOrder) {
+          takerTrader = takerOrder.trader;
+        } else {
+          let txFrom = txFromByHash.get(txHash);
+          if (txFrom === undefined) {
+            const tx = await hardhatRpc('eth_getTransactionByHash', [txHash]);
+            txFrom = normalizeAddress(tx && tx.from);
+            txFromByHash.set(txHash, txFrom || '');
+          }
+          if (txFrom) {
+            takerTrader = txFrom;
+          }
+        }
+
+        let fillSide = '';
+        if (takerId > 0 && takerOrder && takerOrder.side) {
+          fillSide = String(takerOrder.side).toUpperCase();
+        } else if (makerOrder && makerOrder.side === 'SELL') {
+          fillSide = 'BUY';
+        } else if (makerOrder && makerOrder.side === 'BUY') {
+          fillSide = 'SELL';
+        } else if (takerId === 0 && takerTrader) {
+          fillSide = 'BUY';
+        }
+
+        if (!makerOrder) {
+          fills.push({
+            id: `${txHash}:${logIndex}`,
+            makerId,
+            takerId,
+            makerTrader,
+            takerTrader,
+            side: fillSide,
+            symbol,
+            equityToken,
+            priceCents,
+            qtyWei,
+            blockNumber,
+            txHash,
+            logIndex,
+            timestampMs,
+          });
+          const quoteWei = ((BigInt(qtyWei) * BigInt(priceCents)) / 100n).toString();
+          if (fillSide === 'BUY' && takerTrader) {
+            addCashflow(cashflows, {
+              wallet: takerTrader,
+              assetType: 'TTOKEN',
+              assetSymbol: 'TTOKEN',
+              direction: 'OUT',
+              amountWei: quoteWei,
+              reason: 'TRADE_BUY',
+              txHash,
+              logIndex,
+              blockNumber,
+              timestampMs,
+            });
+          }
+          if (fillSide === 'SELL' && takerTrader) {
+            addCashflow(cashflows, {
+              wallet: takerTrader,
+              assetType: 'TTOKEN',
+              assetSymbol: 'TTOKEN',
+              direction: 'IN',
+              amountWei: quoteWei,
+              reason: 'TRADE_SELL',
+              txHash,
+              logIndex,
+              blockNumber,
+              timestampMs,
+            });
+          }
+          continue;
         }
 
         const makerNextRemaining = BigInt(makerOrder.remainingWei) - BigInt(qtyWei);
@@ -3448,7 +3531,7 @@ async function ensureIndexerSynced() {
         }
         makerOrder.updatedAtMs = timestampMs;
 
-        if (takerId > 0) {
+        if (takerId > 0 && takerOrder) {
           const takerNextRemaining = BigInt(takerOrder.remainingWei) - BigInt(qtyWei);
           if (takerNextRemaining > 0n) {
             takerOrder.remainingWei = takerNextRemaining.toString();
@@ -3469,31 +3552,6 @@ async function ensureIndexerSynced() {
             takerOrder.status = 'OPEN';
           }
           takerOrder.updatedAtMs = timestampMs;
-        }
-
-        let makerTrader = makerOrder.trader;
-        let takerTrader = '';
-        if (takerId > 0) {
-          takerTrader = takerOrder.trader;
-        } else {
-          let txFrom = txFromByHash.get(txHash);
-          if (txFrom === undefined) {
-            const tx = await hardhatRpc('eth_getTransactionByHash', [txHash]);
-            txFrom = normalizeAddress(tx && tx.from);
-            txFromByHash.set(txHash, txFrom || '');
-          }
-          if (txFrom) {
-            takerTrader = txFrom;
-          }
-        }
-
-        let fillSide = '';
-        if (takerId > 0 && takerOrder && takerOrder.side) {
-          fillSide = String(takerOrder.side).toUpperCase();
-        } else if (makerOrder.side === 'SELL') {
-          fillSide = 'BUY';
-        } else if (makerOrder.side === 'BUY') {
-          fillSide = 'SELL';
         }
 
         fills.push({
@@ -3522,7 +3580,7 @@ async function ensureIndexerSynced() {
         if (makerOrder.side === 'SELL') {
           sellerWallet = makerOrder.trader;
         }
-        if (takerId > 0) {
+        if (takerId > 0 && takerOrder) {
           if (takerOrder.side === 'BUY') {
             buyerWallet = takerOrder.trader;
           }
@@ -5160,9 +5218,44 @@ function getDefaultAutoTradeState() {
   };
 }
 
+function removeSellRulesFromAutoTradeState(state) {
+  let nextState = state;
+  if (!nextState || typeof nextState !== 'object') {
+    nextState = getDefaultAutoTradeState();
+  }
+  if (!Array.isArray(nextState.rules)) {
+    nextState.rules = [];
+  }
+  if (!Array.isArray(nextState.executions)) {
+    nextState.executions = [];
+  }
+  const nextRules = [];
+  for (let i = 0; i < nextState.rules.length; i += 1) {
+    const row = nextState.rules[i];
+    if (String(row.side || '').toUpperCase() !== 'SELL') {
+      nextRules.push(row);
+    }
+  }
+  const nextExecutions = [];
+  for (let i = 0; i < nextState.executions.length; i += 1) {
+    const row = nextState.executions[i];
+    if (String(row.side || '').toUpperCase() !== 'SELL') {
+      nextExecutions.push(row);
+    }
+  }
+  nextState.rules = nextRules;
+  nextState.executions = nextExecutions;
+  return nextState;
+}
+
 function readAutoTradeState() {
   ensureAutoTradeDir();
-  return readJsonFile(AUTOTRADE_STATE_FILE, getDefaultAutoTradeState());
+  const state = readJsonFile(AUTOTRADE_STATE_FILE, getDefaultAutoTradeState());
+  const sanitizedState = removeSellRulesFromAutoTradeState(state);
+  if (JSON.stringify(sanitizedState) !== JSON.stringify(state)) {
+    writeAutoTradeState(sanitizedState);
+  }
+  return sanitizedState;
 }
 
 function writeAutoTradeState(state) {
@@ -5320,15 +5413,6 @@ function shouldRuleTrigger(rule, book) {
     }
     return false;
   }
-  if (side === 'SELL') {
-    if (book.hasBid && book.bestBidCents >= triggerPriceCents) {
-      return true;
-    }
-    if (Number.isFinite(marketPriceCents) && marketPriceCents > 0) {
-      return marketPriceCents >= triggerPriceCents;
-    }
-    return false;
-  }
   return false;
 }
 
@@ -5481,39 +5565,25 @@ async function executeAutoTradeRule(rule, book) {
   if (!canSend) {
     throw new Error(`autotrade wallet ${wallet} is not available on server signer set`);
   }
-
-  let data = '';
-  if (side === 'BUY') {
-    const ttokenAddr = deployments.ttoken;
-    const quoteWei = quoteAmountWei(qtyWei, triggerPriceCents);
-    const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, quoteWei]);
-    const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
-      from: wallet,
-      to: ttokenAddr,
-      data: approveData,
-    }]);
-    await waitForReceipt(approveTxHash);
-    data = orderBookInterface.encodeFunctionData('placeLimitOrder', [
-      book.tokenAddress,
-      0,
-      triggerPriceCents,
-      qtyWei,
-    ]);
-  } else {
-    const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, qtyWei]);
-    const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
-      from: wallet,
-      to: book.tokenAddress,
-      data: approveData,
-    }]);
-    await waitForReceipt(approveTxHash);
-    data = orderBookInterface.encodeFunctionData('placeLimitOrder', [
-      book.tokenAddress,
-      1,
-      triggerPriceCents,
-      qtyWei,
-    ]);
+  if (side !== 'BUY') {
+    throw new Error('autotrade side must be BUY');
   }
+
+  const ttokenAddr = deployments.ttoken;
+  const quoteWei = quoteAmountWei(qtyWei, triggerPriceCents);
+  const approveData = equityTokenInterface.encodeFunctionData('approve', [orderBookAddr, quoteWei]);
+  const approveTxHash = await hardhatRpc('eth_sendTransaction', [{
+    from: wallet,
+    to: ttokenAddr,
+    data: approveData,
+  }]);
+  await waitForReceipt(approveTxHash);
+  const data = orderBookInterface.encodeFunctionData('placeLimitOrder', [
+    book.tokenAddress,
+    0,
+    triggerPriceCents,
+    qtyWei,
+  ]);
 
   const txHash = await hardhatRpc('eth_sendTransaction', [{
     from: wallet,
@@ -8265,6 +8335,17 @@ app.get('/api/txs', async (req, res) => {
         const takerOrder = orders[String(fill.takerId)];
         if (takerOrder && takerOrder.side) {
           side = String(takerOrder.side).toUpperCase();
+        } else {
+          const makerOrder = orders[String(fill.makerId)];
+          if (makerOrder && makerOrder.side === 'SELL') {
+            side = 'BUY';
+          }
+          if (makerOrder && makerOrder.side === 'BUY') {
+            side = 'SELL';
+          }
+          if (!makerOrder && Number(fill.takerId || 0) === 0) {
+            side = 'BUY';
+          }
         }
       }
       fillByTxHashForWallet.set(txHash, {
@@ -8408,7 +8489,8 @@ app.get('/api/txs', async (req, res) => {
     }
     if (includeCashflow) {
       for (const cashflow of cashflows) {
-        if (cashflow.wallet === wallet) {
+        const cashflowWallet = String(cashflow.wallet || '').toLowerCase();
+        if (cashflowWallet === walletLower) {
           const txHashLower = String(cashflow.txHash || '').toLowerCase();
           const fillContext = fillByTxHashForWallet.get(txHashLower);
           items.push({
@@ -12150,8 +12232,8 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
     if (!symbol) {
       return res.status(400).json({ error: 'symbol is required' });
     }
-    if (side !== 'BUY' && side !== 'SELL') {
-      return res.status(400).json({ error: 'side must be BUY or SELL' });
+    if (side !== 'BUY') {
+      return res.status(400).json({ error: 'side must be BUY' });
     }
     let invalidTriggerPrice = false;
     if (!Number.isFinite(triggerPriceCents)) {
@@ -12178,20 +12260,18 @@ app.post('/api/autotrade/rules/create', async (req, res) => {
     if (qtyUnits % BigInt(MIN_STOCK_QTY_UNITS) !== 0n) {
       return res.status(400).json({ error: `qty must be in steps of ${MIN_STOCK_QTY_UNITS}` });
     }
-    if (side === 'BUY') {
-      const deployments = loadDeployments();
-      const ttokenAddr = normalizeAddress(getTTokenAddressFromDeployments());
-      if (ttokenAddr) {
-        const requiredQuoteWei = quoteAmountWei(qtyWeiBig, triggerPriceCents);
-        const balanceData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
-        const balanceResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: balanceData }, 'latest']);
-        const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balanceResult);
-        const balanceWei = BigInt(balanceWeiRaw.toString());
-        if (balanceWei < requiredQuoteWei) {
-          return res.status(400).json({
-            error: `insufficient TToken for auto buy: need ${ethers.formatUnits(requiredQuoteWei, 18)}, have ${ethers.formatUnits(balanceWei, 18)}`,
-          });
-        }
+    const deployments = loadDeployments();
+    const ttokenAddr = normalizeAddress(getTTokenAddressFromDeployments());
+    if (ttokenAddr) {
+      const requiredQuoteWei = quoteAmountWei(qtyWeiBig, triggerPriceCents);
+      const balanceData = equityTokenInterface.encodeFunctionData('balanceOf', [wallet]);
+      const balanceResult = await hardhatRpc('eth_call', [{ to: ttokenAddr, data: balanceData }, 'latest']);
+      const [balanceWeiRaw] = equityTokenInterface.decodeFunctionResult('balanceOf', balanceResult);
+      const balanceWei = BigInt(balanceWeiRaw.toString());
+      if (balanceWei < requiredQuoteWei) {
+        return res.status(400).json({
+          error: `insufficient TToken for auto buy: need ${ethers.formatUnits(requiredQuoteWei, 18)}, have ${ethers.formatUnits(balanceWei, 18)}`,
+        });
       }
     }
     const canSend = await canServerSendFromAddress(wallet);
