@@ -207,7 +207,8 @@
     let lastStatusSyncAtMs = 0;
     let lastAutoRefreshAtMs = 0;
     let statusTicker = null;
-    const AWARD_REFRESH_INTERVAL_MS = 60000;
+    const AWARD_REFRESH_INTERVAL_MS = 10000;
+    const AWARD_ZERO_POLL_MS = 3000;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
 
     function setAwardStatus(message, isError = false) {
@@ -423,32 +424,68 @@
           leaderboardEpoch = 0;
         }
 
-        let leaderboardRes = null;
-        let claimableRes = null;
+        let leaderboardData = { items: [] };
+        let claimableData = { items: [] };
+        let warnMessages = [];
         if (wallet) {
-          [leaderboardRes, claimableRes] = await Promise.all([
+          const [leaderboardOutcome, claimableOutcome] = await Promise.allSettled([
             fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`),
             fetch(`/api/award/claimable?wallet=${encodeURIComponent(wallet)}&limit=${encodeURIComponent(limit)}`),
           ]);
+          if (leaderboardOutcome.status === "fulfilled") {
+            let data = { items: [] };
+            try {
+              data = await leaderboardOutcome.value.json();
+            } catch {
+              data = { items: [] };
+            }
+            if (leaderboardOutcome.value.ok && !data.error) {
+              leaderboardData = data;
+            } else {
+              warnMessages.push(String(data.error || "leaderboard unavailable"));
+            }
+          } else {
+            warnMessages.push("leaderboard unavailable");
+          }
+          if (claimableOutcome.status === "fulfilled") {
+            let data = { items: [] };
+            try {
+              data = await claimableOutcome.value.json();
+            } catch {
+              data = { items: [] };
+            }
+            if (claimableOutcome.value.ok && !data.error) {
+              claimableData = data;
+            } else {
+              warnMessages.push(String(data.error || "claimable unavailable"));
+            }
+          } else {
+            warnMessages.push("claimable unavailable");
+          }
         } else {
-          leaderboardRes = await fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`);
+          let leaderboardRes = null;
+          try {
+            leaderboardRes = await fetch(`/api/award/leaderboard?epochId=${encodeURIComponent(leaderboardEpoch)}`);
+            let data = { items: [] };
+            try {
+              data = await leaderboardRes.json();
+            } catch {
+              data = { items: [] };
+            }
+            if (leaderboardRes.ok && !data.error) {
+              leaderboardData = data;
+            } else {
+              warnMessages.push(String(data.error || "leaderboard unavailable"));
+            }
+          } catch {
+            warnMessages.push("leaderboard unavailable");
+          }
         }
-        let leaderboardData = { items: [] };
-        let claimableData = { items: [] };
-        if (leaderboardRes) {
-          leaderboardData = await leaderboardRes.json();
+        if (warnMessages.length > 0) {
+          setAwardStatus(warnMessages.join(" | "), true);
+        } else {
+          setAwardStatus("Ready");
         }
-        if (claimableRes) {
-          claimableData = await claimableRes.json();
-        }
-
-        if (!leaderboardRes.ok || leaderboardData.error) {
-          throw new Error(leaderboardData.error);
-        }
-        if (claimableRes && (!claimableRes.ok || claimableData.error)) {
-          throw new Error(claimableData.error);
-        }
-        setAwardStatus("Ready");
         let maxQtyWei = "0";
         if (leaderboardData.maxQtyWei) {
           maxQtyWei = leaderboardData.maxQtyWei;
@@ -515,7 +552,6 @@
           }
         }
       } catch (err) {
-        windowSecondsRemainingEl.textContent = "0";
         let message = "Award refresh failed";
         if (err && err.message) {
           message = err.message;
@@ -538,11 +574,14 @@
     }
 
     (async function init() {
-      await loadWallet();
-      const statusRes = await fetch("/api/award/status");
-      const statusData = await statusRes.json();
-      if (statusRes.ok && statusData && Number.isFinite(statusData.currentEpoch)) {
-        currentEpochId = Number(statusData.currentEpoch);
+      try {
+        await loadWallet();
+        const statusRes = await fetch("/api/award/status");
+        const statusData = await statusRes.json();
+        if (statusRes.ok && statusData && Number.isFinite(statusData.currentEpoch)) {
+          currentEpochId = Number(statusData.currentEpoch);
+        }
+      } catch {
       }
       await refreshAward();
       setInterval(refreshAward, AWARD_REFRESH_INTERVAL_MS);
@@ -570,7 +609,7 @@
       windowSecondsRemainingEl.textContent = String(Math.floor(displayRemaining));
       if (displayRemaining === 0) {
         const now = Date.now();
-        if ((now - lastAutoRefreshAtMs) >= AWARD_REFRESH_INTERVAL_MS) {
+        if ((now - lastAutoRefreshAtMs) >= AWARD_ZERO_POLL_MS) {
           lastAutoRefreshAtMs = now;
           refreshAward();
         }

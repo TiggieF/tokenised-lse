@@ -256,7 +256,8 @@
     <div class="header">
       <h1 class="title">Trade</h1>
       <div class="mode-tabs">
-        <button class="mode-tab active" id="mode-buy" type="button">Limit Order</button>
+        <button class="mode-tab active" id="mode-limit" type="button">Limit Order</button>
+        <button class="mode-tab" id="mode-instant" type="button">Buy</button>
       </div>
     </div>
     <div id="admin-lock-banner" class="admin-lock"></div>
@@ -299,6 +300,22 @@
           </div>
           <div class="muted-note" id="buy-status">Ready</div>
         </div>
+        <div class="card panel-hidden" id="instant-buy-panel">
+          <h2 class="card-title">Buy Quantity</h2>
+          <div class="qty">
+            <button type="button" id="instant-buy-minus">-</button>
+            <div id="instant-buy-qty">10</div>
+            <button type="button" id="instant-buy-plus">+</button>
+          </div>
+          <div class="stat-row">
+            <span class="muted">Estimated spend</span>
+            <strong id="instant-estimated-cost">-</strong>
+          </div>
+          <div class="actions">
+            <button class="btn btn-buy" id="instant-buy-btn" type="button">Buy</button>
+          </div>
+          <div class="muted-note" id="instant-buy-status">Ready</div>
+        </div>
       </div>
     </div>
 
@@ -336,6 +353,10 @@
     const tradeWallet = document.getElementById("trade-wallet");
     const tradeSymbol = document.getElementById("trade-symbol");
     const tradeLivePriceEl = document.getElementById("trade-live-price");
+    const modeLimitTab = document.getElementById("mode-limit");
+    const modeInstantTab = document.getElementById("mode-instant");
+    const limitBuyPanel = document.getElementById("buy-panel");
+    const instantBuyPanel = document.getElementById("instant-buy-panel");
     const buyPriceInput = document.getElementById("buy-price");
     const buyStatus = document.getElementById("buy-status");
     const buyButton = document.getElementById("buy-btn");
@@ -346,6 +367,12 @@
     const buyMinusButton = buyQtyButtons[0];
     const buyPlusButton = buyQtyButtons[1];
     const estimatedCostEl = document.getElementById("estimated-cost");
+    const instantBuyMinusButton = document.getElementById("instant-buy-minus");
+    const instantBuyPlusButton = document.getElementById("instant-buy-plus");
+    const instantBuyQtyValue = document.getElementById("instant-buy-qty");
+    const instantEstimatedCostEl = document.getElementById("instant-estimated-cost");
+    const instantBuyButton = document.getElementById("instant-buy-btn");
+    const instantBuyStatus = document.getElementById("instant-buy-status");
     const adminLockBanner = document.getElementById("admin-lock-banner");
     const levProduct = document.getElementById("lev-product");
     const levSymbolEl = document.getElementById("lev-symbol");
@@ -360,6 +387,7 @@
     let leveragedProducts = [];
     let lifecycleBySymbol = {};
     let buyLimitPriceTouched = false;
+    let latestLivePrice = 0;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
     const SYMBOLS_SIGNAL_KEY = "tlse:symbols:refresh";
     let lastSymbolsSignal = "";
@@ -532,6 +560,44 @@
       }
       const wei = (BigInt(whole) * 1000000000000000000n) + BigInt(fraction);
       return wei.toString();
+    }
+
+    function weiToSharesText(wei, decimals = 2) {
+      const value = Number(wei) / 1e18;
+      if (!Number.isFinite(value)) {
+        return "0.00";
+      }
+      return value.toFixed(decimals);
+    }
+
+    function formatPriceFromCents(cents) {
+      const num = Number(cents);
+      if (!Number.isFinite(num)) {
+        return "$0.00";
+      }
+      return `$${(num / 100).toFixed(2)}`;
+    }
+
+    function makeLevelSplitText(levelsInput) {
+      let levels = [];
+      if (Array.isArray(levelsInput)) {
+        levels = levelsInput;
+      }
+      if (levels.length === 0) {
+        return "";
+      }
+      const maxShown = 3;
+      const parts = [];
+      for (let i = 0; i < levels.length && i < maxShown; i += 1) {
+        const row = levels[i];
+        const qtyText = weiToSharesText(String(row.qtyWei || "0"));
+        const priceText = formatPriceFromCents(Number(row.priceCents || 0));
+        parts.push(`${qtyText} @ ${priceText}`);
+      }
+      if (levels.length > maxShown) {
+        parts.push(`+${levels.length - maxShown} more`);
+      }
+      return parts.join(", ");
     }
 
     function getSelectedLeveragedSymbol() {
@@ -715,6 +781,15 @@
       return String(tradeSymbol.value).toUpperCase();
     }
 
+    function setTradeMode(mode) {
+      const useInstant = mode === "instant";
+      modeLimitTab.classList.toggle("active", !useInstant);
+      modeInstantTab.classList.toggle("active", useInstant);
+      limitBuyPanel.classList.toggle("panel-hidden", useInstant);
+      instantBuyPanel.classList.toggle("panel-hidden", !useInstant);
+      updateLifecycleUi();
+    }
+
     function parsePriceToCents(text) {
       const cleaned = text.replace("$", "").replace(",", "");
       const value = Number(cleaned);
@@ -734,6 +809,19 @@
       }
       buyQtyValue.textContent = String(value);
       updateEstimatedCost(value);
+    }
+
+    function updateInstantBuyQty(nextValue) {
+      let value = Number(nextValue);
+      if (Number.isNaN(value)) {
+        value = 10;
+      }
+      value = Math.floor(value);
+      if (value < 10) {
+        value = 10;
+      }
+      instantBuyQtyValue.textContent = String(value);
+      updateInstantEstimatedCost(value);
     }
 
     function updateEstimatedCost(qty) {
@@ -758,6 +846,19 @@
       updateEstimatedCost(currentValue);
     }
 
+    function updateInstantEstimatedCost(qty) {
+      if (!Number.isFinite(latestLivePrice) || latestLivePrice <= 0) {
+        instantEstimatedCostEl.textContent = "-";
+        return;
+      }
+      const totalCost = Number(qty) * latestLivePrice;
+      const costText = totalCost.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+      instantEstimatedCostEl.textContent = `${costText} TToken`;
+    }
+
     async function loadTradeLivePrice() {
       const symbol = getSymbolFromSelect();
       if (!symbol) {
@@ -773,12 +874,18 @@
         }
         const livePrice = Number(data.price);
         if (Number.isFinite(livePrice) && livePrice > 0) {
+          latestLivePrice = livePrice;
           tradeLivePriceEl.textContent = formatUsd(livePrice);
           applyDefaultLimitPricesFromLive(livePrice);
+          updateInstantEstimatedCost(Number(instantBuyQtyValue.textContent));
           return;
         }
+        latestLivePrice = 0;
+        updateInstantEstimatedCost(Number(instantBuyQtyValue.textContent));
         tradeLivePriceEl.textContent = "-";
       } catch {
+        latestLivePrice = 0;
+        updateInstantEstimatedCost(Number(instantBuyQtyValue.textContent));
         tradeLivePriceEl.textContent = "-";
       }
     }
@@ -816,6 +923,41 @@
       return data.txHash;
     }
 
+    async function placeMarketBuyByQty(symbol, qty) {
+      const payload = {
+        symbol: symbol,
+        qty: qty,
+        from: currentAccount,
+      };
+      const res = await fetch(
+        "/api/orderbook/buy-market-qty",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, clientSign: true }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        let message = "Order failed";
+        if (data && data.error) {
+          message = String(data.error);
+        }
+        throw new Error(message);
+      }
+      if (data.clientSign && Array.isArray(data.txs)) {
+        const txHash = await submitPreparedTxs(data.txs);
+        return {
+          txHash,
+          preview: data.preview || null,
+        };
+      }
+      return {
+        txHash: data.txHash,
+        preview: data.preview || null,
+      };
+    }
+
     async function loadTTokenBalance() {
       const res = await fetch(
         `/api/ttoken/balance?address=${encodeURIComponent(currentAccount)}`
@@ -847,11 +989,8 @@
         adminLockBanner.style.display = "none";
         adminLockBanner.textContent = "";
       }
-      let displayMode = "block";
-      if (blocked) {
-        displayMode = "none";
-      }
-      buyButton.style.display = displayMode;
+      buyButton.disabled = blocked;
+      instantBuyButton.disabled = blocked;
     }
 
     async function loadLifecycleStatuses() {
@@ -874,7 +1013,7 @@
     }
 
     function showNoFunds(messageEl) {
-      messageEl.textContent = "no enough fund";
+      messageEl.textContent = "fund not enough";
       messageEl.classList.add("status-error");
       // error for no fund
     }
@@ -887,6 +1026,12 @@
 
     function prettyTxError(rawMessage) {
       const text = String(rawMessage);
+      if (text.includes("fund not enough")) {
+        return "fund not enough";
+      }
+      if (text.includes("no token on sale")) {
+        return "no token on sale";
+      }
       if (text.includes("0xe450d38c") || text.includes("ERC20InsufficientBalance")) {
         return "Insufficient TToken balance";
       }
@@ -914,6 +1059,18 @@
       const currentValue = Number(buyQtyValue.textContent);
       const nextValue = currentValue + 10;
       updateBuyQty(nextValue);
+    });
+
+    instantBuyMinusButton.addEventListener("click", function () {
+      const currentValue = Number(instantBuyQtyValue.textContent);
+      const nextValue = currentValue - 10;
+      updateInstantBuyQty(nextValue);
+    });
+
+    instantBuyPlusButton.addEventListener("click", function () {
+      const currentValue = Number(instantBuyQtyValue.textContent);
+      const nextValue = currentValue + 10;
+      updateInstantBuyQty(nextValue);
     });
 
     buyPriceInput.addEventListener("input", function () {
@@ -956,6 +1113,77 @@
       signalShellNotification("Limit order submitted", `${symbol} qty ${qty} at $${(priceCents / 100).toFixed(2)}`);
       showStatus(buyStatus, "Order placed");
       await loadTTokenBalance();
+    });
+
+    instantBuyButton.addEventListener("click", async () => {
+      try {
+        const symbol = getSymbolFromSelect();
+        const lifecycleRow = lifecycleBySymbol[String(symbol).toUpperCase()];
+        let lifecycle = "ACTIVE";
+        if (lifecycleRow && lifecycleRow.status) {
+          lifecycle = String(lifecycleRow.status).toUpperCase();
+        }
+        if (lifecycle === "FROZEN" || lifecycle === "DELISTED") {
+          showNoFunds(instantBuyStatus);
+          instantBuyStatus.textContent = `${symbol} is ${lifecycle} by admin`;
+          return;
+        }
+        if (!symbol) {
+          showNoFunds(instantBuyStatus);
+          instantBuyStatus.textContent = "No listed symbol selected";
+          return;
+        }
+        const qty = Number(instantBuyQtyValue.textContent);
+        showStatus(instantBuyStatus, "Submitting");
+        const result = await placeMarketBuyByQty(symbol, qty);
+        signalPortfolioRefresh("instant_buy_submitted");
+        let notifyMessage = `${symbol} qty ${qty}`;
+        let levelSplitText = "";
+        if (result.preview && Array.isArray(result.preview.levelsUsed)) {
+          levelSplitText = makeLevelSplitText(result.preview.levelsUsed);
+        }
+        if (result.preview && result.preview.requiredQuoteWei) {
+          const quoteApprox = Number(result.preview.requiredQuoteWei) / 1e18;
+          const requestedQtyWei = String(result.preview.requestedQtyWei || "0");
+          const filledQtyWei = String(result.preview.filledQtyWei || result.preview.qtyWei || "0");
+          if (BigInt(filledQtyWei) < BigInt(requestedQtyWei)) {
+            notifyMessage = `${symbol} max available ${weiToSharesText(filledQtyWei)} shares`;
+            if (levelSplitText) {
+              notifyMessage += ` (${levelSplitText})`;
+            }
+            showStatus(
+              instantBuyStatus,
+              `Buy completed max available ${weiToSharesText(filledQtyWei)} shares (~${quoteApprox.toFixed(2)} TToken)`
+            );
+          } else {
+            notifyMessage = `${symbol} qty ${qty} (~${quoteApprox.toFixed(2)} TToken)`;
+            if (levelSplitText) {
+              notifyMessage += ` (${levelSplitText})`;
+            }
+            showStatus(instantBuyStatus, `Buy completed ~${quoteApprox.toFixed(2)} TToken`);
+          }
+        } else {
+          showStatus(instantBuyStatus, "Buy completed");
+        }
+        signalShellNotification("Buy completed", notifyMessage);
+        await loadTTokenBalance();
+      } catch (err) {
+        const message = prettyTxError(err.message);
+        if (message === "fund not enough") {
+          showNoFunds(instantBuyStatus);
+          return;
+        }
+        instantBuyStatus.textContent = message;
+        instantBuyStatus.classList.add("status-error");
+      }
+    });
+
+    modeLimitTab.addEventListener("click", function () {
+      setTradeMode("limit");
+    });
+
+    modeInstantTab.addEventListener("click", function () {
+      setTradeMode("instant");
     });
 
     levProduct.addEventListener("change", async function () {
@@ -1019,6 +1247,8 @@
       await loadLeveragedProducts();
       await loadTradeLivePrice();
       updateBuyQty(10);
+      updateInstantBuyQty(10);
+      setTradeMode("limit");
       const accounts = await window.ethereum.request(
         {
           method: "eth_requestAccounts",

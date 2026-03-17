@@ -135,11 +135,11 @@ This document is a precise, technical handover of what is implemented and what i
 **DOM ids**
 - Wallet: `sell-wallet`.
 - Symbol fields: `symbol-title`, `symbol-label`.
-- Mode tabs: `mode-sell`, `mode-auto`.
-- Panels: `sell-panel`, `auto-panel`.
-- Inputs: `sell-price`, `auto-price`, `auto-qty`.
-- Buttons: `sell-btn`, `auto-sell-btn`.
-- Status labels: `sell-status`, `auto-status`.
+- Mode tabs: `mode-sell`.
+- Panels: `sell-panel`, `sell-now-panel`.
+- Inputs: `sell-price`.
+- Buttons: `sell-btn`.
+- Status labels: `sell-status`.
 
 **Symbol selection**
 - Reads `?symbol=SYMBOL` from URL.
@@ -544,7 +544,7 @@ This document is a precise, technical handover of what is implemented and what i
 - No realized or unrealized profit calculation.
 
 ### 7.2 Trading automation
-- Auto buy and auto sell are UI only.
+- Auto sell has been removed.
 - No scheduler or on chain automation.
 
 ### 7.3 Dividends

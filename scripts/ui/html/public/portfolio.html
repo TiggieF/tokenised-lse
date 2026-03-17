@@ -77,6 +77,19 @@
       border: 1px solid rgba(16, 20, 24, 0.08);
     }
 
+    .summary-card-button {
+      cursor: pointer;
+      text-align: left;
+      width: 100%;
+      font-family: inherit;
+      color: inherit;
+    }
+
+    .summary-card-button:hover {
+      border-color: rgba(27, 139, 139, 0.45);
+      box-shadow: 0 6px 18px rgba(16, 20, 24, 0.08);
+    }
+
     .summary-label {
       font-size: 11px;
       color: var(--muted);
@@ -266,10 +279,10 @@
       <thead>
         <tr>
           <th>Product</th>
-          <th>Live Price</th>
-          <th>% Change vs Avg</th>
-          <th>Avg Entry (value of one unit)</th>
-          <th>Current Value</th>
+          <th>Base Price</th>
+          <th>Leveraged P/L %</th>
+          <th>Avg Base Entry</th>
+          <th>Total Position Value</th>
           <th>Action</th>
         </tr>
       </thead>
@@ -447,33 +460,9 @@
         && leverage > 0
       ) {
         changePct = (((livePrice - avgEntry) / avgEntry) * leverage) * 100;
-      } else {
-        let baseChangeRaw = item && item.baseChangePct ? item.baseChangePct : Number.NaN;
-        if (liveQuote && liveQuote.changePercent !== null) {
-          baseChangeRaw = liveQuote.changePercent;
-        }
-        const baseChangePct = (typeof baseChangeRaw === "number" && Number.isFinite(baseChangeRaw))
-          ? baseChangeRaw
-          : NaN;
-        if (Number.isFinite(baseChangePct)) {
-          if (Number.isFinite(leverage) && leverage > 0) {
-            changePct = baseChangePct * leverage;
-          } else {
-            changePct = baseChangePct;
-          }
-        }
       }
 
       let currentValueWei = toBigIntOrZero(item && item.currentValueWei);
-      const baseAtSnapshotCents = Number(item && item.basePriceCents);
-      if (
-        Number.isFinite(baseAtSnapshotCents)
-        && baseAtSnapshotCents > 0
-        && Number.isFinite(baseLivePriceCents)
-        && baseLivePriceCents > 0
-      ) {
-        currentValueWei = (currentValueWei * BigInt(Math.round(baseLivePriceCents))) / BigInt(Math.round(baseAtSnapshotCents));
-      }
 
       return {
         livePriceCents,
@@ -631,8 +620,19 @@
       ];
       summaryGrid.innerHTML = "";
       for (const [label, value] of cards) {
-        const card = document.createElement("div");
-        card.className = "summary-card";
+        let card = null;
+        if (label === "Cash") {
+          card = document.createElement("button");
+          card.type = "button";
+          card.className = "summary-card summary-card-button";
+          card.title = "Open cashflow statement";
+          card.addEventListener("click", function () {
+            window.location.href = "/transactions.html?type=CASHFLOW&from=portfolio_cash";
+          });
+        } else {
+          card = document.createElement("div");
+          card.className = "summary-card";
+        }
         card.innerHTML = `<div class="summary-label">${label}</div><div class="summary-value">${value}</div>`;
         summaryGrid.appendChild(card);
       }

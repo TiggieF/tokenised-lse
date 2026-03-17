@@ -157,6 +157,24 @@
       color: var(--danger);
     }
 
+    .cashflow-in {
+      background: rgba(21, 128, 61, 0.08);
+    }
+
+    .cashflow-out {
+      background: rgba(220, 38, 38, 0.08);
+    }
+
+    .amount-in {
+      color: var(--ok);
+      font-weight: 700;
+    }
+
+    .amount-out {
+      color: var(--danger);
+      font-weight: 700;
+    }
+
     @media (max-width: 780px) {
       body { padding: 20px; }
       .header { flex-direction: column; align-items: flex-start; }
@@ -220,6 +238,18 @@
     let txRequestSerial = 0;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
     const PAGE_SIZE = 50;
+    const initialTypeFromUrl = (() => {
+      try {
+        const url = new URL(window.location.href);
+        const typeRaw = String(url.searchParams.get("type") || "").toUpperCase();
+        const allowed = new Set(["ALL", "ORDERS", "FILLS", "CASHFLOW", "TRANSFERS", "LEVERAGE"]);
+        if (allowed.has(typeRaw)) {
+          return typeRaw;
+        }
+      } catch {
+      }
+      return "ALL";
+    })();
     const usTimeFormatter = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
       year: "numeric",
@@ -396,7 +426,19 @@
         case "ORDER_FILLED":
           return `${sideWord} ${formatWeiToToken(item.qtyWei)} unit at price ${formatCentsToTTokenPerUnit(item.priceCents)} ttoken per unit`;
         case "CASHFLOW":
-          return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.reason})`;
+          {
+            let signed = formatWeiToToken(item.amountWei);
+            if (String(item.direction).toUpperCase() === "IN") {
+              signed = `+${signed}`;
+            } else if (String(item.direction).toUpperCase() === "OUT") {
+              signed = `-${signed}`;
+            }
+            let context = `${signed} TToken (${item.reason})`;
+            if (item.fillSymbol && item.fillSide && item.fillPriceCents > 0) {
+              context += ` | ${item.fillSide} ${formatWeiToToken(item.fillQtyWei)} ${item.fillSymbol} @ ${formatCentsToTTokenPerUnit(item.fillPriceCents)} TToken`;
+            }
+            return context;
+          }
         case "TRANSFER":
           return `${item.direction} ${formatWeiToToken(item.amountWei)} (${item.from} -> ${item.to})`;
         case "LEVERAGE_MINT":
@@ -456,6 +498,14 @@
 
       for (const item of items) {
         const tr = document.createElement("tr");
+        if (item.kind === "CASHFLOW") {
+          const direction = String(item.direction || "").toUpperCase();
+          if (direction === "IN") {
+            tr.classList.add("cashflow-in");
+          } else if (direction === "OUT") {
+            tr.classList.add("cashflow-out");
+          }
+        }
         const actionCell = document.createElement("td");
         let canCancel = false;
         if (item.kind === "ORDER_PLACED") {
@@ -484,11 +534,20 @@
         if (item.txHash) {
           txHashText = item.txHash;
         }
+        let detailsText = toDisplay(item);
+        if (item.kind === "CASHFLOW") {
+          const direction = String(item.direction || "").toUpperCase();
+          if (direction === "IN") {
+            detailsText = `<span class="amount-in">${detailsText}</span>`;
+          } else if (direction === "OUT") {
+            detailsText = `<span class="amount-out">${detailsText}</span>`;
+          }
+        }
         tr.innerHTML = `
           <td>${formatTime(item.timestampMs)}</td>
           <td>${item.kind}</td>
           <td>${symbolText}</td>
-          <td>${toDisplay(item)}</td>
+          <td>${detailsText}</td>
           <td class="mono">${txHashText}</td>
         `;
         tr.appendChild(actionCell);
@@ -634,6 +693,10 @@
         walletText = "-";
       }
       walletEl.textContent = walletText;
+      currentType = initialTypeFromUrl;
+      for (const button of filterButtons) {
+        button.classList.toggle("active", button.dataset.type === currentType);
+      }
       nextCursor = null;
       currentItems = [];
       await loadTransactions({ append: false });

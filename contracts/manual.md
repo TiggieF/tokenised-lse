@@ -400,7 +400,7 @@ The system is a local Hardhat blockchain with a Node and Express API server and 
 ## 7) Missing Components
 
 - Cost basis and profit calculations are placeholders.
-- Auto buy and auto sell are UI only.
+- Auto sell has been removed.
 - Dividends not wired to UI or API.
 - No order cancel UI.
 - No pagination for order book or fills.

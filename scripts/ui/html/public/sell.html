@@ -155,7 +155,6 @@
     }
 
     .btn-sell { background: var(--accent); }
-    .btn-auto { background: var(--accent-2); }
 
     .muted {
       color: var(--muted);
@@ -218,8 +217,6 @@
       <h1 class="title">Sell <span id="symbol-title"></span></h1>
       <div class="mode-tabs">
         <button class="mode-tab active" id="mode-sell" type="button">Sell</button>
-        <button class="mode-tab" id="mode-auto" type="button">Auto Sell</button>
-        <!-- auto sell placeholder -->
       </div>
     </div>
     <div id="admin-lock-banner" class="admin-lock"></div>
@@ -268,24 +265,6 @@
         </div>
         <div class="muted-note" id="sell-status">Ready</div>
       </div>
-
-      <div class="card panel-hidden" id="auto-panel">
-        <h2 class="card-title">Auto sell setup</h2>
-        <div class="input-row">
-          <label>Target sell price</label>
-          <input type="text" id="auto-price" value="$420.00" />
-        </div>
-        <div class="input-row">
-          <label>Order size</label>
-          <input type="text" id="auto-qty" value="10" />
-        </div>
-        <div class="actions">
-          <button class="btn btn-auto" id="auto-sell-btn" type="button">Set Auto Sell</button>
-        </div>
-        <div class="muted-note">Auto sell rules</div>
-        <div id="auto-rules-list"></div>
-        <div class="muted-note" id="auto-status">Ready</div>
-      </div>
     </div>
   </div>
 
@@ -304,11 +283,6 @@
     const estimatedProceedsEl = document.getElementById("estimated-proceeds");
     const sellOwnedEl = document.getElementById("sell-owned");
     const sellEstimatedValueEl = document.getElementById("sell-estimated-value");
-    const autoPriceInput = document.getElementById("auto-price");
-    const autoQtyInput = document.getElementById("auto-qty");
-    const autoButton = document.getElementById("auto-sell-btn");
-    const autoStatus = document.getElementById("auto-status");
-    const autoRulesList = document.getElementById("auto-rules-list");
     const adminLockBanner = document.getElementById("admin-lock-banner");
     const symbolTitle = document.getElementById("symbol-title");
     const symbolLabel = document.getElementById("symbol-label");
@@ -317,7 +291,6 @@
     let currentAccount = "";
     let symbolLifecycle = "ACTIVE";
     let sellLimitPriceTouched = false;
-    let autoSellLimitPriceTouched = false;
     let ownedQty = 0;
     let livePrice = 0;
     const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
@@ -442,36 +415,6 @@
       return lastTxHash;
     }
 
-    const modeSell = document.getElementById("mode-sell");
-    const modeAuto = document.getElementById("mode-auto");
-    const sellPanel = document.getElementById("sell-panel");
-    const sellNowPanel = document.getElementById("sell-now-panel");
-    const autoPanel = document.getElementById("auto-panel");
-
-    function setMode(mode) {
-      if (mode === "sell") {
-        modeSell.classList.add("active");
-        modeAuto.classList.remove("active");
-        sellPanel.classList.remove("panel-hidden");
-        sellNowPanel.classList.remove("panel-hidden");
-        autoPanel.classList.add("panel-hidden");
-        return;
-      }
-      modeSell.classList.remove("active");
-      modeAuto.classList.add("active");
-      sellPanel.classList.add("panel-hidden");
-      sellNowPanel.classList.add("panel-hidden");
-      autoPanel.classList.remove("panel-hidden");
-    }
-
-    modeSell.addEventListener("click", function () {
-      setMode("sell");
-    });
-
-    modeAuto.addEventListener("click", function () {
-      setMode("auto");
-    });
-
     function updateSellQty(nextValue) {
       let value = Number(nextValue);
       if (Number.isNaN(value)) {
@@ -589,9 +532,6 @@
       if (!sellLimitPriceTouched) {
         sellPriceInput.value = formattedLivePrice;
       }
-      if (!autoSellLimitPriceTouched) {
-        autoPriceInput.value = formattedLivePrice;
-      }
       const currentQty = Number(sellQtyValue.textContent);
       updateEstimatedProceeds(currentQty);
     }
@@ -644,9 +584,6 @@
       const currentValue = Number(sellQtyValue.textContent);
       updateEstimatedProceeds(currentValue);
     });
-    autoPriceInput.addEventListener("input", function () {
-      autoSellLimitPriceTouched = true;
-    });
 
     (async function () {
       await ensureSepoliaNetwork();
@@ -658,17 +595,14 @@
       setWalletAddress(chooseDisplayAccount(accounts));
       await loadOwnedBalance();
       await loadSellLivePrice();
-      await loadAutoRules();
     })();
     window.ethereum.on("accountsChanged", function (accounts) {
       setWalletAddress(chooseDisplayAccount(accounts));
       loadOwnedBalance();
       loadSellLivePrice();
-      loadAutoRules();
     });
     window.ethereum.on("chainChanged", function () {
       loadOwnedBalance();
-      loadAutoRules();
       loadSellLivePrice();
       loadLifecycleForCurrentSymbol();
     });
@@ -699,7 +633,6 @@
         displayMode = "none";
       }
       sellButton.style.display = displayMode;
-      autoButton.style.display = displayMode;
     }
 
     async function loadLifecycleForCurrentSymbol() {
@@ -759,62 +692,6 @@
       }
       const wei = (BigInt(whole) * 1000000000000000000n) + BigInt(fraction);
       return wei.toString();
-    }
-
-    async function loadAutoRules() {
-      if (!currentAccount) {
-        autoRulesList.innerHTML = "";
-        return;
-      }
-      try {
-        const res = await fetch(`/api/autotrade/rules?wallet=${encodeURIComponent(currentAccount)}`);
-        const data = await res.json();
-        autoRulesList.innerHTML = "";
-        let rows = [];
-        if (Array.isArray(data.rules)) {
-          rows = data.rules;
-        }
-        for (let i = 0; i < rows.length; i += 1) {
-          const row = rows[i];
-          let isSellSide = false;
-          if (String(row.side).toUpperCase() === "SELL") {
-            isSellSide = true;
-          }
-          if (isSellSide) {
-            const block = document.createElement("div");
-            block.className = "stat-row";
-            const left = document.createElement("span");
-            left.className = "muted";
-            left.textContent = `${row.symbol} >= $${(Number(row.triggerPriceCents) / 100).toFixed(2)} qty ${Number(row.qtyWei) / 1e18}`;
-            const rightButton = document.createElement("button");
-            rightButton.className = "btn btn-auto";
-            rightButton.style.padding = "6px 10px";
-            rightButton.style.fontSize = "12px";
-            let buttonText = "Enable";
-            if (row.enabled) {
-              buttonText = "Disable";
-            }
-            rightButton.textContent = buttonText;
-            rightButton.addEventListener("click", async function () {
-              let url = "/api/autotrade/rules/enable";
-              if (row.enabled) {
-                url = "/api/autotrade/rules/disable";
-              }
-              await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ ruleId: row.id }),
-              });
-              await loadAutoRules();
-            });
-            block.appendChild(left);
-            block.appendChild(rightButton);
-            autoRulesList.appendChild(block);
-          }
-        }
-      } catch {
-        autoRulesList.innerHTML = "";
-      }
     }
 
     async function placeLimitOrder(side, priceCents, qty) {
@@ -887,54 +764,6 @@
           sellStatus.textContent = "Order failed";
         }
       }
-    });
-
-    autoButton.addEventListener("click", async function () {
-      let blocked = false;
-      if (symbolLifecycle === "FROZEN" || symbolLifecycle === "DELISTED") {
-        blocked = true;
-      }
-      if (blocked) {
-        autoStatus.textContent = `${symbolLabel.textContent} is ${symbolLifecycle} by admin`;
-        return;
-      }
-      const priceCents = parsePriceToCents(autoPriceInput.value);
-      const autoQtyRaw = Number(autoQtyInput.value);
-      const autoQty = Math.floor(autoQtyRaw);
-      if (!Number.isFinite(autoQty) || autoQty < 10) {
-        autoStatus.textContent = "Order size must be at least 10";
-        return;
-      }
-      if (autoQty % 10 !== 0) {
-        autoStatus.textContent = "Order size must be in steps of 10";
-        return;
-      }
-      const qtyWei = tokenTextToWei(String(autoQty));
-      autoStatus.textContent = "Submitting";
-      const res = await fetch("/api/autotrade/rules/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          wallet: currentAccount,
-          symbol: symbolLabel.textContent,
-          side: "SELL",
-          triggerPriceCents: priceCents,
-          qtyWei,
-          maxSlippageBps: 0,
-          enabled: true,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        let message = "Rule create failed";
-        if (data.error) {
-          message = data.error;
-        }
-        autoStatus.textContent = message;
-        return;
-      }
-      autoStatus.textContent = `Auto sell rule set id ${String(data.rule.id)}`;
-      await loadAutoRules();
     });
 
     loadLifecycleForCurrentSymbol();
