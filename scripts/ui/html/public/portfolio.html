@@ -437,17 +437,7 @@
     }
 
     function getDisplayLeveragedValues(item) {
-      const leverage = Number(item && item.leverage);
       let livePriceCents = Number(item && item.navCents);
-      let baseLivePriceCents = Number(item && item.basePriceCents);
-      const liveQuote = liveQuoteBySymbol[String(item && item.baseSymbol ? item.baseSymbol : "").toUpperCase()];
-      if (liveQuote && Number.isFinite(Number(liveQuote.priceCents)) && Number(liveQuote.priceCents) > 0) {
-        baseLivePriceCents = Number(liveQuote.priceCents);
-      }
-      if (Number.isFinite(baseLivePriceCents) && baseLivePriceCents > 0) {
-        livePriceCents = baseLivePriceCents;
-      }
-
       let changePct = null;
       const livePrice = Number(livePriceCents) / 100;
       const avgEntry = Number(item && item.avgEntryPriceCents) / 100;
@@ -456,37 +446,11 @@
         && livePrice > 0
         && Number.isFinite(avgEntry)
         && avgEntry > 0
-        && Number.isFinite(leverage)
-        && leverage > 0
       ) {
-        changePct = (((livePrice - avgEntry) / avgEntry) * leverage) * 100;
-      } else {
-        let baseChangeRaw = item && item.baseChangePct ? item.baseChangePct : Number.NaN;
-        if (liveQuote && liveQuote.changePercent !== null) {
-          baseChangeRaw = liveQuote.changePercent;
-        }
-        const baseChangePct = (typeof baseChangeRaw === "number" && Number.isFinite(baseChangeRaw))
-          ? baseChangeRaw
-          : NaN;
-        if (Number.isFinite(baseChangePct)) {
-          if (Number.isFinite(leverage) && leverage > 0) {
-            changePct = baseChangePct * leverage;
-          } else {
-            changePct = baseChangePct;
-          }
-        }
+        changePct = ((livePrice - avgEntry) / avgEntry) * 100;
       }
 
       let currentValueWei = toBigIntOrZero(item && item.currentValueWei);
-      const baseAtSnapshotCents = Number(item && item.basePriceCents);
-      if (
-        Number.isFinite(baseAtSnapshotCents)
-        && baseAtSnapshotCents > 0
-        && Number.isFinite(baseLivePriceCents)
-        && baseLivePriceCents > 0
-      ) {
-        currentValueWei = (currentValueWei * BigInt(Math.round(baseLivePriceCents))) / BigInt(Math.round(baseAtSnapshotCents));
-      }
 
       return {
         livePriceCents,
