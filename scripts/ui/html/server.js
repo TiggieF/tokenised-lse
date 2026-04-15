@@ -10575,6 +10575,56 @@ async function buildAwardLeaderboardForEpoch(awardAddress, epochId) {
   };
 }
 
+function getAwardCandidateEpochsFromSnapshot(snapshot, wallet, epochDurationSec, currentEpoch, limit) {
+  const epochs = [];
+  const seenEpochs = new Set();
+  if (!snapshot || !Array.isArray(snapshot.fills)) {
+    return epochs;
+  }
+  if (!Number.isFinite(epochDurationSec) || epochDurationSec <= 0) {
+    return epochs;
+  }
+  if (!Number.isFinite(currentEpoch) || currentEpoch <= 0) {
+    return epochs;
+  }
+  const normalizedWallet = normalizeAddress(wallet);
+  if (!normalizedWallet) {
+    return epochs;
+  }
+
+  for (let i = snapshot.fills.length - 1; i >= 0; i -= 1) {
+    const fill = snapshot.fills[i];
+    if (!fill) {
+      continue;
+    }
+    const makerTrader = normalizeAddress(fill.makerTrader);
+    const takerTrader = normalizeAddress(fill.takerTrader);
+    if (makerTrader !== normalizedWallet && takerTrader !== normalizedWallet) {
+      continue;
+    }
+
+    const timestampMs = Number(fill.timestampMs || 0);
+    if (!Number.isFinite(timestampMs) || timestampMs <= 0) {
+      continue;
+    }
+    const epochId = Math.floor(Math.floor(timestampMs / 1000) / epochDurationSec);
+    if (!Number.isFinite(epochId) || epochId < 0 || epochId >= currentEpoch) {
+      continue;
+    }
+    if (seenEpochs.has(epochId)) {
+      continue;
+    }
+
+    seenEpochs.add(epochId);
+    epochs.push(epochId);
+    if (epochs.length >= limit) {
+      break;
+    }
+  }
+
+  return epochs;
+}
+
 async function getAwardStatusSnapshot() {
   const deployments = loadDeployments();
   if (!deployments.award) {
@@ -10788,23 +10838,30 @@ app.get('/api/award/claimable', async (req, res) => {
     const epochResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochData }, 'latest']);
     const [currentEpochRaw] = awardInterface.decodeFunctionResult('currentEpoch', epochResult);
     const currentEpoch = Number(currentEpochRaw);
+    const epochDurationData = awardInterface.encodeFunctionData('EPOCH_DURATION', []);
+    const epochDurationResult = await hardhatRpc('eth_call', [{ to: deployments.award, data: epochDurationData }, 'latest']);
+    const [epochDurationRaw] = awardInterface.decodeFunctionResult('EPOCH_DURATION', epochDurationResult);
+    const epochDurationSec = Number(epochDurationRaw);
 
     let limitRaw = 5000;
     if (req.query.limit) {
       limitRaw = Number(req.query.limit);
     }
     const limit = Math.min(50000, Math.max(1, Number(limitRaw)));
-    const startEpoch = Math.max(0, currentEpoch - limit);
-    const cacheKey = `${wallet.toLowerCase()}:${currentEpoch}:${limit}`;
+    const snapshot = readIndexerSnapshot();
+    const candidateEpochs = getAwardCandidateEpochsFromSnapshot(
+      snapshot,
+      wallet,
+      epochDurationSec,
+      currentEpoch,
+      limit
+    );
+    const cacheKey = `${wallet.toLowerCase()}:${currentEpoch}:${epochDurationSec}:${limit}:${candidateEpochs.join(',')}`;
     const cached = readAwardCacheEntry(awardCache.claimable, cacheKey);
     if (cached) {
       return res.json(cached);
     }
-    const epochs = [];
-    for (let epochId = startEpoch; epochId < currentEpoch; epochId += 1) {
-      epochs.push(epochId);
-    }
-    const claimRows = await mapWithConcurrency(epochs, 4, async (epochId) => {
+    const claimRows = await mapWithConcurrency(candidateEpochs, 4, async (epochId) => {
       const winnerData = awardInterface.encodeFunctionData('isWinner', [BigInt(epochId), wallet]);
       const claimedData = awardInterface.encodeFunctionData('hasClaimed', [BigInt(epochId), wallet]);
       const [winnerResult, claimedResult] = await Promise.all([
@@ -11001,7 +11058,7 @@ app.get('/api/award/history', async (req, res) => {
 });
 
 app.post('/api/award/finalize', async (_req, res) => {
-  return res.status(400).json({ error: 'finalize removed in stage 13.5 use /api/award/claim' });
+  return res.status(400).json({ error: 'finalize removed use /api/award/claim' });
 });
 
 app.get('/api/aggregator/summary', async (req, res) => {
